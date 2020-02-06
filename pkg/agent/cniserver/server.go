@@ -38,6 +38,7 @@ import (
 	"github.com/vmware-tanzu/antrea/pkg/agent/interfacestore"
 	"github.com/vmware-tanzu/antrea/pkg/agent/openflow"
 	"github.com/vmware-tanzu/antrea/pkg/agent/types"
+	"github.com/vmware-tanzu/antrea/pkg/agent/util"
 	cnipb "github.com/vmware-tanzu/antrea/pkg/apis/cni/v1beta1"
 	"github.com/vmware-tanzu/antrea/pkg/apis/networking/v1beta1"
 	"github.com/vmware-tanzu/antrea/pkg/cni"
@@ -362,9 +363,9 @@ func (s *CNIServer) CmdAdd(ctx context.Context, request *cnipb.CniCmdRequest) (*
 
 	s.containerAccess.lockContainer(cniConfig.ContainerId)
 	defer s.containerAccess.unlockContainer(cniConfig.ContainerId)
-
+	podKey := util.GenerateContainerInterfaceName(string(cniConfig.K8S_POD_NAME), string(cniConfig.K8S_POD_NAMESPACE))
 	// Request IP Address from IPAM driver
-	ipamResult, err := ipam.ExecIPAMAdd(cniConfig.CniCmdArgs, cniConfig.IPAM.Type)
+	ipamResult, err := ipam.ExecIPAMAdd(cniConfig.CniCmdArgs, cniConfig.IPAM.Type, podKey)
 	if err != nil {
 		klog.Errorf("Failed to add IP addresses from IPAM driver: %v", err)
 		return s.ipamFailureResponse(err), nil
@@ -413,8 +414,9 @@ func (s *CNIServer) CmdDel(ctx context.Context, request *cnipb.CniCmdRequest) (
 	s.containerAccess.lockContainer(cniConfig.ContainerId)
 	defer s.containerAccess.unlockContainer(cniConfig.ContainerId)
 
+	podKey := util.GenerateContainerInterfaceName(string(cniConfig.K8S_POD_NAME), string(cniConfig.K8S_POD_NAMESPACE))
 	// Release IP to IPAM driver
-	if err := ipam.ExecIPAMDelete(cniConfig.CniCmdArgs, cniConfig.IPAM.Type); err != nil {
+	if err := ipam.ExecIPAMDelete(cniConfig.CniCmdArgs, cniConfig.IPAM.Type, podKey); err != nil {
 		klog.Errorf("Failed to delete IP addresses by IPAM driver: %v", err)
 		return s.ipamFailureResponse(err), nil
 	}

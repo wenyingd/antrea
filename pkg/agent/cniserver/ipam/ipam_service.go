@@ -16,6 +16,7 @@ package ipam
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/containernetworking/cni/pkg/invoke"
 	"github.com/containernetworking/cni/pkg/types/current"
@@ -35,6 +36,8 @@ type IPAMDriver interface {
 	Del(args *invoke.Args, networkConfig []byte) error
 	Check(args *invoke.Args, networkConfig []byte) error
 }
+
+var ipamResults = sync.Map{}
 
 func RegisterIPAMDriver(ipamType string, ipamDriver IPAMDriver) error {
 	if ipamDrivers == nil {
@@ -56,16 +59,38 @@ func argsFromEnv(cniArgs *cnipb.CniCmdArgs) *invoke.Args {
 	}
 }
 
-func ExecIPAMAdd(cniArgs *cnipb.CniCmdArgs, ipamType string) (*current.Result, error) {
+func ExecIPAMAdd(cniArgs *cnipb.CniCmdArgs, ipamType string, resultKey string) (*current.Result, error) {
+	// Return the cached IPAM result for the same Pod. It is used on Windows for CNI Add requests for both the workload
+	// and the infrastructure container, but only one IP address should be allocated the Pod.
+	obj, ok := ipamResults.Load(resultKey)
+	if ok {
+		result := obj.(*current.Result)
+		return result, nil
+	}
+
 	args := argsFromEnv(cniArgs)
 	driver := ipamDrivers[ipamType]
-	return driver.Add(args, cniArgs.NetworkConfiguration)
+	result, err := driver.Add(args, cniArgs.NetworkConfiguration)
+	if err != nil {
+		return nil, err
+	}
+	ipamResults.Store(resultKey, result)
+	return result, nil
 }
 
-func ExecIPAMDelete(cniArgs *cnipb.CniCmdArgs, ipamType string) error {
+func ExecIPAMDelete(cniArgs *cnipb.CniCmdArgs, ipamType string, resultKey string) error {
+	_, ok := ipamResults.Load(resultKey)
+	if !ok {
+		return nil
+	}
 	args := argsFromEnv(cniArgs)
 	driver := ipamDrivers[ipamType]
-	return driver.Del(args, cniArgs.NetworkConfiguration)
+	err := driver.Del(args, cniArgs.NetworkConfiguration)
+	if err != nil {
+		return err
+	}
+	ipamResults.Delete(resultKey)
+	return nil
 }
 
 func ExecIPAMCheck(cniArgs *cnipb.CniCmdArgs, ipamType string) error {

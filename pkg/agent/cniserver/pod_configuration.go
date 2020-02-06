@@ -17,16 +17,17 @@ package cniserver
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+
 	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/cni/pkg/version"
-	"github.com/containernetworking/plugins/pkg/ns"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog"
+
 	"github.com/vmware-tanzu/antrea/pkg/agent/interfacestore"
 	"github.com/vmware-tanzu/antrea/pkg/agent/util"
 	"github.com/vmware-tanzu/antrea/pkg/ovs/ovsconfig"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
-	"net"
 )
 
 type vethPair struct {
@@ -50,11 +51,19 @@ const (
 	ovsExternalIDPodNamespace = "pod-namespace"
 )
 
-func parseContainerIP(ips []*current.IPConfig) (net.IP, error) {
+func findContainerIPConfig(ips []*current.IPConfig) (*current.IPConfig, error) {
 	for _, ipc := range ips {
 		if ipc.Version == "4" {
-			return ipc.Address.IP, nil
+			return ipc, nil
 		}
+	}
+	return nil, fmt.Errorf("failed to find a valid IP address")
+}
+
+func parseContainerIP(ips []*current.IPConfig) (net.IP, error) {
+	ipc, err := findContainerIPConfig(ips)
+	if err == nil {
+		return ipc.Address.IP, nil
 	}
 	return nil, fmt.Errorf("failed to find a valid IP address")
 }
@@ -241,17 +250,9 @@ func (pc *podConfigurator) checkInterfaces(
 	containerID, containerNetNS, podName, podNamespace string,
 	containerIface *current.Interface,
 	prevResult *current.Result) error {
-	netns, err := ns.GetNS(containerNetNS)
-	if err != nil {
-		klog.Errorf("Failed to check netns config %s: %v", containerNetNS, err)
-		return err
-	}
-	defer netns.Close()
-
 	if containerVeth, err := pc.checkContainerInterface(
 		containerNetNS,
 		containerID,
-		netns,
 		containerIface,
 		prevResult.IPs,
 		prevResult.Routes); err != nil {
@@ -275,7 +276,7 @@ func (pc *podConfigurator) checkHostInterface(
 	containerVeth *vethPair,
 	containerIPs []*current.IPConfig,
 	interfaces []*current.Interface) error {
-	hostVeth, errlink := validateContainerPeerInterface(interfaces, containerVeth)
+	hostVeth, errlink := pc.validateContainerPeerInterface(interfaces, containerVeth)
 	if errlink != nil {
 		klog.Errorf("Failed to check container %s interface on the host: %v",
 			containerID, errlink)
