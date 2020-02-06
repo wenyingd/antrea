@@ -1,3 +1,17 @@
+// Copyright 2019 Antrea Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package cniserver
 
 import (
@@ -192,7 +206,6 @@ func parseContainerIfaceFromResults(cfgArgs *cnipb.CniCmdArgs, prevResult *curre
 
 func (pc *podConfigurator) checkContainerInterface(
 	containerNetns, containerID string,
-	netns ns.NetNS,
 	containerIface *current.Interface,
 	containerIPs []*current.IPConfig,
 	containerRoutes []*cnitypes.Route) (*vethPair, error) {
@@ -204,6 +217,12 @@ func (pc *podConfigurator) checkContainerInterface(
 		return nil, fmt.Errorf("sandbox in prevResult %s doesn't match configured netns: %s",
 			containerIface.Sandbox, containerNetns)
 	}
+	netns, err := ns.GetNS(containerNetns)
+	if err != nil {
+		klog.Errorf("Failed to check netns config %s: %v", containerNetns, err)
+		return nil, err
+	}
+	defer netns.Close()
 	// Check container interface configuration
 	if err := netns.Do(func(netNS ns.NetNS) error {
 		var errlink error
@@ -250,7 +269,7 @@ func validateContainerInterface(intf *current.Interface) (*vethPair, error) {
 	return veth, nil
 }
 
-func validateContainerPeerInterface(interfaces []*current.Interface, containerVeth *vethPair) (*vethPair, error) {
+func (pc *podConfigurator) validateContainerPeerInterface(interfaces []*current.Interface, containerVeth *vethPair) (*vethPair, error) {
 	// Interate all the passed interfaces and look up the host interface by
 	// matching the veth peer interface index.
 	for _, hostIntf := range interfaces {
