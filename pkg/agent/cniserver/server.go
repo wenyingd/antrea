@@ -320,13 +320,7 @@ func (s *CNIServer) validatePrevResult(cfgArgs *cnipb.CniCmdArgs, k8sCNIArgs *k8
 	podNamespace := string(k8sCNIArgs.K8S_POD_NAMESPACE)
 
 	// Find interfaces from previous configuration
-	var containerIntf *current.Interface
-	for _, intf := range prevResult.Interfaces {
-		if intf.Name == cfgArgs.Ifname {
-			containerIntf = intf
-			break
-		}
-	}
+	containerIntf := parseContainerIfaceFromResults(cfgArgs, prevResult)
 	if containerIntf == nil {
 		klog.Errorf("Failed to find interface %s of container %s", cfgArgs.Ifname, containerID)
 		return s.invalidNetworkConfigResponse("prevResult does not match network configuration"), nil
