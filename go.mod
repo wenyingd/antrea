@@ -5,6 +5,7 @@ go 1.13
 require (
 	github.com/Microsoft/hcsshim v0.8.6
 	github.com/TomCodeLV/OVSDB-golang-lib v0.0.0-20190103132138-cf96a9e61bd1
+	github.com/benmoss/go-powershell v0.0.0-20190925205200-09527df358ca
 	github.com/cenk/hub v1.0.1 // indirect
 	github.com/cenkalti/hub v1.0.1 // indirect
 	github.com/cenkalti/rpc2 v0.0.0-20180727162946-9642ea02d0aa // indirect
@@ -27,6 +28,7 @@ require (
 	github.com/j-keck/arping v1.0.0
 	github.com/json-iterator/go v1.1.6 // indirect
 	github.com/kevinburke/ssh_config v0.0.0-20190725054713-01f96b0aa0cd
+	github.com/rakelkar/gonetsh v0.0.0-20190930180311-e5c5ffe4bdf0
 	github.com/satori/go.uuid v1.2.0
 	github.com/spf13/cobra v0.0.5
 	github.com/spf13/pflag v1.0.3

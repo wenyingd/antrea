@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// +build linux darwin
 
 package iptables
 
@@ -64,7 +66,7 @@ var (
 )
 
 // Client knows how to set up host iptables rules Antrea requires.
-type Client struct {
+type client struct {
 	ipt         *iptables.IPTables
 	hostGateway string
 	nodeConfig  *types.NodeConfig
@@ -78,12 +80,12 @@ type Client struct {
 type chainRules map[string][][]string
 
 // NewClient constructs a Client instance for iptables operations.
-func NewClient() (*Client, error) {
+func NewClient() (Client, error) {
 	ipt, err := iptables.New()
 	if err != nil {
 		return nil, fmt.Errorf("error creating IPTables instance: %v", err)
 	}
-	return &Client{
+	return &client{
 		ipt:   ipt,
 		store: &sync.Map{},
 	}, nil
@@ -107,7 +109,7 @@ type rule struct {
 
 // Initialize sets up internal variables and ensures the iptables rules Antrea requires are set up.
 // It's idempotent and can be safely called on every startup.
-func (c *Client) Initialize(hostGateway string, serviceCIDR *net.IPNet, nodeConfig *types.NodeConfig, encapMode config.TrafficEncapModeType) error {
+func (c *client) Initialize(hostGateway string, serviceCIDR *net.IPNet, nodeConfig *types.NodeConfig, encapMode config.TrafficEncapModeType) error {
 	c.hostGateway = hostGateway
 	c.nodeConfig = nodeConfig
 	c.serviceCIDR = serviceCIDR
@@ -169,7 +171,7 @@ func (c *Client) Initialize(hostGateway string, serviceCIDR *net.IPNet, nodeConf
 
 // AddPeerCIDR adds iptables rules relevant to peerPodCIDR
 // It's idempotent and can be safely called on every startup.
-func (c *Client) AddPeerCIDR(peerPodCIDR *net.IPNet, peerNodeIP net.IP) error {
+func (c *client) AddPeerCIDR(peerPodCIDR *net.IPNet, peerNodeIP net.IP) error {
 	if !c.encapMode.NeedsEncapToPeer(peerNodeIP, c.nodeConfig.NodeIPAddr) {
 		// The default masquerading rule is all traffic in-port=gw0, out-port!=gw0. The rule
 		// should excludes to all traffic destined for peer Pod CIDRs.
@@ -196,7 +198,7 @@ func (c *Client) AddPeerCIDR(peerPodCIDR *net.IPNet, peerNodeIP net.IP) error {
 }
 
 // Reconcile removes stale antrea rules
-func (c *Client) Reconcile() error {
+func (c *client) Reconcile() error {
 	var antreaRules []struct {
 		table, chain, ruleStr string
 	}
@@ -291,7 +293,7 @@ func (c *Client) Reconcile() error {
 }
 
 // ensureChain checks if target chain already exists, creates it if not.
-func (c *Client) ensureChain(table string, chain string) error {
+func (c *client) ensureChain(table string, chain string) error {
 	oriChains, err := c.ipt.ListChains(table)
 	if err != nil {
 		return fmt.Errorf("error listing existing chains in table %s: %v", table, err)
@@ -307,7 +309,7 @@ func (c *Client) ensureChain(table string, chain string) error {
 }
 
 // ensureRule checks if target rule already exists, appends it if not.
-func (c *Client) ensureRule(table string, chain string, ruleSpec []string) error {
+func (c *client) ensureRule(table string, chain string, ruleSpec []string) error {
 	exist, err := c.ipt.Exists(table, chain, ruleSpec...)
 	if err != nil {
 		return fmt.Errorf("error checking if rule %v exists in table %s chain %s: %v", ruleSpec, table, chain, err)
@@ -323,7 +325,7 @@ func (c *Client) ensureRule(table string, chain string, ruleSpec []string) error
 }
 
 // storeRule saves rule for reconcile
-func (c *Client) storeRule(table string, chain string, ruleSpec []string) {
+func (c *client) storeRule(table string, chain string, ruleSpec []string) {
 	var chains chainRules = nil
 	if val, ok := c.store.Load(table); !ok {
 		chains = make(map[string][][]string)
@@ -338,7 +340,7 @@ func (c *Client) storeRule(table string, chain string, ruleSpec []string) {
 }
 
 // PrintStoredRules dumps stored ip rules for debugging.
-func (c *Client) PrintStoredRules() string {
+func (c *client) PrintStoredRules() string {
 	tables := []string{
 		NATTable,
 		FilterTable,
@@ -386,7 +388,7 @@ func compareRuleSpec(a, b []string) bool {
 }
 
 // IsInRuleStore returns true if rule is in rule store.
-func (c *Client) IsInRuleStore(table string, chain string, ruleSpec []string) bool {
+func (c *client) IsInRuleStore(table string, chain string, ruleSpec []string) bool {
 	var chains chainRules = nil
 	val, ok := c.store.Load(table)
 	if !ok {

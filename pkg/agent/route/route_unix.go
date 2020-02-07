@@ -11,6 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// +build linux darwin
 
 package route
 
@@ -40,15 +42,30 @@ const (
 	AntreaIPRulePriority = 300
 )
 
-// Client is route client.
-type Client struct {
-	nodeConfig *types.NodeConfig
-	encapMode  config.TrafficEncapModeType
-}
-
 type serviceRtTableConfig struct {
 	Idx  int
 	Name string
+}
+
+var (
+	// ServiceRtTable contains Antrea service route table information.
+	ServiceRtTable = &serviceRtTableConfig{Idx: 254, Name: "main"}
+)
+
+type hRoute struct {
+	route *netlink.Route
+}
+
+func (r *hRoute) add() error {
+	return netlink.RouteReplace(r.route)
+}
+
+// delete removes netlink.Route entry.
+func (r *hRoute) delete() error {
+	if err := netlink.RouteDel(r.route); err != nil && err != unix.ESRCH {
+		return err
+	}
+	return nil
 }
 
 func (s *serviceRtTableConfig) String() string {
@@ -57,16 +74,6 @@ func (s *serviceRtTableConfig) String() string {
 
 func (s *serviceRtTableConfig) IsMainTable() bool {
 	return s.Name == "main"
-}
-
-var (
-	// ServiceRtTable contains Antrea service route table information.
-	ServiceRtTable = &serviceRtTableConfig{Idx: 254, Name: "main"}
-)
-
-// NewClient returns a route client
-func NewClient() *Client {
-	return &Client{}
 }
 
 // Initialize sets up route tables for Antrea.
@@ -106,7 +113,7 @@ func (c *Client) Initialize(nodeConfig *types.NodeConfig, encapMode config.Traff
 	if gwConfig != nil && c.nodeConfig.PodCIDR != nil {
 		// Add local podCIDR if applicable to service rt table.
 		route := &netlink.Route{
-			LinkIndex: util.GetNetLink(gwConfig.Link).Attrs().Index,
+			LinkIndex: util.GetNetLinkIndex(gwConfig.Link),
 			Scope:     netlink.SCOPE_LINK,
 			Dst:       c.nodeConfig.PodCIDR,
 			Table:     ServiceRtTable.Idx,
@@ -142,7 +149,7 @@ func (c *Client) Initialize(nodeConfig *types.NodeConfig, encapMode config.Traff
 }
 
 // AddPeerCIDRRoute adds routes to route tables for Antrea use.
-func (c *Client) AddPeerCIDRRoute(peerPodCIDR *net.IPNet, gwLinkIdx int, peerNodeIP, peerGwIP net.IP) ([]*netlink.Route, error) {
+func (c *Client) AddPeerCIDRRoute(peerPodCIDR *net.IPNet, gwLinkIdx int, peerNodeIP, peerGwIP net.IP) ([]HostRoute, error) {
 	if peerPodCIDR == nil {
 		return nil, fmt.Errorf("empty peer pod CIDR")
 	}
@@ -189,19 +196,23 @@ func (c *Client) AddPeerCIDRRoute(peerPodCIDR *net.IPNet, gwLinkIdx int, peerNod
 	for _, route := range routes {
 		if err := netlink.RouteReplace(route); err != nil {
 			deleteRtFn()
-			err = fmt.Errorf("failed to install route to peer %s with netlink: %v", peerNodeIP, err)
+			err = fmt.Errorf("failed to install route to peer %s with netlink for route %+v: %v", peerNodeIP, route, err)
 			return nil, err
 		}
 	}
-	return routes, err
+	hrs := []HostRoute{}
+	for _, rt := range routes {
+		hrs = append(hrs, &hRoute{rt})
+	}
+	return hrs, err
 }
 
 // ListPeerCIDRRoute returns list of routes from peer and local CIDRs
-func (c *Client) ListPeerCIDRRoute() (map[string][]*netlink.Route, error) {
+func (c *Client) ListPeerCIDRRoute() (map[string][]HostRoute, error) {
 	// get all routes on gw0 from service table.
 	filter := &netlink.Route{
 		Table:     ServiceRtTable.Idx,
-		LinkIndex: util.GetNetLink(c.nodeConfig.GatewayConfig.Link).Attrs().Index}
+		LinkIndex: util.GetNetLinkIndex(c.nodeConfig.GatewayConfig.Link)}
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, filter, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 	if err != nil {
 		return nil, err
@@ -246,18 +257,15 @@ func (c *Client) ListPeerCIDRRoute() (map[string][]*netlink.Route, error) {
 			}
 		}
 	}
-	return rtMap, nil
-}
-
-// DeletePeerCIDRRoute deletes routes.
-func (c *Client) DeletePeerCIDRRoute(routes []*netlink.Route) error {
-	for _, r := range routes {
-		klog.V(4).Infof("Deleting route %v", r)
-		if err := netlink.RouteDel(r); err != nil && err != unix.ESRCH {
-			return err
+	hrtMap := make(map[string][]HostRoute)
+	for key, rts := range rtMap {
+		rls := make([]HostRoute, len(rts))
+		for i := range rts {
+			rls[i] = &hRoute{rts[i]}
 		}
+		hrtMap[key] = rls
 	}
-	return nil
+	return hrtMap, nil
 }
 
 func (c *Client) readRtTable() (string, error) {
@@ -298,7 +306,7 @@ func (c *Client) RemoveServiceRouting() error {
 	// flush service table
 	filter := &netlink.Route{
 		Table:     AntreaServiceTableIdx,
-		LinkIndex: util.GetNetLink(c.nodeConfig.GatewayConfig.Link).Attrs().Index}
+		LinkIndex: util.GetNetLinkIndex(c.nodeConfig.GatewayConfig.Link)}
 	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, filter, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_OIF)
 	if err != nil {
 		return fmt.Errorf("route table(list): %w", err)

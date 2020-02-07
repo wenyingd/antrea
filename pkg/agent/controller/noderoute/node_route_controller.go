@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/containernetworking/plugins/pkg/ip"
-	"github.com/vishvananda/netlink"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -70,10 +69,11 @@ type Controller struct {
 	tunnelType       ovsconfig.TunnelType
 	// Pre-shared key for IPSec IKE authentication. If not empty IPSec tunnels will
 	// be enabled.
-	ipsecPSK       string
-	gatewayLink    netlink.Link
+	ipsecPSK string
+	// gatewayLink is the index of the gateway interface.
+	gatewayLink    int
 	routeClient    *route.Client
-	iptablesClient *iptables.Client
+	iptablesClient iptables.Client
 	encapMode      config.TrafficEncapModeType
 	// installedNodes records routes and flows installation states of Nodes.
 	// The key is the host name of the Node, the value is the route to the Node.
@@ -96,7 +96,7 @@ func NewNodeRouteController(
 	tunnelType ovsconfig.TunnelType,
 	ipsecPSK string,
 	routeClient *route.Client,
-	iptablesClient *iptables.Client,
+	iptablesClient iptables.Client,
 	encapModeStr string,
 ) *Controller {
 	nodeInformer := informerFactory.Core().V1().Nodes()
@@ -111,7 +111,7 @@ func NewNodeRouteController(
 		ovsBridgeClient:  ovsBridgeClient,
 		interfaceStore:   interfaceStore,
 		nodeConfig:       nodeConfig,
-		gatewayLink:      util.GetNetLink(nodeConfig.GatewayConfig.Link),
+		gatewayLink:      util.GetNetLinkIndex(nodeConfig.GatewayConfig.Link),
 		installedNodes:   &sync.Map{},
 		tunnelType:       tunnelType,
 		ipsecPSK:         ipsecPSK,
@@ -409,7 +409,7 @@ func (c *Controller) deleteNodeRoute(nodeName string) error {
 	klog.Infof("Deleting routes and flows to Node %s", nodeName)
 
 	entry, flowsAreInstalled := c.installedNodes.Load(nodeName)
-	if routes, ok := entry.([]*netlink.Route); ok {
+	if routes, ok := entry.([]route.HostRoute); ok {
 		if err := c.routeClient.DeletePeerCIDRRoute(routes); err != nil {
 			return fmt.Errorf("failed to delete the route to Node %s: %v", nodeName, err)
 		}
@@ -489,7 +489,7 @@ func (c *Controller) addNodeRoute(nodeName string, node *v1.Node) error {
 		c.installedNodes.Store(nodeName, nil)
 	}
 
-	routes, err := c.routeClient.AddPeerCIDRRoute(peerPodCIDR, c.gatewayLink.Attrs().Index, peerNodeIP, peerGatewayIP)
+	routes, err := c.routeClient.AddPeerCIDRRoute(peerPodCIDR, c.gatewayLink, peerNodeIP, peerGatewayIP)
 	if err == nil {
 		c.installedNodes.Store(nodeName, routes)
 		err = c.iptablesClient.AddPeerCIDR(peerPodCIDR, peerNodeIP)
