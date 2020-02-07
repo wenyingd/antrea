@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/containernetworking/plugins/pkg/ip"
-	"github.com/vishvananda/netlink"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -53,6 +52,13 @@ const (
 	ovsExternalIDNodeName = "node-name"
 )
 
+// hostRoute is a struct to describe the routing configuration on the host.
+type hostRoute struct {
+	destination *net.IPNet
+	linkIndex   int
+	gateway     net.IP
+}
+
 // Controller is responsible for setting up necessary IP routes and Openflow entries for inter-node traffic.
 type Controller struct {
 	kubeClient       clientset.Interface
@@ -67,8 +73,9 @@ type Controller struct {
 	tunnelType       ovsconfig.TunnelType
 	// Pre-shared key for IPSec IKE authentication. If not empty IPSec tunnels will
 	// be enabled.
-	ipsecPSK    string
-	gatewayLink netlink.Link
+	ipsecPSK string
+	// gatewayLink is the index of the gateway interface.
+	gatewayLink int
 	// installedNodes records routes and flows installation states of Nodes.
 	// The key is the host name of the Node, the value is the route to the Node.
 	// If the flows of the Node are installed, the installedNodes must contains a key which is the host name.
@@ -91,7 +98,7 @@ func NewNodeRouteController(
 	ipsecPSK string,
 ) *Controller {
 	nodeInformer := informerFactory.Core().V1().Nodes()
-	link, _ := netlink.LinkByName(config.GatewayConfig.Name)
+	link := getGatewayIndex(config.GatewayConfig.Name)
 
 	controller := &Controller{
 		kubeClient:       kubeClient,
@@ -147,21 +154,6 @@ func (c *Controller) enqueueNode(obj interface{}) {
 	}
 }
 
-// listRoutes reads all the routes for the gateway and returns them as a map with the destination
-// subnet as the key.
-func (c *Controller) listRoutes() (routes map[string]*netlink.Route, err error) {
-	routes = make(map[string]*netlink.Route)
-	routeList, err := netlink.RouteList(c.gatewayLink, netlink.FAMILY_V4)
-	if err != nil {
-		return routes, err
-	}
-	for idx := 0; idx < len(routeList); idx++ {
-		route := &routeList[idx]
-		routes[route.Dst.String()] = route
-	}
-	return routes, nil
-}
-
 // removeStaleGatewayRoutes removes all the gateway routes which no longer correspond to a Node in
 // the cluster. If the antrea agent restarts and Nodes have left the cluster, this function will
 // take care of removing routes which are no longer valid.
@@ -193,7 +185,7 @@ func (c *Controller) removeStaleGatewayRoutes() error {
 	// cluster.
 	klog.V(4).Infof("Need to delete %d routes", len(routes))
 	for _, route := range routes {
-		if err := netlink.RouteDel(route); err != nil {
+		if err := deleteRoute(route); err != nil {
 			klog.Errorf("error when deleting route '%v': %v", route, err)
 		}
 	}
@@ -383,7 +375,7 @@ func (c *Controller) deleteNodeRoute(nodeName string) error {
 
 	route, flowsAreInstalled := c.installedNodes.Load(nodeName)
 	if route != nil {
-		if err := netlink.RouteDel(route.(*netlink.Route)); err != nil {
+		if err := deleteRoute(route.(*hostRoute)); err != nil {
 			return fmt.Errorf("failed to delete the route to Node %s: %v", nodeName, err)
 		}
 		c.installedNodes.Store(nodeName, nil)
@@ -470,17 +462,13 @@ func (c *Controller) addNodeRoute(nodeName string, node *v1.Node) error {
 	}
 
 	// install route
-	route := &netlink.Route{
-		Dst:       peerPodCIDR,
-		Flags:     int(netlink.FLAG_ONLINK),
-		LinkIndex: c.gatewayLink.Attrs().Index,
-		Gw:        peerGatewayIP,
+	route := &hostRoute{
+		destination: peerPodCIDR,
+		linkIndex:   c.gatewayLink,
+		gateway:     peerGatewayIP,
 	}
-
-	// RouteReplace will add the route if it's missing or update it if it's already
-	// present (as is the case for agent restarts).
-	if err = netlink.RouteReplace(route); err != nil {
-		return fmt.Errorf("failed to install route to Node %s with netlink: %v", nodeName, err)
+	if err := addRoute(nodeName, route); err != nil {
+		return err
 	}
 	c.installedNodes.Store(nodeName, route)
 	return nil
