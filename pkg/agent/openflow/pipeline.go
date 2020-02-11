@@ -55,6 +55,7 @@ const (
 	markTrafficFromGateway   = 1
 	markTrafficFromLocal     = 2
 	markTrafficFromPatchPort = 3
+	markTrafficFromUplink    = 4
 )
 
 var (
@@ -63,6 +64,9 @@ var (
 	ofPortMarkRange = binding.Range{16, 16}
 	// ofPortRegRange takes a 32-bit range of register portCacheReg to cache the ofPort number of the interface.
 	ofPortRegRange = binding.Range{0, 31}
+	// snatMarkRange takes the 17th bit of register marksReg to indicate if the packet needs to be SNATed with Node's IP
+	// or not. Its value is 0x1 if yes.
+	snatMarkRange = binding.Range{17, 17}
 )
 
 type regType uint
@@ -87,8 +91,11 @@ const (
 
 	ctZone = 0xfff0
 
-	portFoundMark = 0x1
+	portFoundMark   = 0x1
+	snatRequireMark = 0x1
+
 	gatewayCTMark = 0x20
+	snatCTMark    = 0x40
 )
 
 var (
@@ -576,6 +583,95 @@ func (c *client) localProbeFlow(localGatewayIP net.IP, category cookie.Category)
 		Action().ResubmitToTable(conntrackCommitTable).
 		Cookie(c.cookieAllocator.Request(category).Raw()).
 		Done()
+}
+
+func (c *client) snatFlows(uplinkOfport uint32, bridgeLocalPort int, nodeIP net.IP, category cookie.Category) []binding.Flow {
+	snatIPRange := &binding.IPRange{nodeIP, nodeIP}
+	vMACInt, _ := strconv.ParseUint(strings.Replace(globalVirtualMAC.String(), ":", "", -1), 16, 64)
+	flows := []binding.Flow{
+		// Resubmit packets from the uplink interface to conntrackTable.
+		c.pipeline[classifierTable].BuildFlow(priorityNormal).
+			MatchProtocol(binding.ProtocolIP).
+			MatchInPort(uplinkOfport).
+			Action().LoadRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			Action().ResubmitToTable(conntrackTable).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		// Enforce IP packet into the conntrack zone with SNAT. If the connection is SNATed, the reply packet should use
+		// Pod IP as the destination, and then resubmit to conntrackStateTable.
+		c.pipeline[conntrackTable].BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
+			Action().CT(false, conntrackStateTable, ctZone).NAT().CTDone().
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		// Rewrite dMAC with the global vMAC if the packet is a reply of the Pod from the external addresses.
+		c.pipeline[conntrackStateTable].BuildFlow(priorityHigh).
+			MatchProtocol(binding.ProtocolIP).
+			MatchCTStateNew(false).MatchCTStateTrk(true).
+			MatchCTMark(snatCTMark).
+			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			Action().LoadRange(binding.NxmFieldDstMAC, vMACInt, binding.Range{0, 47}).
+			Action().ResubmitToTable(dnatTable).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		// Resubmit the packets sent from local Pods to the external address to dnatTable.
+		c.pipeline[conntrackStateTable].BuildFlow(priorityNormal).
+			MatchProtocol(binding.ProtocolIP).
+			MatchCTStateNew(false).MatchCTStateTrk(true).
+			MatchCTMark(snatCTMark).
+			Action().ResubmitToTable(dnatTable).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		// Output none SNAT packets from the uplink interface to
+		c.pipeline[conntrackStateTable].BuildFlow(priorityNormal).
+			MatchProtocol(binding.ProtocolIP).
+			MatchInPort(uplinkOfport).
+			Action().Output(bridgeLocalPort).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		c.pipeline[conntrackCommitTable].BuildFlow(priorityNormal).
+			MatchProtocol(binding.ProtocolIP).
+			MatchCTStateNew(true).MatchCTStateTrk(true).
+			MatchRegRange(int(marksReg), snatRequireMark, snatMarkRange).
+			Action().CT(true, l2ForwardingOutTable, ctZone).
+			SNAT(snatIPRange, nil).
+			LoadToMark(snatCTMark).CTDone().
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+	}
+	return flows
+}
+
+func (c *client) l3ToExternalFlows(nodeIP net.IP, localSubnet net.IPNet, category cookie.Category) []binding.Flow {
+	flows := []binding.Flow{
+		c.pipeline[l3ForwardingTable].BuildFlow(priorityNormal).
+			MatchProtocol(binding.ProtocolIP).
+			MatchRegRange(int(marksReg), markTrafficFromLocal, binding.Range{0, 15}).
+			MatchCTMark(gatewayCTMark).
+			Action().ResubmitToTable(l2ForwardingCalcTable).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		c.pipeline[l3ForwardingTable].BuildFlow(priorityLow).
+			MatchProtocol(binding.ProtocolIP).
+			MatchRegRange(int(marksReg), markTrafficFromLocal, binding.Range{0, 15}).
+			MatchDstIP(nodeIP).
+			Action().ResubmitToTable(l2ForwardingCalcTable).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+		c.pipeline[l3ForwardingTable].BuildFlow(priorityLow).
+			MatchProtocol(binding.ProtocolIP).
+			MatchRegRange(int(marksReg), markTrafficFromLocal, binding.Range{0, 15}).
+			MatchDstIPNet(localSubnet).
+			Action().ResubmitToTable(l2ForwardingCalcTable).
+			Done(),
+		c.pipeline[l3ForwardingTable].BuildFlow(priorityMiss).
+			MatchProtocol(binding.ProtocolIP).
+			MatchRegRange(int(marksReg), markTrafficFromLocal, binding.Range{0, 15}).
+			Action().LoadRegRange(int(marksReg), snatRequireMark, snatMarkRange).
+			Action().ResubmitToTable(ingressRuleTable).
+			Cookie(c.cookieAllocator.Request(category).Raw()).
+			Done(),
+	}
+	return flows
 }
 
 // NewClient is the constructor of the Client interface.

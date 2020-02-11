@@ -142,7 +142,14 @@ func enableHNSOnOVS(hnsNet *hcsshim.HNSNetwork) error {
 	return err
 }
 
-// TODO: setupExternalNetworking installs Openflow entries to SNAT Pod using Node IP, and then Pod could access external addresses.
+// setupExternalNetworking installs Openflow entries to SNAT Pod using Node IP, and then Pod could access external addresses.
 func (i *Initializer) setupExternalNetworking() error {
+	subnetCIDR := i.nodeConfig.PodCIDR
+	hnsNet, _ := hcsshim.GetHNSNetworkByName(util.LocalHNSNetwork)
+	nodeIP := net.ParseIP(hnsNet.ManagementIP)
+	if err := i.ofClient.InstallExternalFlows(nodeIP, *subnetCIDR); err != nil {
+		klog.Errorf("Failed to setup SNAT openflow entries: %v", err)
+		return err
+	}
 	return nil
 }
