@@ -22,6 +22,8 @@ const (
 	DefaultTunPortName = "tun0"
 	DefaultTunOFPort   = 1
 	HostGatewayOFPort  = 2
+	UplinkOFPort       = 3
+	BridgeOFPort       = 0xfffffffe
 )
 
 type GatewayConfig struct {
