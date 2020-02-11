@@ -116,6 +116,41 @@ func (a *ofCTAction) move(fromField *openflow13.MatchField, toField *openflow13.
 	a.actions = append(a.actions, action)
 }
 
+func (a *ofCTAction) natAction(isSNAT bool, ipRange *IPRange, portRange *PortRange) CTAction {
+	action := openflow13.NewNXActionCTNAT()
+	if isSNAT {
+		action.SetSNAT()
+	} else {
+		action.SetDNAT()
+	}
+
+	// ipRange should not be nil. The check here is for code safety.
+	if ipRange != nil {
+		action.SetRangeIPv4Min(ipRange.MinIP)
+		action.SetRangeIPv4Max(ipRange.MaxIP)
+	}
+	if portRange != nil {
+		action.SetRangeProtoMin(&portRange.MinPort)
+		action.SetRangeProtoMax(&portRange.MaxPort)
+	}
+	a.actions = append(a.actions, action)
+	return a
+}
+
+func (a *ofCTAction) SNAT(ipRange *IPRange, portRange *PortRange) CTAction {
+	return a.natAction(true, ipRange, portRange)
+}
+
+func (a *ofCTAction) DNAT(ipRange *IPRange, portRange *PortRange) CTAction {
+	return a.natAction(false, ipRange, portRange)
+}
+
+func (a *ofCTAction) NAT() CTAction {
+	action := openflow13.NewNXActionCTNAT()
+	a.actions = append(a.actions, action)
+	return a
+}
+
 // CTDone sets the conntrack action in the Openflow rule and it returns FlowBuilder.
 func (a *ofCTAction) CTDone() FlowBuilder {
 	a.builder.Flow.ConnTrack(a.commit, a.force, &a.ctTable, &a.ctZone, a.actions...)
