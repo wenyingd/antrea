@@ -12,7 +12,6 @@ import (
 )
 
 const (
-	OVSRunDir          = "/var/run/openvswitch"
 	ofTableExistsError = "Table already exists"
 )
 
