@@ -501,7 +501,7 @@ func (s *CNIServer) Run(stopCh <-chan struct{}) {
 	if err := os.MkdirAll(filepath.Dir(s.cniSocket), 0755); err != nil {
 		klog.Fatalf("Failed to create directory %s: %v", filepath.Dir(s.cniSocket), err)
 	}
-	listener, err := net.Listen("unix", s.cniSocket)
+	listener, err := Listen(s.cniSocket)
 	if err != nil {
 		klog.Fatalf("Failed to bind on %s: %v", s.cniSocket, err)
 	}

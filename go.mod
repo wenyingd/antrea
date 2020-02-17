@@ -3,6 +3,7 @@ module github.com/vmware-tanzu/antrea
 go 1.13
 
 require (
+	github.com/Microsoft/go-winio v0.4.14
 	github.com/Microsoft/hcsshim v0.8.6
 	github.com/TomCodeLV/OVSDB-golang-lib v0.0.0-20200116135253-9bbdfadcd881
 	github.com/benmoss/go-powershell v0.0.0-20190925205200-09527df358ca
