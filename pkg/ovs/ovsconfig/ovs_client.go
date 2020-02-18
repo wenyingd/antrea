@@ -171,12 +171,41 @@ func (br *OVSBridge) create() Error {
 		Row:   bridge,
 	})
 
-	mutateSet := helpers.MakeOVSDBSet(map[string]interface{}{
+	interf := Interface{
+		Name: br.name,
+		Type: "internal",
+	}
+	ifNamedUUID := tx.Insert(dbtransaction.Insert{
+		Table: "Interface",
+		Row:   interf,
+	})
+
+	port := Port{
+		Name: br.name,
+		Interfaces: helpers.MakeOVSDBSet(map[string]interface{}{
+			"named-uuid": []string{ifNamedUUID},
+		}),
+	}
+	portNamedUUID := tx.Insert(dbtransaction.Insert{
+		Table: "Port",
+		Row:   port,
+	})
+
+	portMutateSet := helpers.MakeOVSDBSet(map[string]interface{}{
+		"named-uuid": []string{portNamedUUID},
+	})
+	tx.Mutate(dbtransaction.Mutate{
+		Table:     "Bridge",
+		Mutations: [][]interface{}{{"ports", "insert", portMutateSet}},
+		Where:     [][]interface{}{{"name", "==", br.name}},
+	})
+
+	brMutateSet := helpers.MakeOVSDBSet(map[string]interface{}{
 		"named-uuid": []string{namedUUID},
 	})
 	tx.Mutate(dbtransaction.Mutate{
 		Table:     "Open_vSwitch",
-		Mutations: [][]interface{}{{"bridges", "insert", mutateSet}},
+		Mutations: [][]interface{}{{"bridges", "insert", brMutateSet}},
 	})
 
 	res, err, temporary := tx.Commit()
