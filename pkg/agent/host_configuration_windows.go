@@ -17,6 +17,7 @@ package agent
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/Microsoft/hcsshim"
@@ -223,6 +224,13 @@ func (i *Initializer) prepareOVSBridge() error {
 	}
 	ifIpAddr := net.IPNet{IP: ipAddr, Mask: ipNet.Mask}
 	klog.Infof("Found hns network management ipAddr: %s", ifIpAddr.String())
+	// Set datapathID of OVS bridge
+	datapathID := strings.Replace(hnsNetwork.SourceMac, ":", "", -1)
+	datapathID = "00" + datapathID
+	if err = i.ovsBridgeClient.SetDatapathID(datapathID); err != nil {
+		klog.Errorf("Failed to set datapath_id %s: %v", datapathID, err)
+		return err
+	}
 	// Create uplink port
 	uplinkPortUUId, err := i.ovsBridgeClient.CreateUplinkPort(uplink.Name, uplink.Name, types.UplinkOFPort, nil)
 	if err != nil {

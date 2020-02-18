@@ -31,6 +31,7 @@ type OVSBridgeClient interface {
 	Delete() Error
 	GetExternalIDs() (map[string]string, Error)
 	SetExternalIDs(externalIDs map[string]interface{}) Error
+	SetDatapathID(datapathID string) Error
 	CreatePort(name, ifDev string, externalIDs map[string]interface{}) (string, Error)
 	CreateInternalPort(name string, ofPortRequest int32, externalIDs map[string]interface{}) (string, Error)
 	CreateTunnelPort(name string, tunnelType TunnelType, ofPortRequest int32) (string, Error)

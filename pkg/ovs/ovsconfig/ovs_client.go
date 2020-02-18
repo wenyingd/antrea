@@ -274,6 +274,28 @@ func (br *OVSBridge) SetExternalIDs(externalIDs map[string]interface{}) Error {
 	return nil
 }
 
+// SetDatapathID sets the provided datapath ID to the bridge.
+// Whenever a bridge reconfigures (ports are added or /removed) and pick
+// a different MAC address and has not a datapath ID configured, it will change
+// its datapath ID.
+func (br *OVSBridge) SetDatapathID(datapathID string) Error {
+	tx := br.ovsdb.Transaction(openvSwitchSchema)
+	otherConfig := map[string]interface{}{"datapath_id": datapathID}
+	tx.Update(dbtransaction.Update{
+		Table: "Bridge",
+		Where: [][]interface{}{{"name", "==", br.name}},
+		Row: map[string]interface{}{
+			"other_config": helpers.MakeOVSDBMap(otherConfig),
+		},
+	})
+	_, err, temporary := tx.Commit()
+	if err != nil {
+		klog.Error("Transaction failed", err)
+		return NewTransactionError(err, temporary)
+	}
+	return nil
+}
+
 // GetPortUUIDList returns UUIDs of all ports on the bridge.
 func (br *OVSBridge) GetPortUUIDList() ([]string, Error) {
 	tx := br.ovsdb.Transaction(openvSwitchSchema)
