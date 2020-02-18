@@ -106,6 +106,14 @@ func ReleaseOSManagement(networkName string) error {
 	return err
 }
 
+// ConfigureMacAddress set specified MAC address on interface
+func ConfigureMacAddress(ifaceName string, macConfig net.HardwareAddr) error {
+	macAddr := strings.Replace(macConfig.String(), ":", "", -1)
+	cmd := fmt.Sprintf("Set-NetAdapterAdvancedProperty -Name %s -RegistryKeyword NetworkAddress -RegistryValue %s",
+		ifaceName, macAddr)
+	return invokePSCommand(cmd)
+}
+
 // WindowsHyperVInstalled checks if the Hyper-V feature is enabled on the host.
 func WindowsHyperVInstalled() (bool, error) {
 	cmd := "$(Get-WindowsFeature Hyper-V).InstallState"
@@ -206,4 +214,36 @@ func GetNetLinkIndex(dev string) int {
 		klog.Fatalf("cannot find dev %s: %w", dev, err)
 	}
 	return link.Index
+}
+
+func RemoveAddress(ifaceName string) error {
+	cmd := fmt.Sprintf("Remove-NetIPAddress -InterfaceAlias %s", ifaceName)
+	return invokePSCommand(cmd)
+}
+
+func GetAdapterIPv4Addr(adapterName string) (*net.IPNet, error) {
+	adapter, err := net.InterfaceByName(adapterName)
+	if err != nil {
+		return nil, err
+	}
+	addrs, err := adapter.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range addrs {
+		if ip, ok := ip.(*net.IPNet); ok {
+			if ip.IP.To4() != nil {
+				return ip, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("failed to find a valid IP on adapter %s", adapterName)
+}
+
+func GetAdapterMacAddr(adapterName string) (net.HardwareAddr, error) {
+	adapter, err := net.InterfaceByName(adapterName)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.HardwareAddr, nil
 }

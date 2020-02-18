@@ -28,10 +28,25 @@ import (
 	"github.com/vmware-tanzu/antrea/pkg/agent/util"
 )
 
+const HNSNetworkType = "Transparent"
+
 func (i *Initializer) configureGatewayInterface(gatewayIface *interfacestore.InterfaceConfig) error {
 	// Set host gateway interface up.
-	if err := util.EnableHostInterface(i.hostGateway); err != nil {
-		klog.Errorf("Failed to set host link for %s up: %v", i.hostGateway, err)
+	// There's delay before gateway is realized by OS
+	err := func() error {
+		for retry := 0; retry < maxRetryForHostLink; retry++ {
+			if err := util.EnableHostInterface(i.hostGateway); err != nil {
+				klog.Info("Try to set gateway %s up failed: %v", i.hostGateway, err)
+				time.Sleep(1 * time.Second)
+			} else {
+				return nil
+			}
+		}
+		return fmt.Errorf("timeout to set gateway %s up", i.hostGateway)
+	}()
+
+	if err != nil {
+		klog.Errorf("Failed to set gateway %s up: %v", i.hostGateway, err)
 		return err
 	}
 
@@ -108,8 +123,36 @@ func (i *Initializer) prepareHostNetworking() error {
 	}
 	// Create new HNS Network.
 	subnetCIDR := i.nodeConfig.PodCIDR
-	hnsNet, err := util.CreateHNSNetwork(util.LocalHNSNetwork, subnetCIDR, i.nodeConfig.NodeIPAddr)
+	_, uplink, err := util.GetIPNetDeviceFromIP(i.nodeConfig.NodeIPAddr.IP)
 	if err != nil {
+		return err
+	}
+	macAddr, err := util.GetAdapterMacAddr(uplink.Name)
+	if err != nil {
+		return err
+	}
+	hnsNet := &hcsshim.HNSNetwork{
+		Name:               util.LocalHNSNetwork,
+		Type:               HNSNetworkType,
+		NetworkAdapterName: uplink.Name,
+		Subnets: []hcsshim.Subnet{
+			{
+				AddressPrefix:  subnetCIDR.String(),
+				GatewayAddress: i.nodeConfig.GatewayConfig.IP.String(),
+			},
+		},
+		ManagementIP: i.nodeConfig.NodeIPAddr.IP.String(),
+		SourceMac:    macAddr.String(),
+	}
+	if err != nil {
+		return err
+	}
+
+	// Release management of uplink interface from OS
+	// Do the operation twice because there is always error info in first operation
+	util.ReleaseOSManagement(util.LocalHNSNetwork)
+	if err := util.ReleaseOSManagement(util.LocalHNSNetwork); err != nil {
+		klog.Errorf("Failed to release OS management for HNSNetwork %s", util.LocalHNSNetwork)
 		return err
 	}
 
@@ -149,6 +192,81 @@ func (i *Initializer) setupExternalNetworking() error {
 	nodeIP := net.ParseIP(hnsNet.ManagementIP)
 	if err := i.ofClient.InstallExternalFlows(nodeIP, *subnetCIDR); err != nil {
 		klog.Errorf("Failed to setup SNAT openflow entries: %v", err)
+		return err
+	}
+	return nil
+}
+
+// prepareOVSBridge config IP, MAC and add uplink interface on OVS bridge
+func (i *Initializer) prepareOVSBridge() error {
+	_, uplink, err := util.GetIPNetDeviceFromIP(i.nodeConfig.NodeIPAddr.IP)
+	if err != nil {
+		return err
+	}
+	// If uplink is already exists, return
+	if _, err := i.ovsBridgeClient.GetOFPort(uplink.Name); err == nil {
+		klog.Errorf("Uplink %s already exists, skip the configuration", uplink.Name)
+		return err
+	}
+
+	// Get IP, MAC of uplink interface
+	hnsNetwork, err := hcsshim.GetHNSNetworkByName(util.LocalHNSNetwork)
+	if err != nil {
+		klog.Errorf("Failed to get hnsnetwork %s: %v", util.LocalHNSNetwork, err)
+		return err
+	}
+	ipAddr, ipNet, err := net.ParseCIDR(hnsNetwork.ManagementIP)
+	if err != nil {
+		klog.Errorf("Failed to parse IP Address %s for HNSNetwork %s: %v",
+			hnsNetwork.ManagementIP, util.LocalHNSNetwork, err)
+		return err
+	}
+	ifIpAddr := net.IPNet{IP: ipAddr, Mask: ipNet.Mask}
+	klog.Infof("Found hns network management ipAddr: %s", ifIpAddr.String())
+	// Create uplink port
+	uplinkPortUUId, err := i.ovsBridgeClient.CreateUplinkPort(uplink.Name, uplink.Name, types.UplinkOFPort, nil)
+	if err != nil {
+		klog.Errorf("Failed to add uplink port %s: %v", uplink.Name, err)
+		return err
+	}
+	uplinkInterface := interfacestore.NewUplinkInterface(uplink.Name)
+	uplinkInterface.OVSPortConfig = &interfacestore.OVSPortConfig{uplinkPortUUId, types.UplinkOFPort}
+	i.ifaceStore.AddInterface(uplinkInterface)
+
+	// Move IP, MAC of from uplink interface to OVS bridge
+	brName, _ := i.ovsBridgeClient.GetOVSName()
+	err = util.EnableHostInterface(brName)
+	if err != nil {
+		return err
+	}
+	macAddr, err := net.ParseMAC(hnsNetwork.SourceMac)
+	if err != nil {
+		return err
+	}
+	err = util.ConfigureMacAddress(brName, macAddr)
+	if err != nil {
+		klog.Errorf("Failed to set Mac Address %s for interface %v: ", macAddr, uplink.Name, err)
+		return err
+	}
+	existingIpAddr, err := util.GetAdapterIPv4Addr(brName)
+	if err != nil && existingIpAddr.String() == i.nodeConfig.NodeIPAddr.String() {
+		return nil
+	}
+	if err := util.RemoveAddress(brName); err != nil {
+		klog.Errorf("Failed to remove existing IP Addresses for interface %v: ", brName, err)
+		return err
+	}
+	err = util.ConfigureAddress(brName, ifIpAddr)
+	if err != nil {
+		klog.Errorf("Failed to set IP Address %s for interface %v: ", ifIpAddr, brName, err)
+		return err
+	}
+	return nil
+}
+
+// initHostNetworkFlow install Openflow entries for uplink/bridge to support host networking
+func (i *Initializer) initHostNetworkFlow() error {
+	if err := i.ofClient.InstallHostNetworkFlows(types.UplinkOFPort, types.BridgeOFPort); err != nil {
 		return err
 	}
 	return nil

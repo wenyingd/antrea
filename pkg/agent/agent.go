@@ -116,6 +116,10 @@ func (i *Initializer) setupOVSBridge() error {
 		return err
 	}
 
+	if err := i.prepareOVSBridge(); err != nil {
+		return err
+	}
+
 	// Initialize interface cache
 	if err := i.initInterfaceStore(); err != nil {
 		return err
@@ -144,6 +148,7 @@ func (i *Initializer) initInterfaceStore() error {
 	}
 
 	ifaceList := make([]*interfacestore.InterfaceConfig, 0, len(ovsPorts))
+	uplinkIfName, _ := i.ovsBridgeClient.GetOVSName()
 	for index := range ovsPorts {
 		port := &ovsPorts[index]
 		ovsPort := &interfacestore.OVSPortConfig{
@@ -156,6 +161,12 @@ func (i *Initializer) initInterfaceStore() error {
 				Type:          interfacestore.GatewayInterface,
 				InterfaceName: port.Name,
 				OVSPortConfig: ovsPort}
+		case port.Name == uplinkIfName:
+			intf = &interfacestore.InterfaceConfig{
+				Type:          interfacestore.UplinkInterface,
+				InterfaceName: port.Name,
+				OVSPortConfig: ovsPort,
+			}
 		case port.IFType == ovsconfig.VXLANTunnel:
 			fallthrough
 		case port.IFType == ovsconfig.GeneveTunnel:
@@ -258,6 +269,12 @@ func (i *Initializer) initOpenFlowPipeline() error {
 	if err != nil {
 		klog.Errorf("Failed to initialize openflow client: %v", err)
 		return err
+	}
+
+	// Setup hostnetwork flows
+	if err := i.initHostNetworkFlow(); err != nil {
+		klog.Errorf("Failed to setup openflow entires for host network: %v", err)
+		return nil
 	}
 
 	// Setup flow entries for gateway interface, including classifier, skip spoof guard check,

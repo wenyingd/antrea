@@ -397,6 +397,11 @@ func ParseTunnelInterfaceOptions(portData *OVSPortData) (net.IP, string) {
 	return remoteIP, psk
 }
 
+// CreateUplinkPort create uplink port
+func (br *OVSBridge) CreateUplinkPort(name string, ifDev string, ofPortRequest int32, externalIDs map[string]interface{}) (string, Error) {
+	return br.createPort(name, ifDev, "", ofPortRequest, externalIDs, nil)
+}
+
 // CreatePort creates a port with the specified name on the bridge, and connects
 // the interface specified by ifDev to the port.
 // If externalIDs is not empty, the map key/value pairs will be set to the
@@ -670,4 +675,8 @@ func (br *OVSBridge) GetOVSVersion() (string, Error) {
 	}
 
 	return res[0].Rows[0].(map[string]interface{})["ovs_version"].(string), nil
+}
+
+func (br *OVSBridge) GetOVSName() (string, Error) {
+	return br.name, nil
 }

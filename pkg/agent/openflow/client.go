@@ -40,6 +40,9 @@ type Client interface {
 	// InstallGatewayFlows sets up flows related to an OVS gateway port, the gateway must exist.
 	InstallGatewayFlows(gatewayAddr net.IP, gatewayMAC net.HardwareAddr, gatewayOFPort uint32) error
 
+	// InstallHostNetworkFlows install Openflow entries for uplink/bridge to support host networking
+	InstallHostNetworkFlows(uplinkPort uint32, bridgeLocalPort uint32) error
+
 	// InstallClusterServiceCIDRFlows sets up the appropriate flows so that traffic can reach
 	// the different Services running in the Cluster. This method needs to be invoked once with
 	// the Cluster Service CIDR as a parameter.
@@ -257,6 +260,15 @@ func (c *client) InstallDefaultTunnelFlows(tunnelOFPort uint32) error {
 		return err
 	}
 	c.defaultTunnelFlows = []binding.Flow{flow}
+	return nil
+}
+
+func (c *client) InstallHostNetworkFlows(uplinkPort uint32, bridgeLocalPort uint32) error {
+	for _, flow := range c.hostNetworkForwardFlow(uplinkPort, bridgeLocalPort, cookie.Default) {
+		if err := c.flowOperations.Add(flow); err != nil {
+			return fmt.Errorf("failed to install host network flows: %v", err)
+		}
+	}
 	return nil
 }
 
