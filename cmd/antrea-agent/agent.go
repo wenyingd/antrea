@@ -89,6 +89,9 @@ func run(o *Options) error {
 	// Create an ifaceStore that caches network interfaces managed by this node.
 	ifaceStore := interfacestore.NewInterfaceStore()
 
+	// Create a cache for NSX Node configurations.
+	nsxNodeCache := noderoute.NewNodeCache()
+
 	// Initialize agent and node network.
 	agentInitializer := agent.NewInitializer(
 		k8sClient,
@@ -100,7 +103,8 @@ func run(o *Options) error {
 		o.config.HostGateway,
 		o.config.DefaultMTU,
 		serviceCIDRNet,
-		networkConfig)
+		networkConfig,
+		nsxNodeCache)
 	err = agentInitializer.Initialize()
 	if err != nil {
 		return fmt.Errorf("error initializing agent: %v", err)
@@ -115,7 +119,8 @@ func run(o *Options) error {
 		routeClient,
 		ifaceStore,
 		networkConfig,
-		nodeConfig)
+		nodeConfig,
+		nsxNodeCache)
 
 	// podUpdates is a channel for receiving Pod updates from CNIServer and
 	// notifying NetworkPolicyController to reconcile rules related to the
@@ -163,6 +168,9 @@ func run(o *Options) error {
 	go nodeRouteController.Run(stopCh)
 
 	go networkPolicyController.Run(stopCh)
+
+	podWatcher := cniserver.NewPodWatcher(k8sClient, ifaceStore, nodeConfig)
+	go podWatcher.Run(stopCh)
 
 	agentQuerier := querier.NewAgentQuerier(
 		nodeConfig,

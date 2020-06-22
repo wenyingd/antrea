@@ -62,6 +62,7 @@ type Initializer struct {
 	serviceCIDR     *net.IPNet // K8s Service ClusterIP CIDR
 	networkConfig   *config.NetworkConfig
 	nodeConfig      *config.NodeConfig
+	nsxNodeCache    *noderoute.NodeCache
 }
 
 func NewInitializer(
@@ -74,7 +75,8 @@ func NewInitializer(
 	hostGateway string,
 	mtu int,
 	serviceCIDR *net.IPNet,
-	networkConfig *config.NetworkConfig) *Initializer {
+	networkConfig *config.NetworkConfig,
+	nsxNodeCache *noderoute.NodeCache) *Initializer {
 	return &Initializer{
 		ovsBridgeClient: ovsBridgeClient,
 		client:          k8sClient,
@@ -86,6 +88,7 @@ func NewInitializer(
 		mtu:             mtu,
 		serviceCIDR:     serviceCIDR,
 		networkConfig:   networkConfig,
+		nsxNodeCache:    nsxNodeCache,
 	}
 }
 
@@ -529,6 +532,8 @@ func (i *Initializer) initNodeLocalConfig() error {
 		PodCIDR:         localSubnet,
 		NodeIPAddr:      localAddr,
 		UplinkNetConfig: new(config.AdapterNetConfig)}
+	// Add local Node into the cache.
+	i.nsxNodeCache.AddNSXNodeConfig(nodeName, node)
 	return nil
 }
 

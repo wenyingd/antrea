@@ -70,6 +70,8 @@ type Controller struct {
 	// The key is the host name of the Node, the value is the podCIDR of the Node.
 	// A node will be in the map after its flows and routes are installed successfully.
 	installedNodes *sync.Map
+
+	nsxNodeCache *NodeCache
 }
 
 // NewNodeRouteController instantiates a new Controller object which will process Node events
@@ -82,7 +84,8 @@ func NewNodeRouteController(
 	routeClient route.Interface,
 	interfaceStore interfacestore.InterfaceStore,
 	networkConfig *config.NetworkConfig,
-	nodeConfig *config.NodeConfig) *Controller {
+	nodeConfig *config.NodeConfig,
+	nsxNodeCache *NodeCache) *Controller {
 	nodeInformer := informerFactory.Core().V1().Nodes()
 	controller := &Controller{
 		kubeClient:       kubeClient,
@@ -96,7 +99,9 @@ func NewNodeRouteController(
 		nodeLister:       nodeInformer.Lister(),
 		nodeListerSynced: nodeInformer.Informer().HasSynced,
 		queue:            workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "noderoute"),
-		installedNodes:   &sync.Map{}}
+		installedNodes:   &sync.Map{},
+		nsxNodeCache:     nsxNodeCache,
+	}
 	nodeInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: func(cur interface{}) {
@@ -250,7 +255,9 @@ func (c *Controller) reconcile() error {
 // Run will create defaultWorkers workers (go routines) which will process the Node events from the
 // workqueue.
 func (c *Controller) Run(stopCh <-chan struct{}) {
-	defer c.queue.ShutDown()
+	defer func() {
+		c.queue.ShutDown()
+	}()
 
 	// If agent is running policy-only mode, it delegates routing to
 	// underlying network. Therefore it needs not know the routes to
@@ -381,6 +388,12 @@ func (c *Controller) deleteNodeRoute(nodeName string) error {
 		}
 		c.interfaceStore.DeleteInterface(interfaceConfig)
 	}
+
+	// Try to delete NSX Node into cache and then sync to nestdb. Since NSX Node is not a must for All Nodes, use WARNING
+	// for the error log.
+	if err := c.nsxNodeCache.DeleteNSXNodeConfig(nodeName); err != nil {
+		klog.Warningf("Failed to delete NSX Node in the cache: %v", err)
+	}
 	return nil
 }
 
@@ -436,6 +449,12 @@ func (c *Controller) addNodeRoute(nodeName string, node *v1.Node) error {
 		return err
 	}
 	c.installedNodes.Store(nodeName, peerPodCIDR)
+
+	// Try to add NSX Node into cache and then sync to nestdb. Since NSX Node is not a must for All Nodes, use WARNING
+	// for the error log.
+	if err := c.nsxNodeCache.AddNSXNodeConfig(nodeName, node); err != nil {
+		klog.Warningf("Failed to add NSX Node into cache, %v", err)
+	}
 	return err
 }
 

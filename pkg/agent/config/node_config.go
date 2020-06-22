@@ -84,3 +84,17 @@ type NetworkConfig struct {
 	EnableIPSecTunnel bool
 	IPSecPSK          string
 }
+
+// Node configurations retrieved from K8s APPI and used in NSX WCP integration
+type NSXNodeConfig struct {
+	// The Node's name used in Kubernetes.
+	Name string
+	// The Node's IP used in Kubernetes.
+	NodeIP net.IP
+	// The LogicalSwitch ID allocated to the Pods on the given Node.
+	LogicalSwitchID string
+	// The vtep IP configured on the given Node.
+	VtepIP net.IP
+	// The CIDR block to allocate Pod IPs out of.
+	PodCIDR *net.IPNet
+}
