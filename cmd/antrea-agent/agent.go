@@ -127,23 +127,23 @@ func run(o *Options) error {
 	// updated Pods.
 	podUpdates := make(chan v1beta1.PodReference, 100)
 	networkPolicyController := networkpolicy.NewNetworkPolicyController(antreaClientProvider, ofClient, ifaceStore, nodeConfig.Name, podUpdates)
-	isChaining := false
-	if networkConfig.TrafficEncapMode.IsNetworkPolicyOnly() {
-		isChaining = true
-	}
-	cniServer := cniserver.New(
-		o.config.CNISocket,
-		o.config.HostProcPathPrefix,
-		o.config.DefaultMTU,
-		nodeConfig,
-		k8sClient,
-		podUpdates,
-		isChaining,
-		routeClient)
-	err = cniServer.Initialize(ovsBridgeClient, ofClient, ifaceStore, o.config.OVSDatapathType)
-	if err != nil {
-		return fmt.Errorf("error initializing CNI server: %v", err)
-	}
+	//isChaining := false
+	//if networkConfig.TrafficEncapMode.IsNetworkPolicyOnly() {
+	//	isChaining = true
+	//}
+	//cniServer := cniserver.New(
+	//	o.config.CNISocket,
+	//	o.config.HostProcPathPrefix,
+	//	o.config.DefaultMTU,
+	//	nodeConfig,
+	//	k8sClient,
+	//	podUpdates,
+	//	isChaining,
+	//	routeClient)
+	//err = cniServer.Initialize(ovsBridgeClient, ofClient, ifaceStore, o.config.OVSDatapathType)
+	//if err != nil {
+	//	return fmt.Errorf("error initializing CNI server: %v", err)
+	//}
 
 	// TODO: we should call this after installing flows for initial node routes
 	//  and initial NetworkPolicies so that no packets will be mishandled.
@@ -159,7 +159,7 @@ func run(o *Options) error {
 	// exits, we will force exit.
 	stopCh := signals.RegisterSignalHandlers()
 
-	go cniServer.Run(stopCh)
+	//go cniServer.Run(stopCh)
 
 	informerFactory.Start(stopCh)
 
