@@ -453,3 +453,6 @@ antreaAgentTweaker:
   enable: false
   # -- Disable UDP tunnel offload on the transport interface.
   disableUdpTunnelOffload: false
+
+# -- Move all mutable resources in antrea.yml to antrea-resource-init-config ConfigMap.
+enableResourceInit: false

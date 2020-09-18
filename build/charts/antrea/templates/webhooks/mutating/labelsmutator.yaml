@@ -1,3 +1,4 @@
+{{- if not .Values.enableResourceInit }}
 {{- if .Values.webhooks.labelsMutator.enable }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
@@ -22,4 +23,5 @@ webhooks:
     admissionReviewVersions: ["v1", "v1beta1"]
     sideEffects: None
     timeoutSeconds: 5
+{{- end }}
 {{- end }}

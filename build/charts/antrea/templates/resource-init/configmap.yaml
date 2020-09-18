@@ -1,0 +1,35 @@
+{{- if .Values.enableResourceInit }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: antrea-resource-init-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: antrea
+data:
+  init-resources.yaml: |-
+    # Move all "mutable" resources from antrea.yml to antrea-resource-init-config
+    # ConfigMap.
+    # So after Antrea controller updates the resource, TKGS GCM will not replace
+    # the resources with originl spec.
+    # The ConfigMap is mounted to antrea-resource-init pod, and antrea-resource-init
+    # will use server-side apply to create or patch the resource.
+{{- /*
+This is tricky. We need to clone the context and modify .Values.enableResourceInit
+to false to render the templates for mutable resources and append them to init-resources.yaml.
+*/}}
+{{- $context :=  (dict "Values" (dict "enableResourceInit" false)) | mustMergeOverwrite (deepCopy .) }}
+{{- range tuple "/webhooks/mutating/crdmutator.yaml"
+                "/webhooks/mutating/labelsmutator.yaml"
+                "/webhooks/validating/crdvalidator.yaml"
+                "/controller/apiservices.yaml"
+                "/crds/clustergroup.yaml"
+                "/agent/tweakerconfigmap.yaml"
+}}
+{{- $template := include (print $.Template.BasePath .) $context | trim }}
+{{- if not (eq $template "") }}
+{{- "---" | nindent 4 }}
+{{- $template | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- end }}

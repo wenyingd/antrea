@@ -1,3 +1,4 @@
+{{- if not .Values.enableResourceInit }}
 {{- if .Values.antreaAgentTweaker.enable }}
 apiVersion: v1
 kind: ConfigMap
@@ -11,4 +12,5 @@ data:
     # Enable disableUdpTunnelOffload will disable udp tunnel offloading feature on kubernetes node's default interface.
     # By default, no actions will be taken.
     disableUdpTunnelOffload: {{ .Values.antreaAgentTweaker.disableUdpTunnelOffload }}
+{{- end }}
 {{- end }}

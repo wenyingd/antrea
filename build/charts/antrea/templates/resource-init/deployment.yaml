@@ -1,0 +1,52 @@
+{{- if .Values.enableResourceInit }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: antrea
+    component: antrea-resource-init
+  name: antrea-resource-init
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: antrea
+      component: antrea-resource-init
+  template:
+    metadata:
+      annotations:
+        # Automatically restart Pod if the ConfigMap changes
+        # See https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
+        checksum/config: {{ include (print $.Template.BasePath "/resource-init/configmap.yaml") . | sha256sum }}
+      labels:
+        app: antrea
+        component: antrea-resource-init
+    spec:
+      containers:
+      - args:
+        - -c
+        - "antrea-resource-init -f /etc/antrea/init-resources.yaml && sleep infinity"
+        command:
+        - sh
+        image: {{ include "antreaAgentImage" . | quote }}
+        imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
+        name: antrea-resource-init
+        volumeMounts:
+        - mountPath: /etc/antrea/init-resources.yaml
+          name: antrea-resource-init-config
+          readOnly: true
+          subPath: init-resources.yaml
+      hostNetwork: true
+      priorityClassName: system-cluster-critical
+      serviceAccountName: antrea-resource-init
+      tolerations:
+      - key: CriticalAddonsOnly
+        operator: Exists
+      - effect: NoSchedule
+        key: node-role.kubernetes.io/master
+      volumes:
+      - configMap:
+          name: antrea-resource-init-config
+        name: antrea-resource-init-config
+{{- end }}

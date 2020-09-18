@@ -1,3 +1,4 @@
+{{- if not .Values.enableResourceInit }}
 apiVersion: apiregistration.k8s.io/v1
 kind: APIService
 metadata:
@@ -45,3 +46,4 @@ spec:
   service:
     name: antrea
     namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -132,10 +132,38 @@ done
 
 # We also generate a manifest which only includes CRD resources (all of them).
 # This is useful for Antrea upgrades when using Helm.
-CRD_FILES=$(cd $ANTREA_CHART/crds && find * -type f -name "*.yaml" | sort)
-CRD_OUTPUT_FILE="$OUTPUT_DIR/antrea-crds.yml"
-rm -f "$CRD_OUTPUT_FILE"
-for crd in $CRD_FILES; do
-    echo "---" >> "$CRD_OUTPUT_FILE"
-    cat "$ANTREA_CHART/crds/$crd" >> "$CRD_OUTPUT_FILE"
+CRD_VALUES_DIR="$THIS_DIR/../build/yamls/crds-values"
+CRD_VALUES_FILES=$(cd $CRD_VALUES_DIR && find * -type f -name "*.yml")
+for values in $CRD_VALUES_FILES; do
+    CRD_FILES=$(cd $ANTREA_CHART/crds && find * -type f -name "*.yaml" | sort)
+    CRD_OUTPUT_FILE="$OUTPUT_DIR/${values}"
+    rm -f "$CRD_OUTPUT_FILE"
+    for crd in $CRD_FILES; do
+        echo "---" >> "$CRD_OUTPUT_FILE"
+        cat "$ANTREA_CHART/crds/$crd" >> "$CRD_OUTPUT_FILE"
+    done
+    CRD_TEMPLATE_FILES=$(cd $ANTREA_CHART/templates/crds && find * -type f -name "*.yaml" | sort)
+    for crd in $CRD_TEMPLATE_FILES; do
+        rc=0
+        template_err=$($HELM template \
+            --show-only templates/crds/$crd \
+            --namespace kube-system \
+            -f "$CRD_VALUES_DIR/$values" \
+            $EXTRA_VALUES \
+            "$ANTREA_CHART" 2>&1) || rc=$?
+        if [[ ${rc} -ne 0 ]] && grep -q "could not find template" <<< "$template_err"; then
+            # helm template with --show-only will fail if the template is not rendered.
+            # see issue https://github.com/helm/helm/issues/7295
+            continue
+        elif [[ ${rc} -ne 0 ]]; then
+            echoerr "$template_err"
+            exit ${rc}
+        fi
+        $HELM template \
+            --show-only templates/crds/$crd \
+            --namespace kube-system \
+            --set advanced=true \
+            $EXTRA_VALUES \
+            "$ANTREA_CHART" >> "$CRD_OUTPUT_FILE"
+    done
 done
