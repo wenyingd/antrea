@@ -75,6 +75,9 @@ type ControllerConfig struct {
 	IPsecCSRSignerConfig IPsecCSRSignerConfig `yaml:"ipsecCSRSigner"`
 	// Multicluster configuration options.
 	Multicluster MulticlusterConfig `yaml:"multicluster,omitempty"`
+	// Enable usage reporting (telemetry) to VMware.
+	// Defaults to false.
+	EnableUsageReporting bool `yaml:"enableUsageReporting,omitempty"`
 }
 
 type MulticlusterConfig struct {

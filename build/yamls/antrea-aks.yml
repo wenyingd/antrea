@@ -4081,6 +4081,9 @@ data:
     multicluster:
       # Enable Multi-cluster NetworkPolicy.
       enableStretchedNetworkPolicy: false
+
+    # Indicates whether to enable usage reporting or not.
+    enableUsageReporting: false
 ---
 # Source: antrea/templates/agent/clusterrole.yaml
 kind: ClusterRole
@@ -4547,6 +4550,14 @@ rules:
     verbs:
       - create
   - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - antrea-config
+    verbs:
+      - get
+  - apiGroups:
       - apiregistration.k8s.io
     resources:
       - apiservices
@@ -4920,7 +4931,7 @@ spec:
         kubectl.kubernetes.io/default-container: antrea-agent
         # Automatically restart Pods with a RollingUpdate if the ConfigMap changes
         # See https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
-        checksum/config: 30843b57762c91dfcffb560917191e3bc7e662c06552759bac2a173bc060b82c
+        checksum/config: 28ebabdd52967f26f71eb9ddceb8bc8f001d375ac0dc8a1ca9fc13fb61c7d5b4
       labels:
         app: antrea
         component: antrea-agent
@@ -5158,7 +5169,7 @@ spec:
       annotations:
         # Automatically restart Pod if the ConfigMap changes
         # See https://helm.sh/docs/howto/charts_tips_and_tricks/#automatically-roll-deployments
-        checksum/config: 30843b57762c91dfcffb560917191e3bc7e662c06552759bac2a173bc060b82c
+        checksum/config: 28ebabdd52967f26f71eb9ddceb8bc8f001d375ac0dc8a1ca9fc13fb61c7d5b4
       labels:
         app: antrea
         component: antrea-controller

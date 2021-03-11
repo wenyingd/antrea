@@ -374,6 +374,8 @@ controller:
       requests:
         cpu: "200m"
         memory: "100Mi"
+  # -- Enables usage reporting.
+  enableUsageReporting: false
 
 flowExporter:
   # -- Enable the flow exporter feature.
