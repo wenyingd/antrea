@@ -487,6 +487,18 @@ flow-aggregator-image:
 	docker build -t antrea/flow-aggregator:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile $(DOCKER_BUILD_ARGS) .
 	docker tag antrea/flow-aggregator:$(DOCKER_IMG_VERSION) antrea/flow-aggregator
 
+.PHONY: flow-aggregator-image-debian
+flow-aggregator-image-debian:
+	@echo "===> Building antrea/flow-aggregator Docker image <==="
+ifneq ($(NO_PULL),)
+	docker build -t antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) antrea/flow-aggregator-debian
+	docker tag antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-aggregator-debian
+	docker tag antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION)
+
 .PHONY: flow-aggregator-ubuntu-coverage
 flow-aggregator-ubuntu-coverage:
 	@echo "===> Building antrea/flow-aggregator-coverage Docker image <==="
