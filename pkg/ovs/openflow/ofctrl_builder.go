@@ -84,7 +84,7 @@ func (b *ofFlowBuilder) MatchXXReg(regID int, data []byte) FlowBuilder {
 }
 
 // MatchRegRange adds match condition for matching data in the target register at specified range.
-func (b *ofFlowBuilder) MatchRegRange(regID int, data uint32, rng Range) FlowBuilder {
+func (b *ofFlowBuilder) MatchRegRange(regID int, data uint32, rng *Range) FlowBuilder {
 	s := fmt.Sprintf("reg%d[%d..%d]=0x%x", regID, rng[0], rng[1], data)
 	b.matchers = append(b.matchers, s)
 	if rng[0] > 0 {
@@ -97,6 +97,17 @@ func (b *ofFlowBuilder) MatchRegRange(regID int, data uint32, rng Range) FlowBui
 	}
 	b.Match.NxRegs = append(b.Match.NxRegs, reg)
 	return b
+}
+
+func (b *ofFlowBuilder) MatchRegMark(mark *RegMark) FlowBuilder {
+	return b.MatchRegFieldWithValue(mark.field, mark.value)
+}
+
+func (b *ofFlowBuilder) MatchRegFieldWithValue(field *RegField, data uint32) FlowBuilder {
+	if field.isFullRange() {
+		return b.MatchReg(field.regID, data)
+	}
+	return b.MatchRegRange(field.regID, data, field.rng)
 }
 
 func (b *ofFlowBuilder) addCTStateString(value string) {
@@ -225,6 +236,20 @@ func (b *ofFlowBuilder) MatchCTMark(value uint32, mask *uint32) FlowBuilder {
 	b.matchers = append(b.matchers, fmt.Sprintf("ct_mark=%d", value))
 	b.ofFlow.Match.CtMark = value
 	b.ofFlow.Match.CtMarkMask = mask
+	return b
+}
+
+func (b *ofFlowBuilder) MatchCTMarkData(mark *CtMark) FlowBuilder {
+	ctmarkKey := fmt.Sprintf("ct_mark=0x%x", mark.value)
+	b.ofFlow.Match.CtMark = mark.value
+	if mark.isFullRange() {
+		b.ofFlow.Match.CtMarkMask = nil
+	} else {
+		mask := mark.rng.ToNXRange().ToUint32Mask()
+		ctmarkKey = fmt.Sprintf("%s/0x%x", ctmarkKey, mask)
+		b.ofFlow.Match.CtMarkMask = &mask
+	}
+	b.matchers = append(b.matchers, ctmarkKey)
 	return b
 }
 

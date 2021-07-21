@@ -173,24 +173,24 @@ Classifier Table: 0
 table=0, priority=200, in_port=$uplink,ip actions=load:0x4->NXM_NX_REG0[0..15],goto_table:5
 
 Uplink Table: 5
-table=5, priority=200, ip,reg0=0x4/0xffff actions=goto_table:30
+table=5, priority=200, ip,reg0=0x4/0xf actions=goto_table:30
 
 Conntrack Table: 30
 table=30, priority=200, ip actions=ct(table=31,zone=65520,nat)
 
 ConntrackState Table: 31
-table=31, priority=210, ct_state=-new+trk,ct_mark=0x40,ip,reg0=0x4/0xffff actions=load:0x1->NXM_NX_REG0[19],goto_table:40
-table=31, priority=200, ip,reg0=0x4/0xffff actions=output:br-int
+table=31, priority=210, ct_state=-new+trk,ct_mark=0x40,ip,reg0=0x4/0xf actions=load:0x1->NXM_NX_REG0[19],goto_table:40
+table=31, priority=200, ip,reg0=0x4/0xf actions=output:br-int
 
 L3Forwarding Table: 70
 // Forward the packet to L2ForwardingCalculation table if it is traffic to the local Pods and doesn't require MAC rewriting.
 table=70, priority=200, ip,reg0=0/0x80000,nw_dst=10.10.0.0/24 actions=goto_table:80
 // Forward the packet to L2ForwardingCalculation table if it is Pod-to-Node traffic.
-table=70, priority=200, ip,reg0=0x2/0xffff,nw_dst=$local_nodeIP actions=goto_table:80
+table=70, priority=200, ip,reg0=0x2/0xf,nw_dst=$local_nodeIP actions=goto_table:80
 // Forward the packet to L2ForwardingCalculation table if it is return traffic of an external-to-Pod connection.
 table=70, priority=210, ct_state=+rpl+trk,ct_mark=0x20,ip actions=mod_dl_dst:0e:6d:42:66:92:46,resubmit(,80)
 // Add SNAT mark if it is Pod-to-external traffic.
-table=70, priority=190, ct_state=+new+trk,ip,reg0=0x2/0xffff actions=load:0x1->NXM_NX_REG0[17], goto_table:80
+table=70, priority=190, ct_state=+new+trk,ip,reg0=0x2/0xf actions=load:0x1->NXM_NX_REG0[17], goto_table:80
 
 ConntrackCommit Table: 105
 table=105, priority=200, ct_state=+new+trk,ip,reg0=0x20000/0x20000, actions=ct(commit,table=110,zone=65520,nat(src=${nodeIP}:10000-20000),exec(load:0x40->NXM_NX_CT_MARK[])))

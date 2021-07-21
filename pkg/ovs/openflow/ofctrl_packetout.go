@@ -16,6 +16,7 @@ package openflow
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math/rand"
 	"net"
 
@@ -268,10 +269,15 @@ func (b *ofPacketOutBuilder) SetOutport(outport uint32) PacketOutBuilder {
 }
 
 // AddLoadAction loads the data to the target field at specified range when the packet is received by OVS Switch.
-func (b *ofPacketOutBuilder) AddLoadAction(name string, data uint64, rng Range) PacketOutBuilder {
+func (b *ofPacketOutBuilder) AddLoadAction(name string, data uint64, rng *Range) PacketOutBuilder {
 	act, _ := ofctrl.NewNXLoadAction(name, data, rng.ToNXRange())
 	b.pktOut.Actions = append(b.pktOut.Actions, act)
 	return b
+}
+
+func (b *ofPacketOutBuilder) AddLoadRegMark(mark *RegMark) PacketOutBuilder {
+	name := fmt.Sprintf("%s%d", NxmFieldReg, mark.field.regID)
+	return b.AddLoadAction(name, uint64(mark.value), mark.field.rng)
 }
 
 func (b *ofPacketOutBuilder) Done() *ofctrl.PacketOut {

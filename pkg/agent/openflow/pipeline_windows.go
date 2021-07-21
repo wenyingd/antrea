@@ -26,8 +26,6 @@ import (
 )
 
 const (
-	markTrafficFromBridge = 5
-
 	// ctZoneSNAT is only used on Windows and only when AntreaProxy is enabled.
 	// When a Pod access a ClusterIP Service, and the IP of the selected endpoint
 	// is not in "cluster-cidr". The request packets need to be SNAT'd(set src IP to local Node IP)
@@ -41,19 +39,11 @@ const (
 	// Pod --> DNAT(CtZone) --> SNAT(ctZoneSNAT) --> Endpoint(API server NodeIP)
 	// Pod <-- unDNAT(CtZone) <-- unSNAT(ctZoneSNAT) <-- Endpoint(API server NodeIP)
 	ctZoneSNAT = 0xffdc
-
-	// snatDefaultMark indicates the packet should be SNAT'd with the default
-	// SNAT IP (the Node IP).
-	snatDefaultMark = 0b1
-
-	// snatCTMark indicates SNAT is performed for packets of the connection.
-	snatCTMark = 0x40
 )
 
 var (
-	// snatMarkRange takes the 17th bit of register marksReg to indicate if
-	// the packet needs to be SNATed with Node's IP or not.
-	snatMarkRange = binding.Range{17, 17}
+	// Mark to indicate SNAT is performed on the connection, it is only used on Windows now.
+	snatCTMark = binding.NewCtMark(0x40, 0, 31)
 )
 
 // uplinkSNATFlows installs flows for traffic from the uplink port that help
@@ -71,9 +61,9 @@ func (c *client) uplinkSNATFlows(localSubnet net.IPNet, category cookie.Category
 		c.pipeline[conntrackStateTable].BuildFlow(priorityHigh).
 			MatchProtocol(binding.ProtocolIP).
 			MatchCTStateNew(false).MatchCTStateTrk(true).
-			MatchCTMark(snatCTMark, nil).
-			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
-			Action().LoadRegRange(int(marksReg), macRewriteMark, macRewriteMarkRange).
+			MatchCTMarkData(snatCTMark).
+			MatchRegMark(FromUplinkMark).
+			Action().LoadRegMark(RewriteMACMark).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Action().GotoTable(ctStateNext).
 			Done(),
@@ -81,7 +71,7 @@ func (c *client) uplinkSNATFlows(localSubnet net.IPNet, category cookie.Category
 		// if it is received from the uplink interface.
 		c.pipeline[conntrackStateTable].BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
-			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			MatchRegMark(FromUplinkMark).
 			Action().Output(int(bridgeOFPort)).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
@@ -97,14 +87,14 @@ func (c *client) uplinkSNATFlows(localSubnet net.IPNet, category cookie.Category
 		//   Pod <-- unDNAT(CtZone) <-- unSNAT(ctZoneSNAT) <-- ExternalServer
 		flows = append(flows, c.pipeline[uplinkTable].BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
-			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			MatchRegMark(FromUplinkMark).
 			Action().CT(false, conntrackTable, ctZoneSNAT).NAT().CTDone().
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done())
 	} else {
 		flows = append(flows, c.pipeline[uplinkTable].BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
-			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			MatchRegMark(FromUplinkMark).
 			Action().GotoTable(conntrackTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done())
@@ -124,8 +114,8 @@ func (c *client) snatImplementationFlows(nodeIP net.IP, category cookie.Category
 		c.pipeline[snatTable].BuildFlow(priorityLow).
 			MatchProtocol(binding.ProtocolIP).
 			MatchCTStateNew(true).MatchCTStateTrk(true).
-			MatchRegRange(int(marksReg), markTrafficFromLocal, binding.Range{0, 15}).
-			Action().LoadRegRange(int(marksReg), snatDefaultMark, snatMarkRange).
+			MatchRegMark(FromLocalMark).
+			Action().LoadRegMark(SNATNodeIPMark).
 			Action().GotoTable(nextTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
@@ -142,10 +132,10 @@ func (c *client) snatImplementationFlows(nodeIP net.IP, category cookie.Category
 		ctCommitTable.BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
 			MatchCTStateNew(true).MatchCTStateTrk(true).MatchCTStateDNAT(false).
-			MatchRegRange(int(marksReg), snatDefaultMark, snatMarkRange).
+			MatchRegMark(SNATNodeIPMark).
 			Action().CT(true, ccNextTable, CtZone).
 			SNAT(snatIPRange, nil).
-			LoadToMark(snatCTMark).CTDone().
+			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
 	}
@@ -161,8 +151,8 @@ func (c *client) snatImplementationFlows(nodeIP net.IP, category cookie.Category
 			l3FwdTable.BuildFlow(priorityLow).
 				MatchProtocol(binding.ProtocolIP).
 				MatchCTStateNew(false).MatchCTStateTrk(true).MatchCTStateDNAT(true).
-				MatchRegRange(int(marksReg), markTrafficFromLocal, binding.Range{0, 15}).
-				Action().LoadRegRange(int(marksReg), snatDefaultMark, snatMarkRange).
+				MatchRegMark(FromLocalMark).
+				Action().LoadRegMark(SNATNodeIPMark).
 				Action().GotoTable(nextTable).
 				Cookie(c.cookieAllocator.Request(category).Raw()).
 				Done(),
@@ -172,16 +162,16 @@ func (c *client) snatImplementationFlows(nodeIP net.IP, category cookie.Category
 			ctCommitTable.BuildFlow(priorityNormal).
 				MatchProtocol(binding.ProtocolIP).
 				MatchCTStateNew(true).MatchCTStateTrk(true).MatchCTStateDNAT(true).
-				MatchRegRange(int(marksReg), snatDefaultMark, snatMarkRange).
+				MatchRegMark(SNATNodeIPMark).
 				Action().CT(true, ccNextTable, ctZoneSNAT).
 				SNAT(snatIPRange, nil).
-				LoadToMark(snatCTMark).CTDone().
+				LoadToCtMark(snatCTMark).CTDone().
 				Cookie(c.cookieAllocator.Request(category).Raw()).
 				Done(),
 			ctCommitTable.BuildFlow(priorityNormal).
 				MatchProtocol(binding.ProtocolIP).
 				MatchCTStateNew(false).MatchCTStateTrk(true).MatchCTStateDNAT(true).
-				MatchRegRange(int(marksReg), snatDefaultMark, snatMarkRange).
+				MatchRegMark(SNATNodeIPMark).
 				Action().CT(false, ccNextTable, ctZoneSNAT).NAT().CTDone().
 				Cookie(c.cookieAllocator.Request(category).Raw()).
 				Done(),
@@ -210,7 +200,7 @@ func (c *client) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow {
 			MatchPktMark(mark, &types.SNATIPMarkMask).
 			Action().CT(true, nextTable, CtZone).
 			SNAT(snatIPRange, nil).
-			LoadToMark(snatCTMark).CTDone().
+			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(c.cookieAllocator.Request(cookie.SNAT).Raw()).
 			Done(),
 	}
@@ -222,7 +212,7 @@ func (c *client) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow {
 			MatchPktMark(mark, &types.SNATIPMarkMask).
 			Action().CT(true, nextTable, ctZoneSNAT).
 			SNAT(snatIPRange, nil).
-			LoadToMark(snatCTMark).CTDone().
+			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(c.cookieAllocator.Request(cookie.SNAT).Raw()).
 			Done())
 	}
@@ -237,13 +227,13 @@ func (c *client) hostBridgeUplinkFlows(localSubnet net.IPNet, category cookie.Ca
 	flows = []binding.Flow{
 		c.pipeline[ClassifierTable].BuildFlow(priorityNormal).
 			MatchInPort(config.UplinkOFPort).
-			Action().LoadRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			Action().LoadRegMark(FromUplinkMark).
 			Action().GotoTable(uplinkTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
 		c.pipeline[ClassifierTable].BuildFlow(priorityNormal).
 			MatchInPort(config.BridgeOFPort).
-			Action().LoadRegRange(int(marksReg), markTrafficFromBridge, binding.Range{0, 15}).
+			Action().LoadRegMark(FromBridgeMark).
 			Action().GotoTable(uplinkTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
@@ -251,7 +241,7 @@ func (c *client) hostBridgeUplinkFlows(localSubnet net.IPNet, category cookie.Ca
 		// are redirected to conntrackTable in uplinkSNATFlows() (in
 		// case they need unSNAT).
 		c.pipeline[uplinkTable].BuildFlow(priorityLow).
-			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			MatchRegMark(FromUplinkMark).
 			Action().Output(int(bridgeOFPort)).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
@@ -267,16 +257,16 @@ func (c *client) hostBridgeUplinkFlows(localSubnet net.IPNet, category cookie.Ca
 		// interface).
 		c.pipeline[uplinkTable].BuildFlow(priorityHigh).
 			MatchProtocol(binding.ProtocolIP).
-			MatchRegRange(int(marksReg), markTrafficFromBridge, binding.Range{0, 15}).
+			MatchRegMark(FromBridgeMark).
 			MatchDstIPNet(localSubnet).
-			Action().LoadRegRange(int(marksReg), macRewriteMark, macRewriteMarkRange).
+			Action().LoadRegMark(RewriteMACMark).
 			Action().GotoTable(conntrackTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
 		// Output other packets from the bridge port to the uplink port
 		// directly.
 		c.pipeline[uplinkTable].BuildFlow(priorityLow).
-			MatchRegRange(int(marksReg), markTrafficFromBridge, binding.Range{0, 15}).
+			MatchRegMark(FromBridgeMark).
 			Action().Output(config.UplinkOFPort).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done(),
@@ -285,9 +275,9 @@ func (c *client) hostBridgeUplinkFlows(localSubnet net.IPNet, category cookie.Ca
 		// If NoEncap is enabled, the reply packets from remote Pod can be forwarded to local Pod directly.
 		// by explicitly resubmitting them to endpointDNATTable and marking "macRewriteMark" at same time.
 		flows = append(flows, c.pipeline[conntrackStateTable].BuildFlow(priorityHigh).MatchProtocol(binding.ProtocolIP).
-			MatchRegRange(int(marksReg), markTrafficFromUplink, binding.Range{0, 15}).
+			MatchRegMark(FromUplinkMark).
 			MatchDstIPNet(localSubnet).
-			Action().LoadRegRange(int(marksReg), macRewriteMark, macRewriteMarkRange).
+			Action().LoadRegMark(RewriteMACMark).
 			Action().GotoTable(endpointDNATTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done())
@@ -301,8 +291,8 @@ func (c *client) l3FwdFlowToRemoteViaRouting(localGatewayMAC net.HardwareAddr, r
 		// It enhances Windows Noencap mode performance by bypassing host network.
 		flows := []binding.Flow{c.pipeline[l2ForwardingCalcTable].BuildFlow(priorityNormal).
 			MatchDstMAC(remoteGatewayMAC).
-			Action().LoadRegRange(int(PortCacheReg), config.UplinkOFPort, ofPortRegRange).
-			Action().LoadRegRange(int(marksReg), macRewriteMark, ofPortMarkRange).
+			Action().LoadToRegField(TargetOFPortField, config.UplinkOFPort).
+			Action().LoadRegMark(OFPortFoundMark).
 			Action().GotoTable(conntrackCommitTable).
 			Cookie(c.cookieAllocator.Request(category).Raw()).
 			Done()}

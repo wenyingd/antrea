@@ -1021,8 +1021,7 @@ func (c *client) SendTCPPacketOut(
 
 	// Reject response packet should bypass ConnTrack
 	if isReject {
-		name := fmt.Sprintf("%s%d", binding.NxmFieldReg, marksReg)
-		packetOutBuilder = packetOutBuilder.AddLoadAction(name, uint64(CustomReasonReject), CustomReasonMarkRange)
+		packetOutBuilder = packetOutBuilder.AddLoadRegMark(MarkCustomReasonReject)
 	}
 
 	packetOutObj := packetOutBuilder.Done()
@@ -1060,8 +1059,7 @@ func (c *client) SendICMPPacketOut(
 
 	// Reject response packet should bypass ConnTrack
 	if isReject {
-		name := fmt.Sprintf("%s%d", binding.NxmFieldReg, marksReg)
-		packetOutBuilder = packetOutBuilder.AddLoadAction(name, uint64(CustomReasonReject), CustomReasonMarkRange)
+		packetOutBuilder = packetOutBuilder.AddLoadRegMark(MarkCustomReasonReject)
 	}
 
 	packetOutObj := packetOutBuilder.Done()
