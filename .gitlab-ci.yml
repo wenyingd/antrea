@@ -1,0 +1,18 @@
+---
+stages:
+  - test
+
+test-unit:
+  stage: test
+  script:
+    - cp -r /usr/local/go ~/go
+    - export GOPATH=~/go && export PATH="~/go/bin:$PATH"
+    - make test-unit
+
+# to do
+# go.yml: golangci-lint, golangci-lint-netpol-tmp, bin, windows-bin, antctl, codegen, manifest, tidy, verify
+# build.yml: maybe no need to do because rely on doker and the user of it
+# build_tag.yml: same with above
+# golicense.yml: maybe no need to do becasue rely on other actions
+# kind.yml: build-antrea-coverage-image, build-flow-aggregator-image, test-e2e-encap, test-e2e-encap-no-proxy, test-e2e-noencap, test-e2e-hybrid, test-e2e-encap-np, build-antrea-image, test-netpol-tmp, validate-prometheus-metrics-doc, artifact-cleanup
+# kind_update.yml: build-antrea-image, from-N-1, from-N-2, compatible-N-1, compatible-N-2, artifact-cleanup
