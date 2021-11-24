@@ -27,6 +27,7 @@ import (
 
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
@@ -98,12 +99,36 @@ func main() {
 func applyOneYaml(ctx context.Context, client k8sclient.Client, obj *unstructured.Unstructured) error {
 	klog.Infof("Creating %s \"%s\" in Namespace \"%s\"", obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace())
 	owner := k8sclient.FieldOwner(commandName)
+	opt := &k8sclient.PatchOptions{
+		Force: new(bool),
+	}
+	*opt.Force = true
 	if obj.GetKind() == "APIService" {
 		// APIService doesn't support server-side apply, so need special care.
 		return applyAPIServiceYaml(ctx, client, obj)
 	}
+	if obj.GetKind() == "ConfigMap" {
+		*opt.Force = false
+	}
 	// Server-side apply
-	if err := client.Patch(ctx, obj, k8sclient.Apply, owner); err != nil {
+	if err := client.Patch(ctx, obj, k8sclient.Apply, owner, opt); err != nil {
+		if obj.GetKind() == "ConfigMap" {
+			if apierrors.HasStatusCause(err, metav1.CauseTypeFieldManagerConflict) {
+				klog.Infof(
+					"Got conflict when patching object %s %s/%s: %s. User may change the data manually. Trying to remove .data field from init resource definition and patch again.",
+					obj.GroupVersionKind(),
+					obj.GetNamespace(),
+					obj.GetName(),
+					err,
+				)
+				delete(obj.Object, "data")
+				if err1 := client.Patch(ctx, obj, k8sclient.Apply, owner, opt); err1 != nil {
+					err = err1
+				} else {
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("failed to patch object %s %s/%s: %w", obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName(), err)
 	}
 	return nil
