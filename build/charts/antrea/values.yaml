@@ -319,6 +319,11 @@ agent:
       # -- Capabilities for the antrea-ipsec container.
       capabilities:
         - NET_ADMIN
+  antreaAgentTweaker:
+    # -- Resource requests and limits for the antrea-agent-tweaker container.
+    resources:
+      requests:
+        cpu: "100m"
 
 controller:
   # -- Port for the antrea-controller APIServer to serve on.
@@ -441,3 +446,10 @@ testing:
   coverage: false
   simulator:
     enable: false
+
+antreaAgentTweaker:
+  # -- Inject antreaAgentTweaker init-container to antrea-agent Daemonset and
+  # add related Configmaps.
+  enable: false
+  # -- Disable UDP tunnel offload on the transport interface.
+  disableUdpTunnelOffload: false

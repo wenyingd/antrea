@@ -26,6 +26,9 @@ spec:
         {{- if eq .Values.trafficEncryptionMode "ipsec" }}
         checksum/ipsec-secret: {{ include (print $.Template.BasePath "/agent/ipsec-secret.yaml") . | sha256sum }}
         {{- end }}
+        {{- if .Values.antreaAgentTweaker.enable }}
+        checksum/tweaker-config: {{ include (print $.Template.BasePath "/agent/tweakerconfigmap.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.agent.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -70,6 +73,27 @@ spec:
       {{- if eq .Values.trafficEncapMode "networkPolicyOnly" }}
       containers:
       {{- end }}
+        {{- if .Values.antreaAgentTweaker.enable }}
+        - name: antrea-agent-tweaker
+          image: {{ include "antreaAgentImage" . | quote }}
+          imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
+          resources: {{- .Values.agent.antreaAgentTweaker.resources | toYaml | nindent 12 }}
+          command: ["antrea-agent-tweaker"]
+          args: ["--config", "/etc/antrea/antrea-agent-tweaker.conf"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          volumeMounts:
+          - name: antrea-agent-tweaker-config
+            mountPath: /etc/antrea/antrea-agent-tweaker.conf
+            subPath: antrea-agent-tweaker.conf
+        {{- end }}
         - name: install-cni
           image: {{ include "antreaAgentImage" . | quote }}
           imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
@@ -359,6 +383,11 @@ spec:
         - name: antrea-config
           configMap:
             name: antrea-config
+        {{- if .Values.antreaAgentTweaker.enable }}
+        - name: antrea-agent-tweaker-config
+          configMap:
+            name: antrea-agent-tweaker
+        {{- end }}
         - name: host-cni-conf
           hostPath:
             path: /etc/cni/net.d

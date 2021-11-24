@@ -27,6 +27,7 @@ Kubernetes: `>= 1.16.0-0`
 | agent.antreaAgent.resources | object | `{"requests":{"cpu":"200m"}}` | Resource requests and limits for the antrea-agent container. |
 | agent.antreaAgent.securityContext.capabilities | list | `[]` | Capabilities for the antrea-agent container. |
 | agent.antreaAgent.securityContext.privileged | bool | `true` | Run the antrea-agent container as privileged. Currently we require this to be true (for sysctl configurations), but we may support running as non-privileged in the future. |
+| agent.antreaAgentTweaker.resources | object | `{"requests":{"cpu":"100m"}}` | Resource requests and limits for the antrea-agent-tweaker container. |
 | agent.antreaIPsec.resources | object | `{"requests":{"cpu":"50m"}}` | Resource requests and limits for the antrea-ipsec container (when IPsec is enabled). |
 | agent.antreaIPsec.securityContext.capabilities | list | `["NET_ADMIN"]` | Capabilities for the antrea-ipsec container. |
 | agent.antreaIPsec.securityContext.privileged | bool | `false` | Run the antrea-ipsec container as privileged. |
@@ -53,6 +54,8 @@ Kubernetes: `>= 1.16.0-0`
 | agent.tolerations | list | `[{"key":"CriticalAddonsOnly","operator":"Exists"},{"effect":"NoSchedule","operator":"Exists"},{"effect":"NoExecute","operator":"Exists"}]` | Tolerations for the antrea-agent Pods. |
 | agent.updateStrategy | object | `{"type":"RollingUpdate"}` | Update strategy for the antrea-agent DaemonSet. |
 | agentImage | object | `{"pullPolicy":"IfNotPresent","repository":"antrea/antrea-agent-ubuntu","tag":""}` | Container image to use for the antrea-agent component. |
+| antreaAgentTweaker.disableUdpTunnelOffload | bool | `false` | Disable UDP tunnel offload on the transport interface. |
+| antreaAgentTweaker.enable | bool | `false` | Inject antreaAgentTweaker init-container to antrea-agent Daemonset and add related Configmaps. |
 | antreaProxy.defaultLoadBalancerMode | string | `"nat"` | Determines how external traffic is processed when it's load balanced across Nodes by default. It must be one of "nat" or "dsr". |
 | antreaProxy.enable | bool | `true` | To disable AntreaProxy, set this to false. |
 | antreaProxy.nodePortAddresses | list | `[]` | String array of values which specifies the host IPv4/IPv6 addresses for NodePort. By default, all host addresses are used. |

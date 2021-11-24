@@ -1,0 +1,14 @@
+{{- if .Values.antreaAgentTweaker.enable }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: antrea-agent-tweaker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: antrea
+data:
+  antrea-agent-tweaker.conf: |-
+    # Enable disableUdpTunnelOffload will disable udp tunnel offloading feature on kubernetes node's default interface.
+    # By default, no actions will be taken.
+    disableUdpTunnelOffload: {{ .Values.antreaAgentTweaker.disableUdpTunnelOffload }}
+{{- end }}
