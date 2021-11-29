@@ -38,13 +38,17 @@ spec:
           readOnly: true
           subPath: init-resources.yaml
       hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
       priorityClassName: system-cluster-critical
       serviceAccountName: antrea-resource-init
       tolerations:
       - key: CriticalAddonsOnly
         operator: Exists
       - effect: NoSchedule
-        key: node-role.kubernetes.io/master
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
       volumes:
       - configMap:
           name: antrea-resource-init-config
