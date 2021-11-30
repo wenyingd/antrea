@@ -61,6 +61,7 @@ func TestSecurity(t *testing.T) {
 
 // testUserProvidedCert tests the selfSignedCert=false case. It covers dynamic server certificate.
 func testUserProvidedCert(t *testing.T, data *TestData) {
+	skipIfRunOnTKGs(t)
 	// Re-configure antrea-controller to use user-provided cert.
 	// Note antrea-controller must be restarted to take effect.
 	cc := func(config *controllerconfig.ControllerConfig) {
