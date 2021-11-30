@@ -72,7 +72,7 @@ var (
 )
 
 const (
-	defaultTimeout  = 90 * time.Second
+	defaultTimeout  = 120 * time.Second
 	defaultInterval = 1 * time.Second
 
 	// antreaNamespace is the K8s Namespace in which all Antrea resources are running.
