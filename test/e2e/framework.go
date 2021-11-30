@@ -1104,16 +1104,16 @@ func (data *TestData) waitForAntreaDaemonSetPods(timeout time.Duration) error {
 		}
 		desiredNum += dsLinux.Status.DesiredNumberScheduled
 
-		if len(clusterInfo.windowsNodes) != 0 {
-			var dsWindows *appsv1.DaemonSet
-			if dsWindows, err = getDS(antreaWindowsDaemonSet, "Windows"); err != nil {
-				return false, err
-			}
-			if dsWindows.Generation != dsWindows.Status.ObservedGeneration {
-				return false, nil
-			}
-			desiredNum += dsWindows.Status.DesiredNumberScheduled
-		}
+		// if len(clusterInfo.windowsNodes) != 0 {
+		// 	var dsWindows *appsv1.DaemonSet
+		// 	if dsWindows, err = getDS(antreaWindowsDaemonSet, "Windows"); err != nil {
+		// 		return false, err
+		// 	}
+		// 	if dsWindows.Generation != dsWindows.Status.ObservedGeneration {
+		// 		return false, nil
+		// 	}
+		// 	desiredNum += dsWindows.Status.DesiredNumberScheduled
+		// }
 
 		// Make sure that all antrea-agent Pods are not terminating. This is required because NumberAvailable of
 		// DaemonSet counts Pods even if they are terminating. Deleting antrea-agent Pods directly does not cause the
