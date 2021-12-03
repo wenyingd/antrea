@@ -4708,13 +4708,13 @@ func TestAntreaPolicyStatus(t *testing.T) {
 
 func TestAntreaPolicyStatusWithAppliedToPerRule(t *testing.T) {
 	skipIfHasWindowsNodes(t)
-	skipIfAntreaPolicyDisabled(t)
 
 	data, err := setupTest(t)
 	if err != nil {
 		t.Fatalf("Error when setting up test: %v", err)
 	}
 	defer teardownTest(t, data)
+	skipIfAntreaPolicyDisabled(t)
 
 	server0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-0", controlPlaneNodeName(), data.testNamespace, false)
 	defer cleanupFunc()
