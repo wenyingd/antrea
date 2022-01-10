@@ -281,6 +281,20 @@ func (mr *MockClientMockRecorder) InstallEndpointFlows(arg0, arg1 interface{}) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InstallEndpointFlows", reflect.TypeOf((*MockClient)(nil).InstallEndpointFlows), arg0, arg1)
 }
 
+// InstallHostUplinkFlows mocks base method
+func (m *MockClient) InstallHostUplinkFlows(arg0 string, arg1, arg2 int32) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InstallHostUplinkFlows", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// InstallHostUplinkFlows indicates an expected call of InstallHostUplinkFlows
+func (mr *MockClientMockRecorder) InstallHostUplinkFlows(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InstallHostUplinkFlows", reflect.TypeOf((*MockClient)(nil).InstallHostUplinkFlows), arg0, arg1, arg2)
+}
+
 // InstallMulticastFlow mocks base method
 func (m *MockClient) InstallMulticastFlow(arg0 net.IP) error {
 	m.ctrl.T.Helper()
@@ -609,6 +623,20 @@ func (m *MockClient) UninstallEndpointFlows(arg0 openflow.Protocol, arg1 proxy.E
 func (mr *MockClientMockRecorder) UninstallEndpointFlows(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UninstallEndpointFlows", reflect.TypeOf((*MockClient)(nil).UninstallEndpointFlows), arg0, arg1)
+}
+
+// UninstallHostUplinkFlows mocks base method
+func (m *MockClient) UninstallHostUplinkFlows(arg0 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "UninstallHostUplinkFlows", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// UninstallHostUplinkFlows indicates an expected call of UninstallHostUplinkFlows
+func (mr *MockClientMockRecorder) UninstallHostUplinkFlows(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UninstallHostUplinkFlows", reflect.TypeOf((*MockClient)(nil).UninstallHostUplinkFlows), arg0)
 }
 
 // UninstallMulticastFlow mocks base method

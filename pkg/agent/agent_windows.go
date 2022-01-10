@@ -111,11 +111,10 @@ func (i *Initializer) prepareHNSNetworkAndOVSExtension() error {
 	return util.PrepareHNSNetwork(subnetCIDR, i.nodeConfig.NodeTransportIPv4Addr, adapter, i.nodeConfig.UplinkNetConfig.Gateway, dnsServers, i.nodeConfig.UplinkNetConfig.Routes, i.ovsBridge)
 }
 
-func (i *Initializer) prepareOVSBridge() error {
-	if i.nodeType == config.K8sNode {
-		return i.prepareOVSBridgeOnHNSNetwork()
-	}
-	return nil
+// prepareOVSBridgeForK8sNode adds local port and uplink to ovs bridge after OVS Extension is enabled on HNSNetwork.
+// This function will delete OVS bridge and HNS network created by antrea on failure.
+func (i *Initializer) prepareOVSBridgeForK8sNode() error {
+	return i.prepareOVSBridgeOnHNSNetwork()
 }
 
 // prepareOVSBridgeOnHNSNetwork adds local port and uplink to OVS bridge after the OVS Extension is enabled on HNSNetwork.
@@ -293,4 +292,8 @@ func (i *Initializer) setInterfaceMTU(iface string, mtu int) error {
 		return err
 	}
 	return util.SetInterfaceMTU(iface, mtu)
+}
+
+func (i *Initializer) prepareOVSBridgeForVM() error {
+	return nil
 }

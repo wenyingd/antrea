@@ -37,6 +37,7 @@ const (
 	Egress
 	Multicast
 	Traceflow
+	VMConnectivity
 )
 
 func (c Category) String() string {
@@ -55,6 +56,8 @@ func (c Category) String() string {
 		return "Multicast"
 	case Traceflow:
 		return "Traceflow"
+	case VMConnectivity:
+		return "VMConnectivity"
 	default:
 		return "Invalid"
 	}

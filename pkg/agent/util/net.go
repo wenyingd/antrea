@@ -15,6 +15,7 @@
 package util
 
 import (
+	"crypto/rand"
 	"crypto/sha1" // #nosec G505: not used for security purposes
 	"encoding/hex"
 	"errors"
@@ -367,4 +368,30 @@ func NewIPNet(ip net.IP) *net.IPNet {
 		return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
 	}
 	return &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+}
+
+func RandomMAC() (net.HardwareAddr, error) {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	// Set the local bit
+	buf[0] |= 2
+	return buf[:6], nil
+}
+
+func GetGlobalIPNetsByName(link *net.Interface) ([]*net.IPNet, error) {
+	addrList, err := link.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	var addrs []*net.IPNet
+	for _, a := range addrList {
+		if ipNet, ok := a.(*net.IPNet); ok {
+			if ipNet.IP.IsGlobalUnicast() {
+				addrs = append(addrs, ipNet)
+			}
+		}
+	}
+	return addrs, nil
 }

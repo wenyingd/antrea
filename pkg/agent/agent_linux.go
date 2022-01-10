@@ -39,8 +39,8 @@ func (i *Initializer) prepareHostNetwork() error {
 	return nil
 }
 
-func (i *Initializer) prepareOVSBridge() error {
-	// Return immediately on Linux if connectUplinkToBridge is false.
+// prepareOVSBridgeForK8sNode returns immediately on Linux if connectUplinkToBridge is false.
+func (i *Initializer) prepareOVSBridgeForK8sNode() error {
 	if !i.connectUplinkToBridge {
 		return nil
 	}
@@ -293,4 +293,12 @@ func (i *Initializer) RestoreOVSBridge() {
 
 func (i *Initializer) setInterfaceMTU(iface string, mtu int) error {
 	return i.ovsBridgeClient.SetInterfaceMTU(iface, mtu)
+}
+
+func (i *Initializer) prepareOVSBridgeForVM() error {
+	randMAC, err := util.RandomMAC()
+	if err != nil {
+		return err
+	}
+	return i.setOVSDatapath(randMAC)
 }

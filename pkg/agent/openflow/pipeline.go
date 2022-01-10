@@ -182,6 +182,9 @@ var (
 	// Tables in stageRouting:
 	MulticastTable = newTable("Multicast", stageRouting, pipelineMulticast)
 
+	// NotIPTable is used when Antrea Agent is running on a VM or BM.
+	NotIPTable = newTable("NoIP", stageClassifier, pipelineNotIP, defaultDrop)
+
 	// Flow priority level
 	priorityHigh            = uint16(210)
 	priorityNormal          = uint16(200)
@@ -396,12 +399,13 @@ type client struct {
 	cookieAllocator       cookie.Allocator
 	bridge                binding.Bridge
 
-	featurePodConnectivity *featurePodConnectivity
-	featureService         *featureService
-	featureEgress          *featureEgress
-	featureNetworkPolicy   *featureNetworkPolicy
-	featureMulticast       *featureMulticast
-	activatedFeatures      []feature
+	featurePodConnectivity    *featurePodConnectivity
+	featureService            *featureService
+	featureEgress             *featureEgress
+	featureNetworkPolicy      *featureNetworkPolicy
+	featureMulticast          *featureMulticast
+	featureExNodeConnectivity *featureExternalNodeConnectivity
+	activatedFeatures         []feature
 
 	featureTraceflow  *featureTraceflow
 	traceableFeatures []traceableFeature
@@ -566,6 +570,8 @@ func (c *client) defaultFlows() []binding.Flow {
 			// in PipelineIPClassifierTable. Note that, PipelineIPClassifierTable is in stageValidation of pipeline for IP. In another word,
 			// pipelineMulticast is forked from PipelineIPClassifierTable in pipelineIP.
 			flows = append(flows, multicastPipelineClassifyFlow(cookieID, pipeline))
+		case pipelineNotIP:
+			flows = append(flows, notIPPipelineClassifyFlow(cookieID, pipeline))
 		}
 	}
 
@@ -1811,22 +1817,24 @@ func (f *featureNetworkPolicy) establishedConnectionFlows() []binding.Flow {
 	ingressDropTable := IngressDefaultTable
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	var allEstFlows []binding.Flow
-	for _, ipProtocol := range f.ipProtocols {
-		egressEstFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchCTStateNew(false).
-			MatchCTStateEst(true).
-			Action().GotoTable(egressDropTable.GetNext()).
-			Done()
-		ingressEstFlow := IngressRuleTable.ofTable.BuildFlow(priorityHigh).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchCTStateNew(false).
-			MatchCTStateEst(true).
-			Action().GotoTable(ingressDropTable.GetNext()).
-			Done()
-		allEstFlows = append(allEstFlows, egressEstFlow, ingressEstFlow)
+	if f.nodeType == config.K8sNode  {
+		for _, ipProtocol := range f.ipProtocols {
+			egressEstFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateEst(true).
+				Action().GotoTable(egressDropTable.GetNext()).
+				Done()
+			ingressEstFlow := IngressRuleTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateEst(true).
+				Action().GotoTable(ingressDropTable.GetNext()).
+				Done()
+			allEstFlows = append(allEstFlows, egressEstFlow, ingressEstFlow)
+		}
 	}
 	if !f.enableAntreaPolicy {
 		return allEstFlows
@@ -1872,22 +1880,24 @@ func (f *featureNetworkPolicy) relatedConnectionFlows() []binding.Flow {
 	ingressDropTable := IngressDefaultTable
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	var flows []binding.Flow
-	for _, ipProtocol := range f.ipProtocols {
-		egressRelFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchCTStateNew(false).
-			MatchCTStateRel(true).
-			Action().GotoTable(egressDropTable.GetNext()).
-			Done()
-		ingressRelFlow := IngressRuleTable.ofTable.BuildFlow(priorityHigh).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchCTStateNew(false).
-			MatchCTStateRel(true).
-			Action().GotoTable(ingressDropTable.GetNext()).
-			Done()
-		flows = append(flows, egressRelFlow, ingressRelFlow)
+	if f.nodeType == config.K8sNode {
+		for _, ipProtocol := range f.ipProtocols {
+			egressRelFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateRel(true).
+				Action().GotoTable(egressDropTable.GetNext()).
+				Done()
+			ingressRelFlow := IngressRuleTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateRel(true).
+				Action().GotoTable(ingressDropTable.GetNext()).
+				Done()
+			flows = append(flows, egressRelFlow, ingressRelFlow)
+		}
 	}
 	if !f.enableAntreaPolicy {
 		return flows
@@ -1932,20 +1942,22 @@ func (f *featureNetworkPolicy) rejectBypassNetworkpolicyFlows() []binding.Flow {
 	ingressDropTable := IngressDefaultTable
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	var flows []binding.Flow
-	for _, ipProtocol := range f.ipProtocols {
-		egressRejFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchRegFieldWithValue(CustomReasonField, CustomReasonReject).
-			Action().GotoTable(egressDropTable.GetNext()).
-			Done()
-		ingressRejFlow := IngressRuleTable.ofTable.BuildFlow(priorityHigh).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchRegFieldWithValue(CustomReasonField, CustomReasonReject).
-			Action().GotoTable(ingressDropTable.GetID()).
-			Done()
-		flows = append(flows, egressRejFlow, ingressRejFlow)
+	if f.nodeType == config.K8sNode {
+		for _, ipProtocol := range f.ipProtocols {
+			egressRejFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProtocol).
+				MatchRegFieldWithValue(CustomReasonField, CustomReasonReject).
+				Action().GotoTable(egressDropTable.GetNext()).
+				Done()
+			ingressRejFlow := IngressRuleTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProtocol).
+				MatchRegFieldWithValue(CustomReasonField, CustomReasonReject).
+				Action().GotoTable(ingressDropTable.GetID()).
+				Done()
+			flows = append(flows, egressRejFlow, ingressRejFlow)
+		}
 	}
 	if !f.enableAntreaPolicy {
 		return flows

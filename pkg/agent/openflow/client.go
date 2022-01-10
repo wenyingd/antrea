@@ -279,6 +279,10 @@ type Client interface {
 		dstIP net.IP,
 		outPort uint32,
 		igmp ofutil.Message) error
+	// InstallHostUplinkFlows installs flows to forward packet between uplinkPort and hostPort.
+	InstallHostUplinkFlows(hostInterfaceName string, hostPort int32, uplinkPort int32) error
+	// UninstallHostUplinkFlows removes the flows installed to forward packet between uplinkPort and hostPort.
+	UninstallHostUplinkFlows(hostInterfaceName string) error
 }
 
 // GetFlowTableStatus returns an array of flow table status.
@@ -714,6 +718,9 @@ func (c *client) generatePipelines() {
 			c.connectUplinkToBridge)
 		c.activatedFeatures = append(c.activatedFeatures, c.featureService)
 		c.traceableFeatures = append(c.traceableFeatures, c.featureService)
+	} else {
+		c.featureExNodeConnectivity = newFeatureVMBMConnectivity(c.cookieAllocator, c.ipProtocols)
+		c.activatedFeatures = append(c.activatedFeatures, c.featureExNodeConnectivity)
 	}
 
 	c.featureNetworkPolicy = newFeatureNetworkPolicy(c.cookieAllocator,
@@ -722,7 +729,8 @@ func (c *client) generatePipelines() {
 		c.ovsMetersAreSupported,
 		c.enableDenyTracking,
 		c.enableAntreaPolicy,
-		c.connectUplinkToBridge)
+		c.connectUplinkToBridge,
+		c.nodeType)
 	c.activatedFeatures = append(c.activatedFeatures, c.featureNetworkPolicy)
 	c.traceableFeatures = append(c.traceableFeatures, c.featureNetworkPolicy)
 
@@ -746,6 +754,9 @@ func (c *client) generatePipelines() {
 		if c.enableMulticast {
 			pipelineIDs = append(pipelineIDs, pipelineMulticast)
 		}
+	}
+	if c.nodeType == config.ExternalNode {
+		pipelineIDs = append(pipelineIDs, pipelineNotIP)
 	}
 
 	// For every pipeline, get required tables from every active feature and store the required tables in a map to avoid
