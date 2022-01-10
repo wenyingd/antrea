@@ -71,9 +71,12 @@ const (
 	pipelineIP
 	// pipelineMulticast is used to process multicast packets.
 	pipelineMulticast
+	// pipelineNotIP is used to process the traffic of non-IP packets. This pipeline is used when ExternalNode feature
+	// is enabled.
+	pipelineNotIP
 
 	firstPipeline = pipelineRoot
-	lastPipeline  = pipelineMulticast
+	lastPipeline  = pipelineNotIP
 )
 
 const (
@@ -248,6 +251,17 @@ func (f *featureMulticast) getRequiredTables() []*Table {
 
 func (f *featureTraceflow) getRequiredTables() []*Table {
 	return nil
+}
+
+func (f *featureExternalNodeConnectivity) getRequiredTables() []*Table {
+	return []*Table{
+		ClassifierTable,
+		ConntrackTable,
+		ConntrackStateTable,
+		ConntrackCommitTable,
+		L2ForwardingOutTable,
+		NotIPTable,
+	}
 }
 
 // traceableFeature is the interface to support Traceflow in Antrea data path. Any other feature expected to trace the

@@ -15,9 +15,10 @@
 package interfacestore
 
 import (
-	"k8s.io/apimachinery/pkg/util/sets"
 	"net"
 	"strconv"
+
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"

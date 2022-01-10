@@ -15,6 +15,7 @@
 package openflow
 
 import (
+	"antrea.io/antrea/pkg/agent/config"
 	"fmt"
 	"net"
 	"strconv"
@@ -1773,6 +1774,7 @@ type featureNetworkPolicy struct {
 	cookieAllocator cookie.Allocator
 	ipProtocols     []binding.Protocol
 	bridge          binding.Bridge
+	nodeType        config.NodeType
 
 	// globalConjMatchFlowCache is a global map for conjMatchFlowContext. The key is a string generated from the
 	// conjMatchFlowContext.
@@ -1807,11 +1809,13 @@ func newFeatureNetworkPolicy(
 	ovsMetersAreSupported,
 	enableDenyTracking,
 	enableAntreaPolicy bool,
-	connectUplinkToBridge bool) *featureNetworkPolicy {
+	connectUplinkToBridge bool,
+	nodeType config.NodeType) *featureNetworkPolicy {
 	return &featureNetworkPolicy{
 		cookieAllocator:          cookieAllocator,
 		ipProtocols:              ipProtocols,
 		bridge:                   bridge,
+		nodeType:                 nodeType,
 		globalConjMatchFlowCache: make(map[string]*conjMatchFlowContext),
 		policyCache:              cache.NewIndexer(policyConjKeyFunc, cache.Indexers{priorityIndex: priorityIndexFunc}),
 		ovsMetersAreSupported:    ovsMetersAreSupported,
@@ -1823,7 +1827,10 @@ func newFeatureNetworkPolicy(
 }
 
 func (f *featureNetworkPolicy) initFlows() []binding.Flow {
-	f.egressTables = map[uint8]struct{}{EgressRuleTable.GetID(): {}, EgressDefaultTable.GetID(): {}}
+	f.egressTables = map[uint8]struct{}{EgressDefaultTable.GetID(): {}}
+	if f.nodeType == config.K8sNode {
+		f.egressTables[EgressRuleTable.GetID()] = struct{}{}
+	}
 	if f.enableAntreaPolicy {
 		f.egressTables[AntreaPolicyEgressRuleTable.GetID()] = struct{}{}
 	}
@@ -1831,6 +1838,8 @@ func (f *featureNetworkPolicy) initFlows() []binding.Flow {
 	flows = append(flows, f.establishedConnectionFlows()...)
 	flows = append(flows, f.relatedConnectionFlows()...)
 	flows = append(flows, f.rejectBypassNetworkpolicyFlows()...)
-	flows = append(flows, f.ingressClassifierFlows()...)
+	if f.nodeType == config.K8sNode  {
+		flows = append(flows, f.ingressClassifierFlows()...)
+	}
 	return flows
 }

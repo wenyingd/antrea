@@ -177,13 +177,13 @@ func (c *interfaceCache) GetContainerInterface(containerID string) (*InterfaceCo
 }
 
 func (c *interfaceCache) GetInterfacesByEntity(name, namespace string) []*InterfaceConfig {
-	eeKey := k8s.NamespacedName(namespace, name)
-	objs, _ := c.cache.ByIndex(externalEntityIndex, eeKey)
+	entityKey := k8s.NamespacedName(namespace, name)
+	objs, _ := c.cache.ByIndex(externalEntityIndex, entityKey)
 	interfaces := make([]*InterfaceConfig, len(objs))
 	for i := range objs {
 		iface := objs[i].(*InterfaceConfig)
-		for _, ip := range iface.ExternalEntityKeyIPsMap[eeKey].List() {
-			iface.IPs = append(iface.IPs, net.ParseIP(ip))
+		for _, entityIP := range iface.ExternalEntityKeyIPsMap[entityKey].List() {
+			iface.IPs = append(iface.IPs, net.ParseIP(entityIP))
 		}
 		interfaces[i] = iface
 	}
