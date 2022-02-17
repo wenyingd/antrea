@@ -38,6 +38,7 @@ import (
 	"antrea.io/antrea/pkg/agent/controller/noderoute"
 	"antrea.io/antrea/pkg/agent/controller/serviceexternalip"
 	"antrea.io/antrea/pkg/agent/controller/traceflow"
+	"antrea.io/antrea/pkg/agent/externalnode"
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/flowexporter/exporter"
 	"antrea.io/antrea/pkg/agent/interfacestore"
@@ -181,6 +182,10 @@ func run(o *Options) error {
 	// networkReadyCh is used to notify that the Node's network is ready.
 	// Functions that rely on the Node's network should wait for the channel to close.
 	networkReadyCh := make(chan struct{})
+
+	// eeStoreReadyCh is used to notify that the ifaceStore is ready for network policy to read endpoint IPs
+	eeStoreReadyCh := make(chan struct{})
+
 	// set up signal capture: the first SIGTERM / SIGINT signal is handled gracefully and will
 	// cause the stopCh channel to be closed; if another signal is received before the program
 	// exits, we will force exit.
@@ -275,7 +280,15 @@ func run(o *Options) error {
 	// podUpdateChannel is a channel for receiving Pod updates from CNIServer and
 	// notifying NetworkPolicyController and EgressController to reconcile rules
 	// related to the updated Pods.
-	podUpdateChannel := channel.NewSubscribableChannel("PodUpdate", 100)
+	var podUpdateChannel *channel.SubscribableChannel
+	// entityUpdateChannel is a channel for receiving ExternalEntity updates from ExternalEntityController and
+	// notifying NetworkPolicyController to reconcile rules related to the updated ExternalEntities.
+	var entityUpdateChannel *channel.SubscribableChannel
+	if o.nodeType == config.K8sNode {
+		podUpdateChannel = channel.NewSubscribableChannel("PodUpdate", 100)
+	} else {
+		entityUpdateChannel = channel.NewSubscribableChannel("EntityUpdate", 100)
+	}
 	// We set flow poll interval as the time interval for rule deletion in the async
 	// rule cache, which is implemented as part of the idAllocator. This is to preserve
 	// the rule info for populating NetworkPolicy fields in the Flow Exporter even
@@ -287,15 +300,16 @@ func run(o *Options) error {
 	// if AntreaPolicy feature is enabled.
 	statusManagerEnabled := antreaPolicyEnabled
 	loggingEnabled := antreaPolicyEnabled
-
 	networkPolicyController, err := networkpolicy.NewNetworkPolicyController(
 		antreaClientProvider,
 		ofClient,
 		ifaceStore,
 		nodeConfig.Name,
 		podUpdateChannel,
+		entityUpdateChannel,
 		groupCounters,
 		groupIDUpdates,
+		o.nodeType,
 		antreaPolicyEnabled,
 		antreaProxyEnabled,
 		statusManagerEnabled,
@@ -303,7 +317,8 @@ func run(o *Options) error {
 		asyncRuleDeleteInterval,
 		o.config.DNSServerOverride,
 		v4Enabled,
-		v6Enabled)
+		v6Enabled,
+		eeStoreReadyCh)
 	if err != nil {
 		return fmt.Errorf("error creating new NetworkPolicy controller: %v", err)
 	}
@@ -365,6 +380,7 @@ func run(o *Options) error {
 
 	var cniServer *cniserver.CNIServer
 	var cniPodInfoStore cnipodcache.CNIPodInfoStore
+	var externalEntityController *externalnode.ExternalEntityController
 	if o.nodeType == config.K8sNode {
 		isChaining := false
 		if networkConfig.TrafficEncapMode.IsNetworkPolicyOnly() {
@@ -392,6 +408,12 @@ func run(o *Options) error {
 			if err != nil {
 				return fmt.Errorf("error initializing CNI server: %v", err)
 			}
+		}
+	} else {
+		externalEntityInformer := crdInformerFactory.Crd().V1alpha2().ExternalEntities()
+		externalEntityController, err = externalnode.NewExternalEntityController(ovsBridgeClient, ofClient, externalEntityInformer, ifaceStore, entityUpdateChannel, eeStoreReadyCh, o.config.Namespace)
+		if err != nil {
+			return fmt.Errorf("error creating ExternalEntity controller: %v", err)
 		}
 	}
 
@@ -485,6 +507,9 @@ func run(o *Options) error {
 		go podUpdateChannel.Run(stopCh)
 		go cniServer.Run(stopCh)
 		go nodeRouteController.Run(stopCh)
+	} else {
+		go entityUpdateChannel.Run(stopCh)
+		go externalEntityController.Run(stopCh)
 	}
 
 	go antreaClientProvider.Run(stopCh)

@@ -16,6 +16,7 @@ package interfacestore
 
 import (
 	"fmt"
+	"net"
 
 	"k8s.io/client-go/tools/cache"
 
@@ -37,6 +38,10 @@ const (
 	// Only container interfaces will be indexed.
 	// One Pod may get more than one interface.
 	podIndex = "pod"
+	// externalEntityIndex is the index built with InterfaceConfig.ExternalEntityNamespace + ExternalEntityName.
+	// Only vm/bm interfaces will be indexed.
+	// One ExternalEntity may get more than one interface.
+	externalEntityIndex = "externalEntity"
 	// interfaceIPIndex is the index built with InterfaceConfig.IP
 	// Only the interfaces with IP get indexed.
 	interfaceIPIndex = "ip"
@@ -172,7 +177,17 @@ func (c *interfaceCache) GetContainerInterface(containerID string) (*InterfaceCo
 }
 
 func (c *interfaceCache) GetInterfacesByEntity(name, namespace string) []*InterfaceConfig {
-	return c.GetContainerInterfacesByPod(name, namespace)
+	eeKey := k8s.NamespacedName(namespace, name)
+	objs, _ := c.cache.ByIndex(externalEntityIndex, eeKey)
+	interfaces := make([]*InterfaceConfig, len(objs))
+	for i := range objs {
+		iface := objs[i].(*InterfaceConfig)
+		for _, ip := range iface.ExternalEntityKeyIPsMap[eeKey].List() {
+			iface.IPs = append(iface.IPs, net.ParseIP(ip))
+		}
+		interfaces[i] = iface
+	}
+	return interfaces
 }
 
 // GetContainerInterfacesByPod retrieves InterfaceConfigs for the Pod.
@@ -256,15 +271,28 @@ func interfaceOFPortIndexFunc(obj interface{}) ([]string, error) {
 	return []string{fmt.Sprintf("%d", interfaceConfig.OFPort)}, nil
 }
 
+func externalEntityIndexFunc(obj interface{}) ([]string, error) {
+	interfaceConfig := obj.(*InterfaceConfig)
+	if interfaceConfig.Type != ExternalEntityInterface {
+		return []string{}, nil
+	}
+	var entityKeys []string
+	for key := range interfaceConfig.ExternalEntityKeyIPsMap {
+		entityKeys = append(entityKeys, key)
+	}
+	return entityKeys, nil
+}
+
 func NewInterfaceStore() InterfaceStore {
 	return &interfaceCache{
 		cache: cache.NewIndexer(getInterfaceKey, cache.Indexers{
-			interfaceNameIndex: interfaceNameIndexFunc,
-			interfaceTypeIndex: interfaceTypeIndexFunc,
-			containerIDIndex:   containerIDIndexFunc,
-			podIndex:           podIndexFunc,
-			interfaceIPIndex:   interfaceIPIndexFunc,
-			ofPortIndex:        interfaceOFPortIndexFunc,
+			interfaceNameIndex:  interfaceNameIndexFunc,
+			interfaceTypeIndex:  interfaceTypeIndexFunc,
+			containerIDIndex:    containerIDIndexFunc,
+			podIndex:            podIndexFunc,
+			interfaceIPIndex:    interfaceIPIndexFunc,
+			ofPortIndex:         interfaceOFPortIndexFunc,
+			externalEntityIndex: externalEntityIndexFunc,
 		}),
 	}
 }

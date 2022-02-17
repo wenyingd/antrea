@@ -51,6 +51,7 @@ const (
 	defaultStaleConnectionTimeout  = 5 * time.Minute
 	defaultNPLPortRange            = "61000-62000"
 	defaultNodeType                = config.K8sNode
+	defaultNamespace               = "default"
 )
 
 type Options struct {
@@ -443,6 +444,9 @@ func (o *Options) validateExternalNodeOptions() error {
 }
 
 func (o *Options) setExternalNodeDefaultOptions() {
+	if o.config.Namespace == "" {
+		o.config.Namespace = defaultNamespace
+	}
 	// Following options are default values for agent running on a Virtual Machine.
 	// They are set to avoid unexpected agent crash.
 	if o.config.TrafficEncapMode == "" {
