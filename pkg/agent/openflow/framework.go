@@ -15,6 +15,7 @@
 package openflow
 
 import (
+	config1 "antrea.io/antrea/pkg/agent/config"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
@@ -196,11 +197,8 @@ func (f *featurePodConnectivity) getRequiredTables() []*Table {
 
 func (f *featureNetworkPolicy) getRequiredTables() []*Table {
 	tables := []*Table{
-		EgressRuleTable,
 		EgressDefaultTable,
 		EgressMetricTable,
-		IngressSecurityClassifierTable,
-		IngressRuleTable,
 		IngressDefaultTable,
 		IngressMetricTable,
 	}
@@ -208,6 +206,18 @@ func (f *featureNetworkPolicy) getRequiredTables() []*Table {
 		tables = append(tables,
 			AntreaPolicyEgressRuleTable,
 			AntreaPolicyIngressRuleTable,
+			IngressSecurityClassifierTable,
+		)
+	}
+	if f.nodeType == config1.ExternalNode {
+		tables = append(tables,
+			EgressSecurityClassifierTable,
+		)
+	} else {
+		tables = append(tables,
+			// PipelineIP, EgressSecurityStage
+			EgressRuleTable,
+			IngressRuleTable,
 		)
 	}
 
@@ -258,6 +268,7 @@ func (f *featureExternalNodeConnectivity) getRequiredTables() []*Table {
 		ClassifierTable,
 		ConntrackTable,
 		ConntrackStateTable,
+		L3ForwardingTable,
 		ConntrackCommitTable,
 		L2ForwardingOutTable,
 		NotIPTable,

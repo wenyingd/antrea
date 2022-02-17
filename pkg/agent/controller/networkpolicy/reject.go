@@ -122,6 +122,9 @@ func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
 	//    response is being generated for locally-originated traffic that went through
 	//    kube-proxy and was re-injected into the bridge through antrea-gw.
 	isServiceTraffic := func() bool {
+		if c.nodeType == config.ExternalNode {
+			return false
+		}
 		if c.antreaProxyEnabled {
 			matches := pktIn.GetMatches()
 			if match := getMatchRegField(matches, openflow.ServiceEPStateField); match != nil {
@@ -249,12 +252,19 @@ func getRejectOFPorts(rejectType RejectType, sIface, dIface *interfacestore.Inte
 	case RejectServiceLocal:
 		inPort = uint32(sIface.OFPort)
 	case RejectPodRemoteToLocal:
-		inPort = config.HostGatewayOFPort
+		if dIface.Type == interfacestore.ExternalEntityInterface {
+			inPort = uint32(dIface.EntityInterfaceConfig.UplinkPort.OFPort)
+		} else {
+			inPort = config.HostGatewayOFPort
+		}
 		outPort = uint32(dIface.OFPort)
 	case RejectServiceRemoteToLocal:
 		inPort = config.HostGatewayOFPort
 	case RejectLocalToRemote:
 		inPort = uint32(sIface.OFPort)
+		if sIface.Type == interfacestore.ExternalEntityInterface {
+			outPort = uint32(sIface.EntityInterfaceConfig.UplinkPort.OFPort)
+		}
 	case RejectNoAPServiceLocal:
 		inPort = uint32(sIface.OFPort)
 		outPort = config.HostGatewayOFPort

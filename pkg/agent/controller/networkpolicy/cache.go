@@ -335,7 +335,7 @@ func toServicesIndexFunc(obj interface{}) ([]string, error) {
 }
 
 // newRuleCache returns a new *ruleCache.
-func newRuleCache(dirtyRuleHandler func(string), podUpdateSubscriber channel.Subscriber, entityUpdateSubscriber channel.Subscriber, serviceGroupIDUpdate <-chan string) *ruleCache {
+func newRuleCache(dirtyRuleHandler func(string), podUpdateSubscriber *channel.SubscribableChannel, entityUpdateSubscriber *channel.SubscribableChannel, serviceGroupIDUpdate <-chan string) *ruleCache {
 	rules := cache.NewIndexer(
 		ruleKeyFunc,
 		cache.Indexers{addressGroupIndex: addressGroupIndexFunc, appliedToGroupIndex: appliedToGroupIndexFunc, policyIndex: policyIndexFunc, toServicesIndex: toServicesIndexFunc},
