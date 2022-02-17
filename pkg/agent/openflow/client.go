@@ -283,6 +283,7 @@ type Client interface {
 	InstallHostUplinkFlows(hostInterfaceName string, hostPort int32, uplinkPort int32) error
 	// UninstallHostUplinkFlows removes the flows installed to forward packet between uplinkPort and hostPort.
 	UninstallHostUplinkFlows(hostInterfaceName string) error
+	InstallVMReservedFlows(proto binding.Protocol, ipnet *net.IPNet, ip net.IP, port uint16, isIngress bool) error
 }
 
 // GetFlowTableStatus returns an array of flow table status.

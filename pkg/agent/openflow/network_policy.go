@@ -1392,8 +1392,10 @@ func (c *client) UninstallPolicyRuleFlows(ruleID uint32) ([]string, error) {
 // policyRuleConjunction is installed, after the deletion of that policyRuleConjunction.
 func (f *featureNetworkPolicy) getStalePriorities(conj *policyRuleConjunction) (staleOFPriorities []string) {
 	var ofPrioritiesPotentiallyStale []string
-	if conj.ruleTableID != IngressRuleTable.ofTable.GetID() && conj.ruleTableID != EgressRuleTable.ofTable.GetID() {
-		ofPrioritiesPotentiallyStale = conj.ActionFlowPriorities()
+	if f.nodeType == config.K8sNode {
+		if conj.ruleTableID != IngressRuleTable.ofTable.GetID() && conj.ruleTableID != EgressRuleTable.ofTable.GetID() {
+			ofPrioritiesPotentiallyStale = conj.ActionFlowPriorities()
+		}
 	}
 	klog.V(4).Infof("Potential stale ofpriority %v found", ofPrioritiesPotentiallyStale)
 	for _, p := range ofPrioritiesPotentiallyStale {
@@ -1835,11 +1837,66 @@ func (f *featureNetworkPolicy) initFlows() []binding.Flow {
 		f.egressTables[AntreaPolicyEgressRuleTable.GetID()] = struct{}{}
 	}
 	var flows []binding.Flow
-	flows = append(flows, f.establishedConnectionFlows()...)
-	flows = append(flows, f.relatedConnectionFlows()...)
-	flows = append(flows, f.rejectBypassNetworkpolicyFlows()...)
-	if f.nodeType == config.K8sNode  {
+	if f.nodeType == config.K8sNode {
+		f.egressTables[EgressRuleTable.GetID()] = struct{}{}
+		flows = append(flows, f.establishedConnectionFlows()...)
+		flows = append(flows, f.relatedConnectionFlows()...)
+		flows = append(flows, f.rejectBypassNetworkpolicyFlows()...)
 		flows = append(flows, f.ingressClassifierFlows()...)
+	} else {
+		flows = append(flows, f.bypassPolicyRuleCheckFlows()...)
+	}
+	return flows
+}
+
+// bypassPolicyRuleCheckFlows installs OpenFlow entries to resubmit the packets in an established or related
+// connections to the metric table in the same stage directly. It also resubmits the packets marked with
+// "CustomReasonReject" to the metric table. So that these packets would skip the check on NetworkPolicy rules.
+func (f *featureNetworkPolicy) bypassPolicyRuleCheckFlows() []binding.Flow {
+	var flows []binding.Flow
+	for _, ipProtocol := range f.ipProtocols {
+		flows = append(flows,
+			EgressSecurityClassifierTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(f.cookieAllocator.Request(f.category).Raw()).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateEst(true).
+				Action().ResubmitToTables(EgressMetricTable.GetID()).
+				Done(),
+			EgressSecurityClassifierTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(f.cookieAllocator.Request(f.category).Raw()).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateRel(true).
+				Action().ResubmitToTables(EgressMetricTable.GetID()).
+				Done(),
+			EgressSecurityClassifierTable.ofTable.BuildFlow(priorityTopAntreaPolicy).
+				Cookie(f.cookieAllocator.Request(f.category).Raw()).
+				MatchProtocol(ipProtocol).
+				MatchRegFieldWithValue(CustomReasonField, CustomReasonReject).
+				Action().ResubmitToTables(EgressMetricTable.GetID()).
+				Done(),
+			IngressSecurityClassifierTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(f.cookieAllocator.Request(f.category).Raw()).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateEst(true).
+				Action().ResubmitToTables(IngressMetricTable.GetID()).
+				Done(),
+			IngressSecurityClassifierTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(f.cookieAllocator.Request(f.category).Raw()).
+				MatchProtocol(ipProtocol).
+				MatchCTStateNew(false).
+				MatchCTStateRel(true).
+				Action().ResubmitToTables(IngressMetricTable.GetID()).
+				Done(),
+			IngressSecurityClassifierTable.ofTable.BuildFlow(priorityTopAntreaPolicy).
+				Cookie(f.cookieAllocator.Request(f.category).Raw()).
+				MatchProtocol(ipProtocol).
+				MatchRegFieldWithValue(CustomReasonField, CustomReasonReject).
+				Action().ResubmitToTables(IngressMetricTable.GetID()).
+				Done(),
+		)
 	}
 	return flows
 }

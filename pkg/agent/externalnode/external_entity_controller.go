@@ -36,6 +36,7 @@ import (
 	"antrea.io/antrea/pkg/apis/crd/v1alpha2"
 	eeinformer "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha2"
 	eelister "antrea.io/antrea/pkg/client/listers/crd/v1alpha2"
+	binding "antrea.io/antrea/pkg/ovs/openflow"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	"antrea.io/antrea/pkg/ovs/ovsctl"
 	"antrea.io/antrea/pkg/util/channel"
@@ -59,7 +60,8 @@ const (
 	ovsExternalIDUplinkPort       = "uplink-port"
 	ovsExternalIDExternalEntities = "external-entities"
 
-	eeSplitter = ","
+	eeSplitter          = ","
+	reserveRuleSplitter = ":"
 )
 
 var (
@@ -83,6 +85,20 @@ type ExternalEntityController struct {
 	eeStoreReadyCh       chan<- struct{}
 	namespace            string
 	endpointNameIPMap    map[string]string
+	reservedHostPorts    []reserveHostPort
+	reservedRules        []string
+}
+
+type reserveHostPort struct {
+	// The protocol (TCP, UDP, or SCTP) which traffic must match.
+	protocol binding.Protocol
+	// The dst port on the given protocol.
+	port uint16
+	// The remote IP to which is reserved.
+	ip net.IP
+	// The remote CIDR to which is reserved.
+	ipnet   *net.IPNet
+	ingress bool
 }
 
 type EndpointInterfaceNotFound struct {
@@ -96,7 +112,7 @@ func newEndpointInterfaceNotFound(ep v1alpha2.Endpoint) EndpointInterfaceNotFoun
 }
 
 func NewExternalEntityController(ovsBridgeClient ovsconfig.OVSBridgeClient, ofClient openflow.Client, externalEntityInformer eeinformer.ExternalEntityInformer,
-	ifaceStore interfacestore.InterfaceStore, entityUpdateNotifier channel.Notifier, eeStoreReadyCh chan<- struct{}, namespace string) (*ExternalEntityController, error) {
+	ifaceStore interfacestore.InterfaceStore, entityUpdateNotifier channel.Notifier, eeStoreReadyCh chan<- struct{}, namespace string, reservedRules []string) (*ExternalEntityController, error) {
 	c := &ExternalEntityController{
 		ovsBridgeClient:            ovsBridgeClient,
 		ovsctlClient:               ovsctl.NewClient(ovsBridgeClient.GetBridgeName()),
@@ -110,6 +126,7 @@ func NewExternalEntityController(ovsBridgeClient ovsconfig.OVSBridgeClient, ofCl
 		entityUpdateNotifier:       entityUpdateNotifier,
 		eeStoreReadyCh:             eeStoreReadyCh,
 		endpointNameIPMap:          make(map[string]string),
+		reservedRules:              reservedRules,
 	}
 	nodeName, err := env.GetNodeName()
 	if err != nil {
@@ -207,6 +224,9 @@ func (c *ExternalEntityController) reconcile() error {
 	if err := c.reconcileExternalEntityInterfaces(); err != nil {
 		return fmt.Errorf("failed to reconcile ExternalEntity interfaces %v", err)
 	}
+	if err := c.reconcileReservedFlows(); err != nil {
+		return fmt.Errorf("failed to reconcile reserved flows %v", err)
+	}
 	// Notify NetworkPolicyController interface store has contains ExternalEntityInterfaceConfig with endpoint IPs.
 	close(c.eeStoreReadyCh)
 	return nil
@@ -269,6 +289,21 @@ func (c *ExternalEntityController) reconcileExternalEntityInterfaces() error {
 			}
 		}
 	}
+	return nil
+}
+
+func (c *ExternalEntityController) reconcileReservedFlows() error {
+	if err := c.getReservedHostPorts(); err != nil {
+		return err
+	}
+	for _, rhp := range c.reservedHostPorts {
+		klog.V(2).InfoS("Installing reserved flows", "protocol", rhp.protocol, "IP", rhp.ip, "IPNet", rhp.ipnet, "port", rhp.port, "ingress", rhp.ingress)
+		if err := c.ofClient.InstallVMReservedFlows(rhp.protocol, rhp.ipnet, rhp.ip, rhp.port, rhp.ingress); err != nil {
+			klog.ErrorS(err, "Failed to install reserved flows", "protocol", rhp.protocol, "IP", rhp.ip, "IPNet", rhp.ipnet, "port", rhp.port, "direction", rhp.ingress)
+			return err
+		}
+	}
+	klog.InfoS("Installed reserved flows")
 	return nil
 }
 
@@ -398,14 +433,13 @@ func (c *ExternalEntityController) addEntityEndpoint(eeKey string, ifName string
 		klog.InfoS("Creating OVS ports and flows for EntityEndpoint", "ifName", ifName, "ExternalEntityKey", eeKey)
 		uplinkName := genUplinkInterfaceName(ifName)
 		klog.V(2).InfoS("Creating OVS ports for host interface and ExternalEntity", "externalEntity", eeKey, "interface", ifName)
-		newInterface, err := c.createOVSPortsAndFlows(uplinkName, ifName, eeKey)
+		hostIface, err := c.createOVSPortsAndFlows(uplinkName, ifName, eeKey)
 		if err != nil {
 			return err
 		}
 		keyIPsMap := make(map[string]sets.String)
 		keyIPsMap[eeKey] = ips
-		hostIface.ExternalEntityKeyIPsMap = keyIPsMap
-		c.ifaceStore.AddInterface(newInterface)
+		c.updateInterfaceKeyIPsMap(hostIface, keyIPsMap)
 		return nil
 	}
 
@@ -420,7 +454,7 @@ func (c *ExternalEntityController) addEntityEndpoint(eeKey string, ifName string
 			klog.InfoS("Skipping updating ExternalEntityKeyIPsMap for key ip already exists", "ExternalEntityKey", eeKey, "ifName", ifName, "ips", ips)
 			return nil
 		} else {
-			ifIPs.Union(ips)
+			ifIPs = ifIPs.Union(ips)
 		}
 		updatedKeyIPsMap[eeKey] = ifIPs
 	} else {
@@ -735,6 +769,60 @@ func (c *ExternalEntityController) removeOVSPortsAndFlows(interfaceConfig *inter
 	if err := util.MoveIFConfigurations(adapterConfig.IPs, adapterConfig.Routes, adapterConfig.MAC, adapterConfig.MTU, uplinkIfName, hostIfName); err != nil {
 		klog.ErrorS(err, "Failed to move back configuration to the host interface", "hostInterface", hostIfName)
 		return err
+	}
+	return nil
+}
+
+func (c *ExternalEntityController) getReservedHostPorts() error {
+	for _, s := range c.reservedRules {
+		rule := strings.Split(s, reserveRuleSplitter)
+
+		// parse direction.
+		direction := false
+		if rule[0] == "in" {
+			direction = true
+		}
+
+		// parse protocol.
+		var proto binding.Protocol
+		switch rule[1] {
+		case "tcp":
+			proto = binding.ProtocolTCP
+		case "udp":
+			proto = binding.ProtocolUDP
+		case "icmp":
+			proto = binding.ProtocolICMP
+		default:
+			proto = binding.ProtocolIP
+		}
+
+		// parse remote IP or CIDR.
+		var remoteCIDR *net.IPNet
+		var remoteIP net.IP
+		var err error
+		if rule[2] != "" {
+			if strings.Contains(rule[2], "/") {
+				_, remoteCIDR, err = net.ParseCIDR(rule[2])
+				if err != nil {
+					return err
+				}
+			} else {
+				remoteIP = net.ParseIP(rule[2])
+			}
+		}
+
+		// parse port number.
+		var port int
+		if rule[3] != "" {
+			port, _ = strconv.Atoi(rule[3])
+		}
+		c.reservedHostPorts = append(c.reservedHostPorts, reserveHostPort{
+			ipnet:    remoteCIDR,
+			ip:       remoteIP,
+			port:     uint16(port),
+			protocol: proto,
+			ingress:  direction,
+		})
 	}
 	return nil
 }

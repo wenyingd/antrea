@@ -146,10 +146,11 @@ var (
 	DNATTable = newTable("DNAT", stagePreRouting, pipelineIP)
 
 	// Tables in stageEgressSecurity:
-	AntreaPolicyEgressRuleTable = newTable("AntreaPolicyEgressRule", stageEgressSecurity, pipelineIP)
-	EgressRuleTable             = newTable("EgressRule", stageEgressSecurity, pipelineIP)
-	EgressDefaultTable          = newTable("EgressDefaultRule", stageEgressSecurity, pipelineIP)
-	EgressMetricTable           = newTable("EgressMetric", stageEgressSecurity, pipelineIP)
+	EgressSecurityClassifierTable = newTable("EgressSecurityClassifier", stageEgressSecurity, pipelineIP)
+	AntreaPolicyEgressRuleTable   = newTable("AntreaPolicyEgressRule", stageEgressSecurity, pipelineIP)
+	EgressRuleTable               = newTable("EgressRule", stageEgressSecurity, pipelineIP)
+	EgressDefaultTable            = newTable("EgressDefaultRule", stageEgressSecurity, pipelineIP)
+	EgressMetricTable             = newTable("EgressMetric", stageEgressSecurity, pipelineIP)
 
 	// Tables in stageRouting:
 	L3ForwardingTable = newTable("L3Forwarding", stageRouting, pipelineIP)
@@ -164,6 +165,7 @@ var (
 	L2ForwardingCalcTable = newTable("L2ForwardingCalc", stageSwitching, pipelineIP)
 
 	// Tables in stageIngressSecurity:
+	AntreaPolicyIngressBypassTable = newTable("AntreaPolicyIngressBypass", stageIngressSecurity, pipelineIP)
 	IngressSecurityClassifierTable = newTable("IngressSecurityClassifier", stageIngressSecurity, pipelineIP)
 	AntreaPolicyIngressRuleTable   = newTable("AntreaPolicyIngressRule", stageIngressSecurity, pipelineIP)
 	IngressRuleTable               = newTable("IngressRule", stageIngressSecurity, pipelineIP)
@@ -1817,7 +1819,7 @@ func (f *featureNetworkPolicy) establishedConnectionFlows() []binding.Flow {
 	ingressDropTable := IngressDefaultTable
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	var allEstFlows []binding.Flow
-	if f.nodeType == config.K8sNode  {
+	if f.nodeType == config.K8sNode {
 		for _, ipProtocol := range f.ipProtocols {
 			egressEstFlow := EgressRuleTable.ofTable.BuildFlow(priorityHigh).
 				Cookie(cookieID).

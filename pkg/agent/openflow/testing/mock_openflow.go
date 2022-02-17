@@ -435,6 +435,20 @@ func (mr *MockClientMockRecorder) InstallTraceflowFlows(arg0, arg1, arg2, arg3, 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InstallTraceflowFlows", reflect.TypeOf((*MockClient)(nil).InstallTraceflowFlows), arg0, arg1, arg2, arg3, arg4, arg5, arg6)
 }
 
+// InstallVMReservedFlows mocks base method
+func (m *MockClient) InstallVMReservedFlows(arg0 openflow.Protocol, arg1 *net.IPNet, arg2 net.IP, arg3 uint16, arg4 bool) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "InstallVMReservedFlows", arg0, arg1, arg2, arg3, arg4)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// InstallVMReservedFlows indicates an expected call of InstallVMReservedFlows
+func (mr *MockClientMockRecorder) InstallVMReservedFlows(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "InstallVMReservedFlows", reflect.TypeOf((*MockClient)(nil).InstallVMReservedFlows), arg0, arg1, arg2, arg3, arg4)
+}
+
 // IsConnected mocks base method
 func (m *MockClient) IsConnected() bool {
 	m.ctrl.T.Helper()

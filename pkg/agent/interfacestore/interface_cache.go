@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 
 	"antrea.io/antrea/pkg/agent/metrics"
@@ -251,6 +252,13 @@ func podIndexFunc(obj interface{}) ([]string, error) {
 
 func interfaceIPIndexFunc(obj interface{}) ([]string, error) {
 	interfaceConfig := obj.(*InterfaceConfig)
+	if interfaceConfig.Type == ExternalEntityInterface {
+		allIPs := sets.NewString()
+		for _, ips := range interfaceConfig.ExternalEntityKeyIPsMap {
+			allIPs = allIPs.Union(ips)
+		}
+		return allIPs.List(), nil
+	}
 	if interfaceConfig.IPs == nil {
 		// If interfaceConfig IP is not set, we return empty key.
 		return []string{}, nil
