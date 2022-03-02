@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/Microsoft/hcsshim"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/config"
@@ -51,7 +52,7 @@ func (i *Initializer) prepareHostNetwork() error {
 	// Get uplink network configuration. The uplink interface is the one used for transporting Pod traffic across Nodes.
 	// Use the interface specified with "transportInterface" in the configuration if configured, otherwise the interface
 	// configured with NodeIP is used as uplink.
-	_, _, adapter, err := i.getNodeInterfaceFromIP(&ip.DualStackIPs{IPv4: i.nodeConfig.NodeTransportIPv4Addr.IP})
+	_, _, adapter, err := i.getNodeInterfaceFromIP(&ip.DualStackIPs{IPv4: i.nodeConfig.NodeTransportIPv4Addr.IP, IPv6: i.nodeConfig.NodeTransportIPv6Addr.IP})
 	if err != nil {
 		return err
 	}
@@ -70,18 +71,33 @@ func (i *Initializer) prepareHostNetwork() error {
 	}
 	i.nodeConfig.UplinkNetConfig.Name = adapter.Name
 	i.nodeConfig.UplinkNetConfig.MAC = adapter.HardwareAddr
-	i.nodeConfig.UplinkNetConfig.IP = i.nodeConfig.NodeTransportIPv4Addr
 	i.nodeConfig.UplinkNetConfig.Index = adapter.Index
-	defaultGW, err := util.GetDefaultGatewayByInterfaceIndex(adapter.Index)
-	if err != nil {
-		if strings.Contains(err.Error(), "No matching MSFT_NetRoute objects found") {
-			klog.InfoS("No default gateway found on interface", "interface", adapter.Name)
-			defaultGW = ""
-		} else {
-			return err
+	getIPConfigWithDefaultGateway := func(nodeIPCIDR *net.IPNet) error {
+		defaultGW, err := util.GetDefaultGatewayByInterfaceIndex(adapter.Index, nodeIPCIDR.IP.To4() == nil)
+		if err != nil {
+			if strings.Contains(err.Error(), "No matching MSFT_NetRoute objects found") {
+				klog.InfoS("No default gateway found on interface", "interface", adapter.Name)
+				defaultGW = ""
+			} else {
+				return err
+			}
+		}
+		ipConfig := config.IPConfig{
+			Address: nodeIPCIDR,
+			Gateway: net.ParseIP(defaultGW),
+		}
+		i.nodeConfig.UplinkNetConfig.IPs = append(i.nodeConfig.UplinkNetConfig.IPs, ipConfig)
+		return nil
+	}
+	addrs, _ := adapter.Addrs()
+	for _, addr := range addrs {
+		ipnet := addr.(*net.IPNet)
+		if ipnet.IP.IsGlobalUnicast() {
+			if err := getIPConfigWithDefaultGateway(ipnet); err != nil {
+				return err
+			}
 		}
 	}
-	i.nodeConfig.UplinkNetConfig.Gateway = defaultGW
 	dnsServers, err := util.GetDNServersByInterfaceIndex(adapter.Index)
 	if err != nil {
 		return err
@@ -93,11 +109,17 @@ func (i *Initializer) prepareHostNetwork() error {
 		return err
 	}
 	// Create HNS network.
-	subnetCIDR := i.nodeConfig.PodIPv4CIDR
-	if subnetCIDR == nil {
-		return fmt.Errorf("failed to find valid IPv4 PodCIDR")
+	subnetCIDRs := []*net.IPNet{}
+	if i.nodeConfig.PodIPv4CIDR != nil {
+		subnetCIDRs = append(subnetCIDRs, i.nodeConfig.PodIPv4CIDR)
 	}
-	return util.PrepareHNSNetwork(subnetCIDR, i.nodeConfig.NodeTransportIPv4Addr, adapter, i.nodeConfig.UplinkNetConfig.Gateway, dnsServers, i.nodeConfig.UplinkNetConfig.Routes, i.ovsBridge)
+	if i.nodeConfig.PodIPv6CIDR != nil {
+		subnetCIDRs = append(subnetCIDRs, i.nodeConfig.PodIPv6CIDR)
+	}
+	if len(subnetCIDRs) == 0 {
+		return fmt.Errorf("failed to find valid PodCIDR")
+	}
+	return util.PrepareHNSNetwork(subnetCIDRs, adapter, i.nodeConfig.UplinkNetConfig.IPs, dnsServers, i.nodeConfig.UplinkNetConfig.Routes, i.ovsBridge)
 }
 
 // prepareOVSBridge adds local port and uplink to ovs bridge.
@@ -206,6 +228,12 @@ func (i *Initializer) getTunnelPortLocalIP() net.IP {
 // The routes will be restored on OVS bridge interface after the IP configuration
 // is moved to the OVS bridge.
 func (i *Initializer) saveHostRoutes() error {
+	defaultGws := sets.NewString()
+	for _, ipc := range i.nodeConfig.UplinkNetConfig.IPs {
+		if ipc.Gateway != nil {
+			defaultGws.Insert(ipc.Gateway.String())
+		}
+	}
 	routes, err := util.GetNetRoutesAll()
 	if err != nil {
 		return err
@@ -214,16 +242,12 @@ func (i *Initializer) saveHostRoutes() error {
 		if route.LinkIndex != i.nodeConfig.UplinkNetConfig.Index {
 			continue
 		}
-		if route.GatewayAddress.String() != i.nodeConfig.UplinkNetConfig.Gateway {
+		if route.GatewayAddress != nil && defaultGws.Has(route.GatewayAddress.String()) {
 			continue
 		}
-		// Skip IPv6 routes before we support IPv6 stack.
-		if route.DestinationSubnet.IP.To4() == nil {
-			continue
-		}
-		// Skip default route. The default route will be added automatically when
-		// configuring IP address on OVS bridge interface.
-		if route.DestinationSubnet.IP.IsUnspecified() {
+		// Skip the default route that is added automatically when
+		// configuring IP address on OVS bridge interface with a default gateway address.
+		if route.DestinationSubnet != nil && route.DestinationSubnet.IP.IsUnspecified() {
 			continue
 		}
 		klog.V(4).Infof("Got host route: %v", route)

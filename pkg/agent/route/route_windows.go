@@ -38,12 +38,15 @@ const (
 	inboundFirewallRuleName  = "Antrea: accept packets from local Pods"
 	outboundFirewallRuleName = "Antrea: accept packets to local Pods"
 
-	antreaNat         = "antrea-nat"
-	antreaNatNodePort = "antrea-nat-nodeport"
+	antreaNat           = "antrea-nat"
+	antreaNatV6         = "antrea-nat-v6"
+	antreaNatNodePort   = "antrea-nat-nodeport"
+	antreaNatNodePortV6 = "antrea-nat-nodeport-v6"
 )
 
 var (
 	virtualServiceIPv4Net = util.NewIPNet(config.VirtualServiceIPv4)
+	virtualServiceIPv6Net = util.NewIPNet(config.VirtualServiceIPv6)
 )
 
 type Client struct {
@@ -89,9 +92,17 @@ func (c *Client) Initialize(nodeConfig *config.NodeConfig, done func()) error {
 		return err
 	}
 	if !c.noSNAT {
-		err := util.NewNetNat(antreaNat, nodeConfig.PodIPv4CIDR)
-		if err != nil {
-			return err
+		if c.networkConfig.IPv4Enabled {
+			err := util.NewNetNat(antreaNat, nodeConfig.PodIPv4CIDR)
+			if err != nil {
+				return err
+			}
+		}
+		if c.networkConfig.IPv6Enabled {
+			err := util.NewNetNat(antreaNatV6, nodeConfig.PodIPv6CIDR)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -112,7 +123,9 @@ func (c *Client) initServiceIPRoutes() error {
 		}
 	}
 	if c.networkConfig.IPv6Enabled {
-		return fmt.Errorf("IPv6 is not supported on Windows")
+		if err := c.addVirtualServiceIPRoute(true); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -210,6 +223,14 @@ func (c *Client) DeleteRoutes(podCIDR *net.IPNet) error {
 // Service traffic from host network to OVS via antrea-gw0.
 func (c *Client) addVirtualServiceIPRoute(isIPv6 bool) error {
 	linkIndex := c.nodeConfig.GatewayConfig.LinkIndex
+	gatewayAddr := net.IPv4zero
+	dstCIDR := virtualServiceIPv4Net
+	nodePortNetNat := antreaNatNodePort
+	if isIPv6 {
+		gatewayAddr = net.IPv6zero
+		dstCIDR = virtualServiceIPv6Net
+		nodePortNetNat = antreaNatNodePortV6
+	}
 
 	// This route is for 2 purposes:
 	// - If for each ClusterIP Service, a route is installed to direct traffic to antrea-gw0, there will be too many
@@ -221,8 +242,8 @@ func (c *Client) addVirtualServiceIPRoute(isIPv6 bool) error {
 	// - For NodePort Service, it is the same.
 	vRoute := &util.Route{
 		LinkIndex:         linkIndex,
-		DestinationSubnet: virtualServiceIPv4Net,
-		GatewayAddress:    net.IPv4zero,
+		DestinationSubnet: dstCIDR,
+		GatewayAddress:    gatewayAddr,
 		RouteMetric:       util.MetricHigh,
 	}
 	if err := util.ReplaceNetRoute(vRoute); err != nil {
@@ -234,7 +255,7 @@ func (c *Client) addVirtualServiceIPRoute(isIPv6 bool) error {
 	// creating a neighbor cache entry to config.VirtualServiceIPv4.
 	vNeighbor := &util.Neighbor{
 		LinkIndex:        linkIndex,
-		IPAddress:        config.VirtualServiceIPv4,
+		IPAddress:        dstCIDR.IP,
 		LinkLayerAddress: openflow.GlobalVirtualMAC,
 		State:            "Permanent",
 	}
@@ -244,7 +265,7 @@ func (c *Client) addVirtualServiceIPRoute(isIPv6 bool) error {
 	klog.InfoS("Added virtual Service IP neighbor", "neighbor", vNeighbor)
 
 	// For NodePort Service, a new NetNat for NetNatStaticMapping is needed.
-	err := util.NewNetNat(antreaNatNodePort, virtualServiceIPv4Net)
+	err := util.NewNetNat(nodePortNetNat, dstCIDR)
 	if err != nil {
 		return err
 	}
@@ -256,12 +277,18 @@ func (c *Client) addVirtualServiceIPRoute(isIPv6 bool) error {
 func (c *Client) addServiceRoute(svcIP net.IP) error {
 	obj, found := c.hostRoutes.Load(svcIP.String())
 	svcIPNet := util.NewIPNet(svcIP)
+	var gateway net.IP
+	if svcIP.To4() != nil {
+		gateway = config.VirtualServiceIPv4
+	} else {
+		gateway = config.VirtualServiceIPv6
+	}
 
 	// Route: Service IP -> VirtualServiceIPv4 (169.254.0.253)
 	route := &util.Route{
 		LinkIndex:         c.nodeConfig.GatewayConfig.LinkIndex,
 		DestinationSubnet: svcIPNet,
-		GatewayAddress:    config.VirtualServiceIPv4,
+		GatewayAddress:    gateway,
 		RouteMetric:       util.MetricHigh,
 	}
 	if found {
@@ -360,13 +387,20 @@ func (c *Client) listRoutes() (map[string]*util.Route, error) {
 
 // initFwRules adds Windows Firewall rules to accept the traffic that is sent to or from local Pods.
 func (c *Client) initFwRules() error {
-	err := c.fwClient.AddRuleAllowIP(inboundFirewallRuleName, winfirewall.FWRuleIn, c.nodeConfig.PodIPv4CIDR)
-	if err != nil {
-		return err
+	podCIDRs := make([]*net.IPNet, 0)
+	if c.networkConfig.IPv4Enabled {
+		podCIDRs = append(podCIDRs, c.nodeConfig.PodIPv4CIDR)
 	}
-	err = c.fwClient.AddRuleAllowIP(outboundFirewallRuleName, winfirewall.FWRuleOut, c.nodeConfig.PodIPv4CIDR)
-	if err != nil {
-		return err
+	if c.networkConfig.IPv6Enabled {
+		podCIDRs = append(podCIDRs, c.nodeConfig.PodIPv6CIDR)
+	}
+	for i := range podCIDRs {
+		if err := c.fwClient.AddRuleAllowIP(inboundFirewallRuleName, winfirewall.FWRuleIn, podCIDRs[i]); err != nil {
+			return err
+		}
+		if err := c.fwClient.AddRuleAllowIP(outboundFirewallRuleName, winfirewall.FWRuleOut, podCIDRs[i]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -381,11 +415,31 @@ func (c *Client) DeleteSNATRule(mark uint32) error {
 
 // TODO: nodePortAddresses is not supported currently.
 func (c *Client) AddNodePort(nodePortAddresses []net.IP, port uint16, protocol binding.Protocol) error {
-	return util.ReplaceNetNatStaticMapping(antreaNatNodePort, "0.0.0.0", port, config.VirtualServiceIPv4.String(), port, string(protocol))
+	if c.networkConfig.IPv4Enabled {
+		if err := util.ReplaceNetNatStaticMapping(antreaNatNodePort, net.IPv4zero.String(), port, config.VirtualServiceIPv4.String(), port, string(protocol)); err != nil {
+			return err
+		}
+	}
+	if c.networkConfig.IPv6Enabled {
+		if err := util.ReplaceNetNatStaticMapping(antreaNatNodePortV6, net.IPv6zero.String(), port, config.VirtualServiceIPv4.String(), port, string(protocol)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Client) DeleteNodePort(nodePortAddresses []net.IP, port uint16, protocol binding.Protocol) error {
-	return util.RemoveNetNatStaticMapping(antreaNatNodePort, "0.0.0.0", port, string(protocol))
+	if c.networkConfig.IPv4Enabled {
+		if err := util.RemoveNetNatStaticMapping(antreaNatNodePort, net.IPv4zero.String(), port, string(protocol)); err != nil {
+			return err
+		}
+	}
+	if c.networkConfig.IPv6Enabled {
+		if err := util.RemoveNetNatStaticMapping(antreaNatNodePortV6, net.IPv6zero.String(), port, string(protocol)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Client) AddLoadBalancer(externalIPs []string) error {

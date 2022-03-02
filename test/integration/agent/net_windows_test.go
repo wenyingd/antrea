@@ -132,7 +132,7 @@ func TestCreateHNSNetwork(t *testing.T) {
 	adapter, err := net.InterfaceByName(adapterName)
 	require.Nil(t, err)
 	t.Logf("Creating HNSNetwork '%s'", testNet)
-	hnsNet, err := util.CreateHNSNetwork(testNet, subnet, nodeIP, adapter)
+	hnsNet, err := util.CreateHNSNetwork(testNet, []*net.IPNet{subnet}, nodeIP, adapter)
 	require.Nil(t, err, "No error expected when creating HNSNetwork")
 	defer func() {
 		t.Logf("Deleting HNSNetwork '%s'", testNet)

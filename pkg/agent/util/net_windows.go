@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/agent/config"
 	ps "antrea.io/antrea/pkg/agent/util/powershell"
 )
 
@@ -150,17 +151,20 @@ func RemoveInterfaceAddress(ifaceName string, ipAddr net.IP) error {
 
 // ConfigureInterfaceAddressWithDefaultGateway adds IPAddress on the specified interface and sets the default gateway
 // for the host.
-func ConfigureInterfaceAddressWithDefaultGateway(ifaceName string, ipConfig *net.IPNet, gateway string) error {
-	ipStr := strings.Split(ipConfig.String(), "/")
-	cmd := fmt.Sprintf(`New-NetIPAddress -InterfaceAlias "%s" -IPAddress %s -PrefixLength %s`, ifaceName, ipStr[0], ipStr[1])
-	if gateway != "" {
-		cmd = fmt.Sprintf("%s -DefaultGateway %s", cmd, gateway)
+func ConfigureInterfaceAddressWithDefaultGateway(ifaceName string, ipConfigs []config.IPConfig) error {
+	for _, ipc := range ipConfigs {
+		ipStr := strings.Split(ipc.Address.String(), "/")
+		cmd := fmt.Sprintf(`New-NetIPAddress -InterfaceAlias "%s" -IPAddress %s -PrefixLength %s`, ifaceName, ipStr[0], ipStr[1])
+		if ipc.Gateway != nil {
+			cmd = fmt.Sprintf("%s -DefaultGateway %s", cmd, ipc.Gateway.String())
+		}
+		_, err := ps.RunCommand(cmd)
+		// If the address already exists, ignore the error.
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return err
+		}
 	}
-	_, err := ps.RunCommand(cmd)
-	// If the address already exists, ignore the error.
-	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		return err
-	}
+
 	return nil
 }
 
@@ -210,22 +214,24 @@ func WindowsHyperVEnabled() (bool, error) {
 // CreateHNSNetwork creates a new HNS Network, whose type is "Transparent". The NetworkAdapter is using the host
 // interface which is configured with Node IP. HNS Network properties "ManagementIP" and "SourceMac" are used to record
 // the original IP and MAC addresses on the network adapter.
-func CreateHNSNetwork(hnsNetName string, subnetCIDR *net.IPNet, nodeIP *net.IPNet, adapter *net.Interface) (*hcsshim.HNSNetwork, error) {
+func CreateHNSNetwork(hnsNetName string, subnetCIDRs []*net.IPNet, nodeIP net.IP, adapter *net.Interface) (*hcsshim.HNSNetwork, error) {
 	adapterMAC := adapter.HardwareAddr
 	adapterName := adapter.Name
-	gateway := ip.NextIP(subnetCIDR.IP.Mask(subnetCIDR.Mask))
+	subnets := make([]hcsshim.Subnet, len(subnetCIDRs))
+	for i, subnetCIDR := range subnetCIDRs {
+		gateway := ip.NextIP(subnetCIDR.IP.Mask(subnetCIDR.Mask))
+		subnets[i] = hcsshim.Subnet{
+			AddressPrefix:  subnetCIDR.String(),
+			GatewayAddress: gateway.String(),
+		}
+	}
 	network := &hcsshim.HNSNetwork{
 		Name:               hnsNetName,
 		Type:               HNSNetworkType,
 		NetworkAdapterName: adapterName,
-		Subnets: []hcsshim.Subnet{
-			{
-				AddressPrefix:  subnetCIDR.String(),
-				GatewayAddress: gateway.String(),
-			},
-		},
-		ManagementIP: nodeIP.String(),
-		SourceMac:    adapterMAC.String(),
+		Subnets:            subnets,
+		ManagementIP:       nodeIP.String(),
+		SourceMac:          adapterMAC.String(),
 	}
 	hnsNet, err := network.Create()
 	if err != nil {
@@ -323,19 +329,18 @@ func addrSliceDifference(s1, s2 []*net.IPNet) []*net.IPNet {
 
 // ConfigureLinkAddresses adds the provided addresses to the interface identified by index idx, if
 // they are missing from the interface. Any other existing address already configured for the
-// interface will be removed, unless it is a link-local address. At the moment, this function only
-// supports IPv4 addresses and will ignore any address in ipNets that is not IPv4.
+// interface will be removed, unless it is not a uni-cast address.
 func ConfigureLinkAddresses(idx int, ipNets []*net.IPNet) error {
 	iface, _ := net.InterfaceByIndex(idx)
 	ifaceName := iface.Name
 	var addrs []*net.IPNet
 	ifaceAddrs, err := iface.Addrs()
 	if err != nil {
-		return fmt.Errorf("failed to query IPv4 address list for interface %s: %v", ifaceName, err)
+		return fmt.Errorf("failed to query address list for interface %s: %v", ifaceName, err)
 	}
 	for _, addr := range ifaceAddrs {
 		if ipNet, ok := addr.(*net.IPNet); ok {
-			if ipNet.IP.To4() != nil && !ipNet.IP.IsLinkLocalUnicast() {
+			if ipNet.IP.IsGlobalUnicast() {
 				addrs = append(addrs, ipNet)
 			}
 		}
@@ -358,10 +363,6 @@ func ConfigureLinkAddresses(idx int, ipNets []*net.IPNet) error {
 
 	for _, addr := range addrsToAdd {
 		klog.V(2).Infof("Adding address %v to interface %s", addr, ifaceName)
-		if addr.IP.To4() == nil {
-			klog.Warningf("Windows only supports IPv4 addresses, skipping this address %v", addr)
-			return nil
-		}
 		if err := ConfigureInterfaceAddress(ifaceName, addr); err != nil {
 			return fmt.Errorf("failed to add address %v to interface %s: %v", addr, ifaceName, err)
 		}
@@ -371,9 +372,10 @@ func ConfigureLinkAddresses(idx int, ipNets []*net.IPNet) error {
 }
 
 // PrepareHNSNetwork creates HNS Network for containers.
-func PrepareHNSNetwork(subnetCIDR *net.IPNet, nodeIPNet *net.IPNet, uplinkAdapter *net.Interface, nodeGateway string, dnsServers string, routes []interface{}, newName string) error {
-	klog.InfoS("Creating HNSNetwork", "name", LocalHNSNetwork, "subnet", subnetCIDR, "nodeIP", nodeIPNet, "adapter", uplinkAdapter)
-	hnsNet, err := CreateHNSNetwork(LocalHNSNetwork, subnetCIDR, nodeIPNet, uplinkAdapter)
+func PrepareHNSNetwork(subnetCIDRs []*net.IPNet, uplinkAdapter *net.Interface, uplinkIPConfigs []config.IPConfig, dnsServers string, routes []interface{}, newName string) error {
+	nodeIP := uplinkIPConfigs[0].Address.IP
+	klog.InfoS("Creating HNSNetwork", "name", LocalHNSNetwork, "subnets", subnetCIDRs, "nodeIP", nodeIP, "adapter", uplinkAdapter)
+	hnsNet, err := CreateHNSNetwork(LocalHNSNetwork, subnetCIDRs, nodeIP, uplinkAdapter)
 	if err != nil {
 		return fmt.Errorf("error creating HNSNetwork: %v", err)
 	}
@@ -386,7 +388,7 @@ func PrepareHNSNetwork(subnetCIDR *net.IPNet, nodeIPNet *net.IPNet, uplinkAdapte
 	}()
 
 	vNicName := VirtualAdapterName(uplinkAdapter.Name)
-	index, found, err := adapterIPExists(nodeIPNet.IP, vNicName)
+	index, found, err := adapterIPExists(nodeIP, vNicName)
 	if err != nil {
 		return err
 	}
@@ -395,8 +397,8 @@ func PrepareHNSNetwork(subnetCIDR *net.IPNet, nodeIPNet *net.IPNet, uplinkAdapte
 	// Server fails to allocate IP to new virtual network.
 	if !found {
 		klog.InfoS("Moving uplink configuration to the management virtual network adapter", "adapter", vNicName)
-		if err := ConfigureInterfaceAddressWithDefaultGateway(vNicName, nodeIPNet, nodeGateway); err != nil {
-			klog.ErrorS(err, "Failed to configure IP and gateway on the management virtual network adapter", "adapter", vNicName, "ip", nodeIPNet.String())
+		if err := ConfigureInterfaceAddressWithDefaultGateway(vNicName, uplinkIPConfigs); err != nil {
+			klog.ErrorS(err, "Failed to configure IP and gateway on the management virtual network adapter", "adapter", vNicName, "ip", nodeIP.String())
 			return err
 		}
 		if dnsServers != "" {
@@ -489,8 +491,12 @@ func EnableRSCOnVSwitch(vSwitch string) error {
 }
 
 // GetDefaultGatewayByInterfaceIndex returns the default gateway configured on the specified interface.
-func GetDefaultGatewayByInterfaceIndex(ifIndex int) (string, error) {
-	cmd := fmt.Sprintf("$(Get-NetRoute -InterfaceIndex %d -DestinationPrefix 0.0.0.0/0 ).NextHop", ifIndex)
+func GetDefaultGatewayByInterfaceIndex(ifIndex int, isIPv6 bool) (string, error) {
+	dstPrefix := "0.0.0.0/0"
+	if isIPv6 {
+		dstPrefix = "::/0"
+	}
+	cmd := fmt.Sprintf("$(Get-NetRoute -InterfaceIndex %d -DestinationPrefix %s ).NextHop", ifIndex, dstPrefix)
 	defaultGW, err := ps.RunCommand(cmd)
 	if err != nil {
 		return "", err
@@ -501,7 +507,7 @@ func GetDefaultGatewayByInterfaceIndex(ifIndex int) (string, error) {
 
 // GetDNServersByInterfaceIndex returns the DNS servers configured on the specified interface.
 func GetDNServersByInterfaceIndex(ifIndex int) (string, error) {
-	cmd := fmt.Sprintf("$(Get-DnsClientServerAddress -InterfaceIndex %d -AddressFamily IPv4).ServerAddresses", ifIndex)
+	cmd := fmt.Sprintf("$(Get-DnsClientServerAddress -InterfaceIndex %d).ServerAddresses", ifIndex)
 	dnsServers, err := ps.RunCommand(cmd)
 	if err != nil {
 		return "", err

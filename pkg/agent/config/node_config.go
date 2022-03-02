@@ -74,11 +74,16 @@ func (g *GatewayConfig) String() string {
 	return fmt.Sprintf("Name %s: IPv4 %s, IPv6 %s, MAC %s", g.Name, g.IPv4, g.IPv6, g.MAC)
 }
 
+type IPConfig struct {
+	Address *net.IPNet
+	Gateway net.IP
+}
+
 type AdapterNetConfig struct {
 	Name       string
 	Index      int
 	MAC        net.HardwareAddr
-	IP         *net.IPNet
+	IPs        []IPConfig
 	Gateway    string
 	DNSServers string
 	Routes     []interface{}

@@ -85,16 +85,6 @@ func (ic *ifConfigurator) delEndpoint(name string) {
 	ic.epCache.Delete(name)
 }
 
-// findContainerIPConfig finds a valid IPv4 address since IPv6 is not supported for Windows at this stage.
-func findContainerIPConfig(ips []*current.IPConfig) (*current.IPConfig, error) {
-	for _, ipc := range ips {
-		if ipc.Version == "4" {
-			return ipc, nil
-		}
-	}
-	return nil, fmt.Errorf("failed to find a valid IP address")
-}
-
 // configureContainerLink creates a HNSEndpoint for the container using the IPAM result, and then attach it on the container interface.
 func (ic *ifConfigurator) configureContainerLink(
 	podName string,
@@ -150,10 +140,11 @@ func (ic *ifConfigurator) configureContainerLink(
 	}
 	result.Interfaces = []*current.Interface{hostIface, containerIface}
 
-	containerIP, _ := findContainerIPConfig(result.IPs)
 	// Update IPConfig with the index of target interface in the result. The index is used in CNI CmdCheck.
 	ifaceIdx := 1
-	containerIP.Interface = &ifaceIdx
+	for _, ipc := range result.IPs {
+		ipc.Interface = &ifaceIdx
+	}
 
 	// MTU is configured only when the infrastructure container is created.
 	if containerID == infraContainerID {
@@ -174,17 +165,21 @@ func (ic *ifConfigurator) configureContainerLink(
 
 // createContainerLink creates HNSEndpoint using the IP configuration in the IPAM result.
 func (ic *ifConfigurator) createContainerLink(endpointName string, result *current.Result, containerID, podName, podNamespace string) (hostLink *hcsshim.HNSEndpoint, err error) {
-	containerIP, err := findContainerIPConfig(result.IPs)
-	if err != nil {
-		return nil, err
-	}
 	epRequest := &hcsshim.HNSEndpoint{
 		Name:           endpointName,
 		VirtualNetwork: ic.hnsNetwork.Id,
 		DNSServerList:  strings.Join(result.DNS.Nameservers, ","),
 		DNSSuffix:      strings.Join(result.DNS.Search, ","),
-		GatewayAddress: containerIP.Gateway.String(),
-		IPAddress:      containerIP.Address.IP,
+	}
+	for _, ipc := range result.IPs {
+		if ipc.Version == "4" {
+			epRequest.IPAddress = ipc.Address.IP
+			epRequest.GatewayAddress = ipc.Gateway.String()
+		}
+		if ipc.Version == "6" {
+			epRequest.IPv6Address = ipc.Address.IP
+			epRequest.GatewayAddressV6 = ipc.Gateway.String()
+		}
 	}
 	hnsEP, err := epRequest.Create()
 	if err != nil {

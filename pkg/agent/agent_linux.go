@@ -47,18 +47,25 @@ func (i *Initializer) prepareOVSBridge() error {
 	klog.Infof("Preparing OVS bridge for AntreaFlexibleIPAM")
 	// Get uplink network configuration.
 	// TODO(gran): support IPv6
-	_, _, adapter, err := i.getNodeInterfaceFromIP(&utilip.DualStackIPs{IPv4: i.nodeConfig.NodeIPv4Addr.IP})
+	_, _, adapter, err := i.getNodeInterfaceFromIP(&utilip.DualStackIPs{IPv4: i.nodeConfig.NodeIPv4Addr.IP, IPv6: i.nodeConfig.NodeIPv6Addr.IP})
 	if err != nil {
 		return err
 	}
 	uplinkNetConfig := i.nodeConfig.UplinkNetConfig
 	uplinkNetConfig.Name = adapter.Name
 	uplinkNetConfig.MAC = adapter.HardwareAddr
-	uplinkNetConfig.IP = i.nodeConfig.NodeIPv4Addr
+	addrs, _ := adapter.Addrs()
+	for _, addr := range addrs {
+		ipnet := addr.(*net.IPNet)
+		if ipnet.IP.IsGlobalUnicast() {
+			uplinkNetConfig.IPs = append(uplinkNetConfig.IPs, config.IPConfig{
+				Address: ipnet,
+			})
+		}
+	}
 	uplinkNetConfig.Index = adapter.Index
 	// Gateway and DNSServers are not configured at adapter in Linux
 	// Limitation: dynamic DNS servers will be lost after DHCP lease expired
-	uplinkNetConfig.Gateway = ""
 	uplinkNetConfig.DNSServers = ""
 	// Save routes which are configured on the uplink interface.
 	// The routes on the host will be lost when moving the network configuration of the uplink interface
@@ -242,8 +249,7 @@ func (i *Initializer) ConnectUplinkToOVSBridge() error {
 	if err = util.SetAdapterMACAddress(brName, &uplinkNetConfig.MAC); err != nil {
 		return err
 	}
-	// TODO(gran): support IPv6
-	if err = util.ConfigureLinkAddresses(brLink.Attrs().Index, []*net.IPNet{uplinkNetConfig.IP}); err != nil {
+	if err = util.ConfigureLinkAddresses(brLink.Attrs().Index, getUplinkAdapterIPs(uplinkNetConfig)); err != nil {
 		return err
 	}
 	if err = util.ConfigureLinkAddresses(uplinkNetConfig.Index, nil); err != nil {
@@ -280,7 +286,7 @@ func (i *Initializer) RestoreOVSBridge() {
 		if err := util.DeleteOVSPort(brName, uplink); err != nil {
 			klog.ErrorS(err, "Removing uplink port from bridge failed", "uplink", uplink, "bridge", brName)
 		}
-		if err := util.ConfigureLinkAddresses(uplinkNetConfig.Index, []*net.IPNet{uplinkNetConfig.IP}); err != nil {
+		if err := util.ConfigureLinkAddresses(uplinkNetConfig.Index, getUplinkAdapterIPs(uplinkNetConfig)); err != nil {
 			klog.ErrorS(err, "Configure IP to uplink failed", "uplink", uplink)
 		}
 	}
@@ -302,4 +308,12 @@ func (i *Initializer) RestoreOVSBridge() {
 
 func (i *Initializer) setInterfaceMTU(iface string, mtu int) error {
 	return i.ovsBridgeClient.SetInterfaceMTU(iface, mtu)
+}
+
+func getUplinkAdapterIPs(uplinkNetConfig *config.AdapterNetConfig) []*net.IPNet {
+	ips := make([]*net.IPNet, len(uplinkNetConfig.IPs))
+	for i := range uplinkNetConfig.IPs {
+		ips[i] = uplinkNetConfig.IPs[i].Address
+	}
+	return ips
 }
