@@ -121,7 +121,7 @@ function Install-AntreaAgent {
     $KUBE_DNS_SERVICE_HOST=$(kubectl --kubeconfig=$KubeConfig get service -n kube-system kube-dns -o=jsonpath='{.spec.clusterIP}')
     $KUBE_DNS_SERVICE_PORT=$(kubectl --kubeconfig=$KubeConfig get service -n kube-system kube-dns -o=jsonpath='{.spec.ports[0].port}')
     $KUBE_DNS_SERVICE_ADDR=$KUBE_DNS_SERVICE_HOST + ":" + $KUBE_DNS_SERVICE_PORT
-    Add-Content $AntreaAgentConfigPath "`r`nDNSServerOverride: $KUBE_DNS_SERVICE_ADDR"
+    Add-Content $AntreaAgentConfigPath "`r`ndnsServerOverride: $KUBE_DNS_SERVICE_ADDR"
 
     # Create the kubeconfig file that contains the K8s APIServer service and the token of antrea ServiceAccount.
     $APIServer=$(kubectl --kubeconfig=$KubeConfig get service kubernetes -o jsonpath='{.spec.clusterIP}')
