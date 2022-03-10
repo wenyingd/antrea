@@ -24,7 +24,7 @@ require (
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e
 	github.com/golang/mock v1.6.0
-	github.com/golang/protobuf v1.5.0
+	github.com/golang/protobuf v1.5.2
 	github.com/google/uuid v1.1.2
 	github.com/hashicorp/memberlist v0.2.4
 	github.com/k8snetworkplumbingwg/sriov-cni v2.1.0+incompatible
@@ -52,7 +52,7 @@ require (
 	golang.org/x/sys v0.0.0-20210510120138-977fb7262007
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20210506160403-92e472f520a5
-	google.golang.org/grpc v1.27.1
+	google.golang.org/grpc v1.45.0
 	google.golang.org/protobuf v1.27.1
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 	gopkg.in/yaml.v2 v2.4.0
