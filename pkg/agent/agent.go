@@ -99,6 +99,7 @@ type Initializer struct {
 	networkReadyCh chan<- struct{}
 	stopCh         <-chan struct{}
 	nodeType       config.NodeType
+	vmInterface    string
 }
 
 func NewInitializer(
@@ -284,6 +285,7 @@ func (i *Initializer) initInterfaceStore() error {
 					var err error
 					intf, err = externalnode.ParseHostInterfaceConfig(i.ovsBridgeClient, port, ovsPort)
 					if err != nil {
+						klog.ErrorS(err, "Failed to ParseHostInterfaceConfig", "port", port.Name)
 						return err
 					}
 				}
@@ -332,6 +334,7 @@ func (i *Initializer) initInterfaceStore() error {
 			}
 		}
 		if intf != nil {
+			klog.V(2).InfoS("Adding interface to cache", "interfaceName", intf.InterfaceName)
 			ifaceList = append(ifaceList, intf)
 		}
 	}
@@ -447,6 +450,13 @@ func (i *Initializer) initOpenFlowPipeline() error {
 	if err != nil {
 		klog.Errorf("Failed to initialize openflow client: %v", err)
 		return err
+	}
+
+	if i.nodeType == config.ExternalNode {
+		err := i.installVmOpenFlows()
+		if err != nil {
+			return err
+		}
 	}
 
 	go func() {
@@ -1124,9 +1134,10 @@ func (i *Initializer) initNodeLocalConfig() error {
 
 func (i *Initializer) initVMLocalConfig(nodeName string) error {
 	i.nodeConfig = &config.NodeConfig{
-		Name:      nodeName,
-		Type:      config.ExternalNode,
-		OVSBridge: i.ovsBridge,
+		Name:            nodeName,
+		Type:            config.ExternalNode,
+		OVSBridge:       i.ovsBridge,
+		UplinkNetConfig: new(config.AdapterNetConfig),
 	}
 	return nil
 }
@@ -1137,6 +1148,19 @@ func (i *Initializer) prepareOVSBridge() error {
 		return i.prepareOVSBridgeForK8sNode()
 	}
 	return i.prepareOVSBridgeForVM()
+}
+
+func (i *Initializer) prepareOVSBridgeForVM() error {
+	e := i.prepareOVSConfigForVM()
+	if e != nil {
+		klog.ErrorS(e, "Failed to prepareOVSConfigForVM")
+		return e
+	}
+	randMAC, err := util.RandomMAC()
+	if err != nil {
+		return err
+	}
+	return i.setOVSDatapath(randMAC)
 }
 
 // setOVSDatapath generates a static datapath id for OVS bridge so that the OFSwitch identifier is not

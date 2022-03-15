@@ -29,7 +29,6 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/util"
@@ -54,11 +53,11 @@ const (
 	// Disable resyncing.
 	resyncPeriod time.Duration = 0
 
-	ovsExternalIDUplinkName       = "uplink-name"
-	ovsExternalIDHostIFName       = "hostInterface-name"
-	ovsExternalIDHostIFIndex      = "hostInterface-index"
-	ovsExternalIDUplinkPort       = "uplink-port"
-	ovsExternalIDExternalEntities = "external-entities"
+	OvsExternalIDUplinkName       = "uplink-name"
+	OvsExternalIDHostIFName       = "hostInterface-name"
+	OvsExternalIDHostIFIndex      = "hostInterface-index"
+	OvsExternalIDUplinkPort       = "uplink-port"
+	OvsExternalIDExternalEntities = "external-entities"
 
 	eeSplitter          = ","
 	reserveRuleSplitter = ":"
@@ -251,6 +250,7 @@ func (c *ExternalEntityController) reconcileExternalEntityInterfaces() error {
 	}
 	ifNameKeysMap := make(map[string]sets.String)
 	for _, entity := range entityList {
+		klog.V(4).InfoS("reconcileExternalEntityInterfaces", "ExternalNode", entity.Spec.ExternalNode, "nodeName", c.nodeName)
 		if entity.Spec.ExternalNode == c.nodeName {
 			key, _ := keyFunc(entity)
 			if err = c.addExternalEntity(key, entity); err != nil {
@@ -421,6 +421,7 @@ func (c *ExternalEntityController) getHostInterfaceNameByEndpoint(ep v1alpha2.En
 		}
 		_, _, link, err := util.GetIPNetDeviceFromIP(ipFilter, sets.NewString())
 		if err == nil {
+			klog.InfoS("Using the interface", "linkName", link.Name)
 			c.endpointNameIPMap[ep.IP] = link.Name
 			return link.Name, nil
 		}
@@ -435,7 +436,7 @@ func (c *ExternalEntityController) addEntityEndpoint(eeKey string, ifName string
 	hostIface, portExists := c.ifaceStore.GetInterfaceByName(ifName)
 	if !portExists {
 		klog.InfoS("Creating OVS ports and flows for EntityEndpoint", "ifName", ifName, "ExternalEntityKey", eeKey)
-		uplinkName := genUplinkInterfaceName(ifName)
+		uplinkName := util.GenUplinkInterfaceName(ifName)
 		klog.V(2).InfoS("Creating OVS ports for host interface and ExternalEntity", "externalEntity", eeKey, "interface", ifName)
 		hostIface, err := c.createOVSPortsAndFlows(uplinkName, ifName, eeKey)
 		if err != nil {
@@ -599,19 +600,19 @@ func (c *ExternalEntityController) deleteEntityEndpoint(key string, ifName strin
 }
 
 func (c *ExternalEntityController) createOVSPortsAndFlows(uplinkName, hostIfName, key string) (*interfacestore.InterfaceConfig, error) {
-	adapterConfig, err := getUplinkConfig(hostIfName)
+	adapterConfig, err := util.GetUplinkConfig(hostIfName)
 	if err != nil {
 		klog.ErrorS(err, "Failed to get the configuration on the host interface", "hostInterface", hostIfName)
 		return nil, err
 	}
-	if err := renameInterface(hostIfName, uplinkName); err != nil {
+	if err := util.RenameInterface(hostIfName, uplinkName); err != nil {
 		klog.ErrorS(err, "Failed to rename host interface name as the uplink name", "hostInterface", hostIfName, "uplink", uplinkName)
 		return nil, err
 	}
 	success := false
 	defer func() {
 		if !success {
-			renameInterface(uplinkName, hostIfName)
+			util.RenameInterface(uplinkName, hostIfName)
 		}
 	}()
 	// Create uplink port on OVS.
@@ -636,9 +637,9 @@ func (c *ExternalEntityController) createOVSPortsAndFlows(uplinkName, hostIfName
 	klog.V(2).InfoS("Added uplink port on OVS", "port", uplinkName)
 
 	attachInfo := map[string]interface{}{
-		ovsExternalIDUplinkName:               uplinkName,
-		ovsExternalIDUplinkPort:               uplinkUUID,
-		ovsExternalIDExternalEntities:         key,
+		OvsExternalIDUplinkName:               uplinkName,
+		OvsExternalIDUplinkPort:               uplinkUUID,
+		OvsExternalIDExternalEntities:         key,
 		interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaHost,
 	}
 	// Create host port on OVS.
@@ -663,8 +664,8 @@ func (c *ExternalEntityController) createOVSPortsAndFlows(uplinkName, hostIfName
 	if err != nil {
 		return nil, err
 	}
-	attachInfo[ovsExternalIDHostIFIndex] = fmt.Sprintf("%d", hostIF.Index)
-	attachInfo[ovsExternalIDHostIFName] = hostIF.Name
+	attachInfo[OvsExternalIDHostIFIndex] = fmt.Sprintf("%d", hostIF.Index)
+	attachInfo[OvsExternalIDHostIFName] = hostIF.Name
 
 	// Update OVS port external_ids with the host interface id and name.
 	if err := c.ovsBridgeClient.SetPortExternalIDs(hostIfName, attachInfo); err != nil {
@@ -712,11 +713,11 @@ func (c *ExternalEntityController) updateOVSPortData(interfaceConfig *interfaces
 		eeKeys = append(eeKeys, k)
 	}
 	attachInfo := map[string]interface{}{
-		ovsExternalIDUplinkName:               port.ExternalIDs[ovsExternalIDUplinkName],
-		ovsExternalIDHostIFIndex:              port.ExternalIDs[ovsExternalIDHostIFIndex],
-		ovsExternalIDHostIFName:               port.ExternalIDs[ovsExternalIDHostIFName],
-		ovsExternalIDUplinkPort:               port.ExternalIDs[ovsExternalIDUplinkPort],
-		ovsExternalIDExternalEntities:         strings.Join(eeKeys, eeSplitter),
+		OvsExternalIDUplinkName:               port.ExternalIDs[OvsExternalIDUplinkName],
+		OvsExternalIDHostIFIndex:              port.ExternalIDs[OvsExternalIDHostIFIndex],
+		OvsExternalIDHostIFName:               port.ExternalIDs[OvsExternalIDHostIFName],
+		OvsExternalIDUplinkPort:               port.ExternalIDs[OvsExternalIDUplinkPort],
+		OvsExternalIDExternalEntities:         strings.Join(eeKeys, eeSplitter),
 		interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaHost,
 	}
 
@@ -737,10 +738,10 @@ func (c *ExternalEntityController) removeOVSPortsAndFlows(interfaceConfig *inter
 		}
 		return err
 	}
-	hostIfName := port.ExternalIDs[ovsExternalIDHostIFName]
-	uplinkIfName := port.ExternalIDs[ovsExternalIDUplinkName]
-	uplinkPortID := port.ExternalIDs[ovsExternalIDUplinkPort]
-	adapterConfig, er := getUplinkConfig(hostIfName)
+	hostIfName := port.ExternalIDs[OvsExternalIDHostIFName]
+	uplinkIfName := port.ExternalIDs[OvsExternalIDUplinkName]
+	uplinkPortID := port.ExternalIDs[OvsExternalIDUplinkPort]
+	adapterConfig, er := util.GetUplinkConfig(hostIfName)
 	if er != nil {
 		klog.ErrorS(err, "Failed to get the configuration on the host interface", "hostInterface", hostIfName)
 		return err
@@ -769,7 +770,7 @@ func (c *ExternalEntityController) removeOVSPortsAndFlows(interfaceConfig *inter
 		klog.ErrorS(pollErr, "Failed to wait for host interface deletion in 2s", "interface", hostIfName)
 	}
 	// Recover the uplink interface's name.
-	if err := renameInterface(uplinkIfName, hostIfName); err != nil {
+	if err := util.RenameInterface(uplinkIfName, hostIfName); err != nil {
 		klog.ErrorS(err, "Failed to recover uplink name to the host interface name", "uplink", uplinkIfName, "hostInterface", hostIfName)
 		return err
 	}
@@ -844,26 +845,29 @@ func ParseHostInterfaceConfig(ovsBridgeClient ovsconfig.OVSBridgeClient, portDat
 	}
 	var hostUplinkConfig *interfacestore.EntityInterfaceConfig
 	if portData.ExternalIDs != nil {
-		uplinkName, ok := portData.ExternalIDs[ovsExternalIDUplinkName]
-		uplinkPortUUID, ok := portData.ExternalIDs[ovsExternalIDUplinkPort]
+		uplinkName, ok := portData.ExternalIDs[OvsExternalIDUplinkName]
+		uplinkPortUUID, ok := portData.ExternalIDs[OvsExternalIDUplinkPort]
 		if !ok {
 			klog.InfoS("Host port %d doesn't match the uplink interface", portData.Name)
 			return interfaceConfig, nil
 		}
 		uplinkPortData, ovsErr := ovsBridgeClient.GetPortData(uplinkPortUUID, uplinkName)
 		if ovsErr != nil {
+			klog.Info("Failed to get uplink port data")
 			return nil, ovsErr
 		}
-		hostLinkStr := portData.ExternalIDs[ovsExternalIDHostIFIndex]
+		hostLinkStr := portData.ExternalIDs[OvsExternalIDHostIFIndex]
 		hostLink, err := strconv.Atoi(hostLinkStr)
 		if err != nil {
+			klog.Info("Failed to get interface name from port data")
 			return nil, err
 		}
-		ees := portData.ExternalIDs[ovsExternalIDExternalEntities]
+		ees := portData.ExternalIDs[OvsExternalIDExternalEntities]
 		eeMap := make(map[string]sets.String, 0)
 		for _, eeKey := range strings.Split(ees, eeSplitter) {
 			eeMap[eeKey] = sets.NewString()
 		}
+		klog.InfoS("Adding EntityInterfaceConfig")
 		hostUplinkConfig = &interfacestore.EntityInterfaceConfig{
 			UplinkPort: &interfacestore.OVSPortConfig{
 				PortUUID: uplinkPortUUID,
@@ -875,48 +879,4 @@ func ParseHostInterfaceConfig(ovsBridgeClient ovsconfig.OVSBridgeClient, portDat
 	}
 	interfaceConfig.EntityInterfaceConfig = hostUplinkConfig
 	return interfaceConfig, nil
-}
-
-func genUplinkInterfaceName(hostIfName string) string {
-	return fmt.Sprintf("phy-%s", hostIfName)
-}
-
-func getUplinkConfig(uplinkIfName string) (*config.AdapterNetConfig, error) {
-	iface, err := net.InterfaceByName(uplinkIfName)
-	if err != nil {
-		return nil, err
-	}
-	addrs, err := util.GetGlobalIPNetsByName(iface)
-	if err != nil {
-		return nil, err
-	}
-	gw, routes, err := util.GetNetRoutesOnAdapter(iface.Index)
-	if err != nil {
-		return nil, err
-	}
-	return &config.AdapterNetConfig{
-		Name:    uplinkIfName,
-		Index:   iface.Index,
-		MAC:     iface.HardwareAddr,
-		IPs:     addrs,
-		Routes:  routes,
-		Gateway: gw,
-		MTU:     iface.MTU,
-	}, nil
-}
-
-func renameInterface(from, to string) error {
-	var renameErr error
-	pollErr := wait.Poll(time.Millisecond*100, time.Second, func() (done bool, err error) {
-		renameErr = util.RenameHostInterface(from, to)
-		if renameErr != nil {
-			klog.InfoS("Unable to rename host interface name with error, retrying", "oldName", from, "newName", to, "err", renameErr)
-			return false, nil
-		}
-		return true, nil
-	})
-	if pollErr != nil {
-		return fmt.Errorf("failed to rename host interface name %s to %s", from, to)
-	}
-	return nil
 }
