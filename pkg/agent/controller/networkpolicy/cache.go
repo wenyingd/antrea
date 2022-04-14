@@ -390,17 +390,23 @@ func (c *ruleCache) processPodUpdate(pod string) {
 // It can enforce NetworkPolicies to ExternalEntities after ExternalEntityInterface is realised in the interface store.
 func (c *ruleCache) processEntityUpdate(ee string) {
 	namespace, name := k8s.SplitNamespacedName(ee)
-	member := &v1beta.GroupMember{
-		ExternalEntity: &v1beta.ExternalEntityReference{
-			Name:      name,
-			Namespace: namespace,
-		},
-	}
 	c.appliedToSetLock.RLock()
 	defer c.appliedToSetLock.RUnlock()
+	externalEntityEquals := func(expEntity *v1beta.ExternalEntityReference, actName, actNamespace string) bool {
+		if expEntity.Name != actName {
+			return false
+		}
+		if expEntity.Namespace != actNamespace {
+			return false
+		}
+		return true
+	}
 	for group, memberSet := range c.appliedToSetByGroup {
-		if memberSet.Has(member) {
-			c.onAppliedToGroupUpdate(group)
+		for _, m := range memberSet.Items() {
+			if externalEntityEquals(m.ExternalEntity, name, namespace) {
+				c.onAppliedToGroupUpdate(group)
+				break
+			}
 		}
 	}
 }
