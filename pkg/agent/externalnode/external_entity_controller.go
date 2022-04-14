@@ -360,7 +360,11 @@ func (c *ExternalEntityController) getInterfaceIPsMap(endpoints []v1alpha2.Endpo
 	for _, ep := range endpoints {
 		ifName, err := c.getHostInterfaceNameByEndpoint(ep)
 		if err != nil {
-			return nil, err
+			if _, ok := err.(EndpointInterfaceNotFound); !ok {
+				return nil, err
+			}
+			klog.ErrorS(err, "Skip endpoint", "name", ep.Name, "ip", ep.IP)
+			continue
 		}
 		if _, exist := ifNameIPsMap[ifName]; exist {
 			ifNameIPsMap[ifName].Insert(ep.IP)
@@ -727,6 +731,10 @@ func (c *ExternalEntityController) removeOVSPortsAndFlows(interfaceConfig *inter
 	}
 	port, err := c.ovsBridgeClient.GetPortData(portUUID, portName)
 	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			klog.ErrorS(err, "OVS port is not found", "port", portName)
+			return nil
+		}
 		return err
 	}
 	hostIfName := port.ExternalIDs[ovsExternalIDHostIFName]
