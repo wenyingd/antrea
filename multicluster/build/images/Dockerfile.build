@@ -13,7 +13,7 @@
 # limitations under the License.
 
 ARG GO_VERSION
-FROM golang:${GO_VERSION} as antrea-build
+FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/golang:${GO_VERSION} as antrea-build
 
 WORKDIR /antrea
 
@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
     --mount=type=cache,target=/root/.cache/go-build/ \
     cd multicluster && make bin
 
-FROM gcr.io/distroless/static:nonroot
+FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/debian:stable-slim
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="The Docker image to deploy the Antrea Multi-cluster Controller."
