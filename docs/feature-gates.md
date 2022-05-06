@@ -41,8 +41,14 @@ example, to enable `AntreaProxy` on Linux, edit the Agent configuration in the
 | `Traceflow`             | Agent + Controller | `true`  | Beta  | v0.8          | v0.11        | N/A        | Yes                |       |
 | `FlowExporter`          | Agent              | `false` | Alpha | v0.9          | N/A          | N/A        | Yes                |       |
 | `NetworkPolicyStats`    | Agent + Controller | `true`  | Beta  | v0.10         | v1.2         | N/A        | No                 |       |
-| `NodePortLocal`         | Agent              | `false` | Alpha | v0.13         | N/A          | N/A        | Yes                | Important user-facing change in v1.2.0 |
-| `Egress`                | Agent + Controller | `false` | Alpha | v1.0          | N/A          | N/A        | Yes                |       |
+| `NodePortLocal`         | Agent              | `true`  | Beta  | v0.13         | v1.4         | N/A        | Yes                | Important user-facing change in v1.2.0 |
+| `Egress`                | Agent + Controller | `true`  | Beta  | v1.0          | v1.6         | N/A        | Yes                |       |
+| `NodeIPAM`              | Controller         | `false` | Alpha | v1.4          | N/A          | N/A        | Yes                |       |
+| `AntreaIPAM`            | Agent + Controller | `false` | Alpha | v1.4          | N/A          | N/A        | Yes                |       |
+| `Multicast`             | Agent              | `false` | Alpha | v1.5          | N/A          | N/A        | Yes                |       |
+| `SecondaryNetwork`      | Agent              | `false` | Alpha | v1.5          | N/A          | N/A        | Yes                |       |
+| `ServiceExternalIP`     | Agent + Controller | `false` | Alpha | v1.5          | N/A          | N/A        | Yes                |       |
+| `ExternalNode`          | Agent              | `false` | Alpha | v1.7          | N/A          | N/A        | Yes                |       |
 
 ## Description and Requirements of Features
 
@@ -154,6 +160,42 @@ cluster-access-dns    10         120       12210   2020-09-07T13:22:42Z
 NAMESPACE     NAME                  SESSIONS   PACKETS   BYTES   CREATED AT
 default       access-http           3          36        5199    2020-09-07T13:19:38Z
 foo           bar                   1          12        1221    2020-09-07T13:22:42Z
+
+# List per-rule statistics for Antrea ClusterNetworkPolicy cluster-access-dns.
+# Both Antrea NetworkPolicy and Antrea ClusterNetworkPolicy support per-rule statistics.
+> kubectl get antreaclusternetworkpolicystats cluster-access-dns -o json
+{
+    "apiVersion": "stats.antrea.io/v1alpha1",
+    "kind": "AntreaClusterNetworkPolicyStats",
+    "metadata": {
+        "creationTimestamp": "2022-02-24T09:04:53Z",
+        "name": "cluster-access-dns",
+        "uid": "940cf76a-d836-4e76-b773-d275370b9328"
+    },
+    "ruleTrafficStats": [
+        {
+            "name": "rule1",
+            "trafficStats": {
+                "bytes": 392,
+                "packets": 4,
+                "sessions": 1
+            }
+        },
+        {
+            "name": "rule2",
+            "trafficStats": {
+                "bytes": 111,
+                "packets": 2,
+                "sessions": 1
+            }
+        }
+    ],
+    "trafficStats": {
+        "bytes": 503,
+        "packets": 6,
+        "sessions": 2
+    }
+}
 ```
 
 #### Requirements for this Feature
@@ -175,7 +217,7 @@ Refer to this [document](node-port-local.md) for more information.
 #### Requirements for this Feature
 
 This feature is currently only supported for Nodes running Linux with IPv4
-addresses. Only TCP Service ports are supported.
+addresses. Only TCP & UDP Service ports are supported (not SCTP).
 
 ### Egress
 
@@ -191,3 +233,107 @@ Refer to this [document](egress.md) for more information.
 This feature is currently only supported for Nodes running Linux and "encap"
 mode. The support for Windows and other traffic modes will be added in the
 future.
+
+### NodeIPAM
+
+`NodeIPAM` runs a Node IPAM Controller similar to the one in Kubernetes that
+allocates Pod CIDRs for Nodes.  Running Node IPAM Controller with Antrea is
+useful in environments where Kubernetes Controller Manager does not run the
+Node IPAM Controller, and Antrea has to handle the CIDR allocation.
+
+#### Requirements for this Feature
+
+This feature requires the Node IPAM Controller to be disabled in Kubernetes
+Controller Manager. When Antrea and Kubernetes both run Node IPAM Controller
+there is a risk of conflicts in CIDR allocation between the two.
+
+### AntreaIPAM
+
+`AntreaIPAM` feature allocates IP addresses from IPPools. It is required by
+bridging mode Pods. The bridging mode allows flexible control over Pod IP
+addressing. The desired set of IP ranges, optionally with VLANs, are defined
+with `IPPool` CRD. An IPPool can be annotated to Namespace, Pod and PodTemplate
+of StatefulSet/Deployment. Then, Antrea will manage IP address assignment for
+corresponding Pods according to `IPPool` spec. On a Node, cross-Node/VLAN
+traffic of AntreaIPAM Pods is sent to the underlay network, and forwarded/routed
+by the underlay network. For more information, please refer to the
+[Antrea IPAM document](antrea-ipam.md#antrea-flexible-ipam).
+
+This feature gate also needs to be enabled to use Antrea for IPAM when
+configuring secondary network interfaces with Multus, in which case Antrea works
+as an IPAM plugin and allocates IP addresses for Pods' secondary networks,
+again from the configured IPPools of a secondary network. Refer to the
+[secondary network IPAM document](antrea-ipam.md#ipam-for-secondary-network) to
+learn more information.
+
+#### Requirements for this Feature
+
+Both bridging mode and secondary network IPAM are supported only on Linux Nodes.
+
+The bridging mode works only with `system` OVS datapath type; and `noEncap`,
+`noSNAT` traffic mode. At the moment, it supports only IPv4. The IPs in an IP
+range without a VLAN must be in the same underlay subnet as the Node IPs,
+ because inter-Node traffic of AntreaIPAM Pods is forwarded by the Node network.
+IP ranges with a VLAN must not overlap with other network subnets, and the
+underlay network router should provide the network connectivity for these VLANs.
+
+### Multicast
+
+The `Multicast` feature enables forwarding multicast traffic within the cluster
+network (i.e., between Pods) and between the external network and the cluster
+network.
+
+More documentation will be coming in the future.
+
+#### Requirements for this Feature
+
+This feature is only supported:
+
+* on Linux Nodes
+* for IPv4 traffic
+* in `noEncap` mode
+
+### SecondaryNetwork
+
+The `SecondaryNetwork` feature enables support for provisioning secondary
+network interfaces for Pods, by annotating them appropriately.
+
+More documentation will be coming in the future.
+
+#### Requirements for this Feature
+
+At the moment, Antrea can only create secondary network interfaces using SR-IOV
+VFs on baremetal Linux Nodes.
+
+### ServiceExternalIP
+
+The `ServiceExternalIP` feature enables a controller which can allocate external
+IPs for Services with type `LoadBalancer`. External IPs are allocated from an
+`ExternalIPPool` resource and each IP gets assigned to a Node selected by the
+`nodeSelector` of the pool automatically. That Node will receive Service traffic
+destined to that IP and distribute it among the backend Endpoints for the
+Service (through kube-proxy). To enable external IP allocation for a
+`LoadBalancer` Service, you need to annotate the Service with
+`"service.antrea.io/external-ip-pool": "<externalIPPool name>"` and define the
+appropriate `ExternalIPPool` resource.
+Refer to this [document](service-loadbalancer.md) for more information.
+
+#### Requirements for this Feature
+
+This feature is currently only supported for Nodes running Linux.
+
+### ExternalNode
+
+The `ExternalNode` feature enables Antrea Agent runs on a virtual machine or a bare-metal server which is not a
+Kubernetes Node, and enforces Antrea NetworkPolicy for the VM/BM. Antrea Agent supports the `ExternalNode` feature on
+both Linux and Windows.
+
+More documentation will be coming in the future.
+
+#### Requirements for this Feature
+
+Since Antrea Agent is running on an unmanaged VM/BM when this feature is enabled, features designed for K8s Pods are
+disabled. As of now, this feature requires that `AntreaProxy` and `NetworkPolicyStats` are also enabled.
+
+OVS is required to be installed on the virtual machine or the bare-metal server before running Antrea Agent, and the OVS
+version must be >= 2.13.0 and <= 2.15.1.

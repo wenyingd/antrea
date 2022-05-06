@@ -66,11 +66,6 @@ antrea-cni:
 	@mkdir -p $(BINDIR)
 	GOOS=linux CGO_ENABLED=0 $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-cni
 
-.PHONY: antctl-ubuntu
-antctl-ubuntu:
-	@mkdir -p $(BINDIR)
-	GOOS=linux $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antctl
-
 .PHONY: antctl-instr-binary
 antctl-instr-binary:
 	@mkdir -p $(BINDIR)
@@ -194,11 +189,20 @@ antctl: $(ANTCTL_BINARIES)
 antctl-release:
 	@$(GO) build -o $(BINDIR)/$(ANTCTL_BINARY_NAME) $(GOFLAGS) -ldflags '-s -w $(LDFLAGS)' antrea.io/antrea/cmd/antctl
 
+.PHONY: check-copyright
+check-copyright: 
+	@GO=$(GO) $(CURDIR)/hack/add-license.sh
+
+.PHONY: add-copyright
+add-copyright: 
+	@GO=$(GO) $(CURDIR)/hack/add-license.sh --add
+
 .PHONY: .linux-test-unit
 .linux-test-unit: .coverage
 	@echo
 	@echo "==> Running unit tests <=="
-	$(GO) test -race -coverprofile=.coverage/coverage-unit.txt -covermode=atomic -cover antrea.io/antrea/cmd/... antrea.io/antrea/pkg/...
+	$(GO) test -race -coverprofile=.coverage/coverage-unit.txt -covermode=atomic -cover antrea.io/antrea/cmd/... antrea.io/antrea/pkg/... \
+	 antrea.io/antrea/multicluster/cmd/... antrea.io/antrea/multicluster/controllers/...
 
 .PHONY: .windows-test-unit
 .windows-test-unit:
@@ -271,6 +275,11 @@ codegen:
 	@echo "===> Updating generated code <==="
 	$(CURDIR)/hack/update-codegen.sh
 
+.PHONY: mockgen
+mockgen:
+	@echo "===> Updating generated mock code <==="
+	$(CURDIR)/hack/update-codegen.sh mockgen
+
 ### Docker images ###
 
 .PHONY: ubuntu
@@ -297,6 +306,19 @@ endif
 	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-ubuntu
 	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubuntu
 	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION)
+
+# Build bins in a golang container, and build the antrea-ubi Docker image.
+.PHONY: build-ubi
+build-ubi:
+	@echo "===> Building Antrea bins and antrea/antrea-ubi Docker image <==="
+ifneq ($(NO_PULL),"")
+	docker build -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.ubi $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.ubi $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-ubi
+	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubi
+	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubi:$(DOCKER_IMG_VERSION)
 
 .PHONY: build-windows
 build-windows:
@@ -329,14 +351,11 @@ build-scale-simulator:
 .PHONY: manifest
 manifest:
 	@echo "===> Generating dev manifest for Antrea <==="
-	$(CURDIR)/hack/generate-manifest.sh --mode dev > build/yamls/antrea.yml
-	$(CURDIR)/hack/generate-manifest.sh --mode dev --ipsec > build/yamls/antrea-ipsec.yml
-	$(CURDIR)/hack/generate-manifest.sh --mode dev --cloud EKS --encap-mode networkPolicyOnly > build/yamls/antrea-eks.yml
-	$(CURDIR)/hack/generate-manifest.sh --mode dev --cloud GKE --encap-mode noEncap > build/yamls/antrea-gke.yml
-	$(CURDIR)/hack/generate-manifest.sh --mode dev --cloud AKS --encap-mode networkPolicyOnly > build/yamls/antrea-aks.yml
+	$(CURDIR)/hack/generate-standard-manifests.sh --mode dev --out build/yamls
 	$(CURDIR)/hack/generate-manifest-octant.sh --mode dev > build/yamls/antrea-octant.yml
 	$(CURDIR)/hack/generate-manifest-windows.sh --mode dev > build/yamls/antrea-windows.yml
 	$(CURDIR)/hack/generate-manifest-flow-aggregator.sh --mode dev > build/yamls/flow-aggregator.yml
+	$(CURDIR)/hack/generate-manifest-flow-visibility.sh --mode dev > build/yamls/flow-visibility.yml
 
 .PHONY: manifest-scale
 manifest-scale:
@@ -356,6 +375,26 @@ octant-antrea-ubuntu:
 	docker tag antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) antrea/octant-antrea-ubuntu
 	docker tag antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/octant-antrea-ubuntu
 	docker tag antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION)
+
+.PHONY: antrea-mc-controller
+antrea-mc-controller:
+	@echo "===> Building antrea/antrea-mc-controller Docker image <==="
+ifneq ($(NO_PULL),)
+	docker build -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller
+	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller
+	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION)
+
+.PHONY: flow-visibility-clickhouse-monitor
+flow-visibility-clickhouse-monitor:
+	@echo "===> Building antrea/flow-visibility-clickhouse-monitor Docker image <==="
+	docker build --pull -t antrea/flow-visibility-clickhouse-monitor:$(DOCKER_IMG_VERSION) -f build/images/flow-visibility/Dockerfile.clickhouse-monitor.ubuntu $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/flow-visibility-clickhouse-monitor:$(DOCKER_IMG_VERSION) antrea/flow-visibility-clickhouse-monitor
+	docker tag antrea/flow-visibility-clickhouse-monitor:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-visibility-clickhouse-monitor
+	docker tag antrea/flow-visibility-clickhouse-monitor:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-visibility-clickhouse-monitor:$(DOCKER_IMG_VERSION)
 
 .PHONY: flow-aggregator-image
 flow-aggregator-image:
@@ -382,26 +421,26 @@ endif
 .PHONY: verify
 verify:
 	@echo "===> Verifying spellings <==="
-	$(CURDIR)/hack/verify-spelling.sh
+	GO=$(GO) $(CURDIR)/hack/verify-spelling.sh
 	@echo "===> Verifying Table of Contents <==="
-	$(CURDIR)/hack/verify-toc.sh
+	GO=$(GO) $(CURDIR)/hack/verify-toc.sh
 	@echo "===> Verifying documentation formatting for website <==="
 	$(CURDIR)/hack/verify-docs-for-website.sh
 
 .PHONY: toc
 toc:
 	@echo "===> Generating Table of Contents for Antrea docs <==="
-	$(CURDIR)/hack/update-toc.sh
+	GO=$(GO) $(CURDIR)/hack/update-toc.sh
 
 .PHONE: markdownlint
 markdownlint:
 	@echo "===> Running markdownlint <==="
-	markdownlint -c .markdownlint-config.yml -i CHANGELOG/ -i CHANGELOG.md -i hack/netpol -i CODE_OF_CONDUCT.md .
+	markdownlint -c hack/.markdownlint-config.yml -p hack/.markdownlint-ignore .
 
 .PHONE: markdownlint-fix
 markdownlint-fix:
 	@echo "===> Running markdownlint <==="
-	markdownlint --fix -c .markdownlint-config.yml -i CHANGELOG/ -i CHANGELOG.md -i hack/netpol -i CODE_OF_CONDUCT.md .
+	markdownlint --fix -c hack/.markdownlint-config.yml -p hack/.markdownlint-ignore .
 
 .PHONY: spelling-fix
 spelling-fix:

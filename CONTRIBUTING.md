@@ -13,6 +13,7 @@ to effectively get it merged upstream.
   - [Getting reviewers](#getting-reviewers)
   - [Getting your PR verified by CI](#getting-your-pr-verified-by-ci)
   - [Cherry-picks to release branches](#cherry-picks-to-release-branches)
+  - [Conventions for Writing Documentation](#conventions-for-writing-documentation)
   - [Inclusive Naming](#inclusive-naming)
   - [Building and testing your change](#building-and-testing-your-change)
   - [Reverting a commit](#reverting-a-commit)
@@ -130,6 +131,8 @@ To make it easier for reviewers to review your PR, consider the following:
    cannot be fixed automatically, an error message will be displayed so you can address the issue.
 3. Follow [git commit](https://chris.beams.io/posts/git-commit/) guidelines.
 4. Follow [logging](https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md) guidelines.
+5. Please refer to [Conventions for Writing Documentation](#conventions-for-writing-documentation) for
+spelling conventions when writing documentation or commenting code.
 
 If your PR fixes a bug or implements a new feature, add the appropriate test
 cases to our [automated test suite](ci/README.md) to guarantee enough
@@ -150,6 +153,7 @@ the repo. It's a Github security mechanism.
 Here are the trigger phrases for individual checks:
 
 * `/test-integration`: Integration tests
+* `/test-multicluster-integration`: Multi-cluster integration tests
 * `/test-e2e`: Linux IPv4 e2e tests
 * `/test-conformance`: Linux IPv4 conformance tests
 * `/test-networkpolicy`: Linux IPv4 networkpolicy tests
@@ -157,16 +161,20 @@ Here are the trigger phrases for individual checks:
 * `/test-windows-e2e`: Windows IPv4 e2e tests
 * `/test-windows-conformance`: Windows IPv4 conformance tests
 * `/test-windows-networkpolicy`: Windows IPv4 networkpolicy tests
+* `/test-windows-proxyall-e2e`: Windows IPv4 e2e tests with proxyAll enabled
 * `/test-ipv6-e2e`: Linux dual stack e2e tests
 * `/test-ipv6-conformance`: Linux dual stack conformance tests
 * `/test-ipv6-networkpolicy`: dLinux ual stack networkpolicy tests
 * `/test-ipv6-only-e2e`: Linux IPv6 only e2e tests
 * `/test-ipv6-only-conformance`: Linux IPv6 only conformance tests
 * `/test-ipv6-only-networkpolicy`: Linux IPv6 only networkpolicy tests
+* `/test-flexible-ipam-e2e`: Flexible IPAM e2e tests
+* `/test-multicast-e2e`: Multicast e2e tests
 
 Here are the trigger phrases for groups of checks:
 
-* `/test-all`: Linux IPv4 and Windows tests
+* `/test-all`: Linux IPv4 tests
+* `/test-windows-all`: Windows IPv4 tests, including e2e tests with proxyAll enabled
 * `/test-ipv6-all`: Linux dual stack tests
 * `/test-ipv6-only-all`: Linux IPv6 only tests
 
@@ -192,6 +200,11 @@ maintainers will let you know once your PR is approved. Please refer to the
 documentation on [cherry-picks](docs/contributors/cherry-picks.md) for more
 information.
 
+### Conventions for Writing Documentation
+
+* Short name of `IP Security` should be `IPsec` as per [rfc 6071](https://datatracker.ietf.org/doc/html/rfc6071).
+* Any Kubernetes object in log/comment should start with upper case, eg: Namespace, Pod, Service.
+
 ### Inclusive Naming
 
 For symbol names and documentation, do not introduce new usage of harmful
@@ -214,7 +227,11 @@ do:
 
 The second step will compile the Antrea code in a `golang` container, and build
 a `Ubuntu 20.04` Docker image that includes all the generated binaries. [`Docker`](https://docs.docker.com/install)
-must be installed on your local machine in advance.
+must be installed on your local machine in advance. If you are a macOS user and
+cannot use [Docker Desktop](https://www.docker.com/products/docker-desktop) to
+contribute to Antrea for licensing reasons, check out this
+[document](docs/contributors/docker-desktop-alternatives.md) for possible
+alternatives.
 
 Alternatively, you can build the Antrea code in your local Go environment. The
 Antrea project uses the [Go modules support](https://github.com/golang/go/wiki/Modules) which was introduced in Go 1.11. It

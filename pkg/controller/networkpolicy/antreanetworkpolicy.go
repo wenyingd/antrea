@@ -138,7 +138,7 @@ func (n *NetworkPolicyController) processAntreaNetworkPolicy(np *crdv1alpha1.Net
 	// Compute NetworkPolicyRule for Ingress Rule.
 	for idx, ingressRule := range np.Spec.Ingress {
 		// Set default action to ALLOW to allow traffic.
-		services, namedPortExists := toAntreaServicesForCRD(ingressRule.Ports)
+		services, namedPortExists := toAntreaServicesForCRD(ingressRule.Ports, ingressRule.Protocols)
 		var appliedToGroupNamesForRule []string
 		// Create AppliedToGroup for each AppliedTo present in the ingress rule.
 		for _, at := range ingressRule.AppliedTo {
@@ -160,7 +160,7 @@ func (n *NetworkPolicyController) processAntreaNetworkPolicy(np *crdv1alpha1.Net
 	// Compute NetworkPolicyRule for Egress Rule.
 	for idx, egressRule := range np.Spec.Egress {
 		// Set default action to ALLOW to allow traffic.
-		services, namedPortExists := toAntreaServicesForCRD(egressRule.Ports)
+		services, namedPortExists := toAntreaServicesForCRD(egressRule.Ports, egressRule.Protocols)
 		var appliedToGroupNamesForRule []string
 		// Create AppliedToGroup for each AppliedTo present in the ingress rule.
 		for _, at := range egressRule.AppliedTo {
@@ -168,9 +168,15 @@ func (n *NetworkPolicyController) processAntreaNetworkPolicy(np *crdv1alpha1.Net
 			appliedToGroupNamesForRule = append(appliedToGroupNamesForRule, atGroup)
 			appliedToGroupNamesSet.Insert(atGroup)
 		}
+		var peers *controlplane.NetworkPolicyPeer
+		if egressRule.ToServices != nil {
+			peers = n.svcRefToPeerForCRD(egressRule.ToServices, np.Namespace)
+		} else {
+			peers = n.toAntreaPeerForCRD(egressRule.To, np, controlplane.DirectionOut, namedPortExists)
+		}
 		rules = append(rules, controlplane.NetworkPolicyRule{
 			Direction:       controlplane.DirectionOut,
-			To:              *n.toAntreaPeerForCRD(egressRule.To, np, controlplane.DirectionOut, namedPortExists),
+			To:              *peers,
 			Services:        services,
 			Name:            egressRule.Name,
 			Action:          egressRule.Action,

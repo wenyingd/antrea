@@ -20,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
-	legacysecv1alpha1 "antrea.io/antrea/pkg/legacyapis/security/v1alpha1"
 )
 
 type AntreaNetworkPolicySpecBuilder struct {
@@ -42,22 +41,6 @@ func (b *AntreaNetworkPolicySpecBuilder) Get() *crdv1alpha1.NetworkPolicy {
 		b.Spec.Egress = []crdv1alpha1.Rule{}
 	}
 	return &crdv1alpha1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      b.Name,
-			Namespace: b.Namespace,
-		},
-		Spec: b.Spec,
-	}
-}
-
-func (b *AntreaNetworkPolicySpecBuilder) GetLegacy() *legacysecv1alpha1.NetworkPolicy {
-	if b.Spec.Ingress == nil {
-		b.Spec.Ingress = []crdv1alpha1.Rule{}
-	}
-	if b.Spec.Egress == nil {
-		b.Spec.Egress = []crdv1alpha1.Rule{}
-	}
-	return &legacysecv1alpha1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      b.Name,
 			Namespace: b.Namespace,
@@ -204,6 +187,23 @@ func (b *AntreaNetworkPolicySpecBuilder) AddEgress(protoc v1.Protocol,
 		Name:      theRule.Name,
 		AppliedTo: theRule.AppliedTo,
 	})
+	return b
+}
+
+func (b *AntreaNetworkPolicySpecBuilder) AddToServicesRule(svcRefs []crdv1alpha1.NamespacedName,
+	name string, ruleAppliedToSpecs []ANPAppliedToSpec, action crdv1alpha1.RuleAction) *AntreaNetworkPolicySpecBuilder {
+	var appliedTos []crdv1alpha1.NetworkPolicyPeer
+	for _, at := range ruleAppliedToSpecs {
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector, at.PodSelectorMatchExp))
+	}
+	newRule := crdv1alpha1.Rule{
+		To:         make([]crdv1alpha1.NetworkPolicyPeer, 0),
+		ToServices: svcRefs,
+		Action:     &action,
+		Name:       name,
+		AppliedTo:  appliedTos,
+	}
+	b.Spec.Egress = append(b.Spec.Egress, newRule)
 	return b
 }
 

@@ -18,6 +18,8 @@ import (
 	"net"
 	"strconv"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 )
@@ -31,6 +33,18 @@ const (
 	TunnelInterface
 	// UplinkInterface is used to mark current interface is for uplink port
 	UplinkInterface
+	// HostInterface is used to mark current interface is for host port
+	HostInterface
+	// ExternalEntityInterface is used to mark current interface is for ExternalEntity Endpoint
+	ExternalEntityInterface
+
+	AntreaInterfaceTypeKey = "antrea-type"
+	AntreaGateway          = "gateway"
+	AntreaContainer        = "container"
+	AntreaTunnel           = "tunnel"
+	AntreaUplink           = "uplink"
+	AntreaHost             = "host"
+	AntreaUnset            = ""
 )
 
 type InterfaceType uint8
@@ -64,15 +78,24 @@ type TunnelInterfaceConfig struct {
 	Csum bool
 }
 
+type EntityInterfaceConfig struct {
+	ExternalEntityKeyIPsMap map[string]sets.String
+	UplinkPort              *OVSPortConfig
+	HostIfaceIndex          int
+}
+
 type InterfaceConfig struct {
 	Type InterfaceType
 	// Unique name of the interface, also used for the OVS port name.
 	InterfaceName string
 	IPs           []net.IP
 	MAC           net.HardwareAddr
+	// VLAN ID of the interface
+	VLANID uint16
 	*OVSPortConfig
 	*ContainerInterfaceConfig
 	*TunnelInterfaceConfig
+	*EntityInterfaceConfig
 }
 
 // InterfaceStore is a service interface to create local interfaces for container, host gateway, and tunnel port.
@@ -88,6 +111,7 @@ type InterfaceStore interface {
 	GetContainerInterfacesByPod(podName string, podNamespace string) []*InterfaceConfig
 	GetInterfaceByIP(interfaceIP string) (*InterfaceConfig, bool)
 	GetNodeTunnelInterface(nodeName string) (*InterfaceConfig, bool)
+	GetInterfaceByOFPort(ofPort uint32) (*InterfaceConfig, bool)
 	GetContainerInterfaceNum() int
 	GetInterfacesByType(interfaceType InterfaceType) []*InterfaceConfig
 	Len() int
@@ -101,7 +125,8 @@ func NewContainerInterface(
 	podName string,
 	podNamespace string,
 	mac net.HardwareAddr,
-	ips []net.IP) *InterfaceConfig {
+	ips []net.IP,
+	vlanID uint16) *InterfaceConfig {
 	containerConfig := &ContainerInterfaceConfig{
 		ContainerID:  containerID,
 		PodName:      podName,
@@ -111,6 +136,7 @@ func NewContainerInterface(
 		Type:                     ContainerInterface,
 		IPs:                      ips,
 		MAC:                      mac,
+		VLANID:                   vlanID,
 		ContainerInterfaceConfig: containerConfig}
 }
 
@@ -127,7 +153,7 @@ func NewTunnelInterface(tunnelName string, tunnelType ovsconfig.TunnelType, loca
 	return &InterfaceConfig{InterfaceName: tunnelName, Type: TunnelInterface, TunnelInterfaceConfig: tunnelConfig}
 }
 
-// NewIPSecTunnelInterface creates InterfaceConfig for the IPSec tunnel to the
+// NewIPSecTunnelInterface creates InterfaceConfig for the IPsec tunnel to the
 // Node.
 func NewIPSecTunnelInterface(interfaceName string, tunnelType ovsconfig.TunnelType, nodeName string, nodeIP net.IP, psk string) *InterfaceConfig {
 	tunnelConfig := &TunnelInterfaceConfig{Type: tunnelType, NodeName: nodeName, RemoteIP: nodeIP, PSK: psk}
@@ -138,6 +164,10 @@ func NewIPSecTunnelInterface(interfaceName string, tunnelType ovsconfig.TunnelTy
 func NewUplinkInterface(uplinkName string) *InterfaceConfig {
 	uplinkConfig := &InterfaceConfig{InterfaceName: uplinkName, Type: UplinkInterface}
 	return uplinkConfig
+}
+
+func NewHostInterface(hostInterfaceName string) *InterfaceConfig {
+	return &InterfaceConfig{InterfaceName: hostInterfaceName, Type: HostInterface}
 }
 
 // TODO: remove this method after IPv4/IPv6 dual-stack is supported completely.

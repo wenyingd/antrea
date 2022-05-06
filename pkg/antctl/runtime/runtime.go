@@ -20,11 +20,15 @@ import (
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+
+	agentapiserver "antrea.io/antrea/pkg/agent/apiserver"
+	"antrea.io/antrea/pkg/util/runtime"
 )
 
 const (
-	ModeController string = "controller"
-	ModeAgent      string = "agent"
+	ModeController     string = "controller"
+	ModeAgent          string = "agent"
+	ModeFlowAggregator string = "flowaggregator"
 )
 
 var (
@@ -50,9 +54,27 @@ func ResolveKubeconfig(path string) (*rest.Config, error) {
 
 func init() {
 	podName, found := os.LookupEnv("POD_NAME")
-	InPod = found && (strings.HasPrefix(podName, "antrea-agent") || strings.HasPrefix(podName, "antrea-controller"))
+	InPod = found && (strings.HasPrefix(podName, "antrea-agent") || strings.HasPrefix(podName, "antrea-controller") ||
+		strings.HasPrefix(podName, "flow-aggregator"))
+
+	if runtime.IsWindowsPlatform() && !InPod {
+		if _, err := os.Stat(agentapiserver.TokenPath); err == nil {
+			InPod = true
+			Mode = ModeAgent
+			return
+		}
+	}
+
+	if _, found := os.LookupEnv("EXTERNAL_NODE"); found {
+		InPod = true
+		Mode = ModeAgent
+		return
+	}
+
 	if strings.HasPrefix(podName, "antrea-agent") {
 		Mode = ModeAgent
+	} else if strings.HasPrefix(podName, "flow-aggregator") {
+		Mode = ModeFlowAggregator
 	} else {
 		Mode = ModeController
 	}

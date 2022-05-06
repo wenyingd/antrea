@@ -20,9 +20,10 @@ forwarded correctly.
 
 <img src="../assets/hns_integration.svg" width="600" alt="HNS Integration">
 
-SNAT based on OpenFlow is needed to make sure the containers can access the external address.
-The SNATed address is using the IP configured on the OVS bridge. Some additional OpenFlow entries
-are installed to assist in identifying and forwarding the external traffic.
+Windows NetNat is configured to make sure the Pods can access external addresses. The packet
+from a Pod to an external address is firstly output to antrea-gw0, and then SNAT is performed on the
+Windows host. The SNATed packet enters OVS from the OVS bridge interface and leaves the Windows host
+from the uplink interface directly.
 
 Antrea implements the Kubernetes ClusterIP Service leveraging OVS. Pod-to-ClusterIP-Service traffic
 is load-balanced and forwarded directly inside the OVS pipeline. And kube-proxy is running
@@ -37,7 +38,7 @@ by kube-proxy.
 
 HNS Network is created during the Antrea Agent initialization phase, and it should be created before
 the OVS bridge is created. This is because OVS is working as the Hyper-V Switch Extension, and the
-ovs-vswitchd process cannot work correctly until the OVS Extension is enabled on the new created
+ovs-vswitchd process cannot work correctly until the OVS Extension is enabled on the newly created
 Hyper-V Switch.
 
 When creating the HNS Network, the local subnet CIDR and the uplink network adapter are required.
@@ -99,10 +100,12 @@ port (provided with `local_ip` option). This local address is the one configured
 ### OVS bridge interface configuration
 
 Since OVS is also responsible for taking charge of the network of the host, an interface for the OVS bridge
-is required on which the host network settings are configured. It is created and enabled when creating
-the OVS bridge, and the MAC address should be changed to be the same as the uplink interface. Then the IP
-address and the route entries originally configured on the uplink interface should also be migrated to
-the interface.
+is required on which the host network settings are configured. The virtual network adapter which is created
+when creating the HNS Network is used as the OVS bridge interface. The virtual network adapter is renamed as
+the expected OVS bridge name, then the OVS bridge port is created. Hence, OVS can find the virtual network
+adapter with the name and attach it directly. Windows host has configured the virtual network adapter with
+IP, MAC and route entries which were originally on the uplink interface when creating the HNSNetwork, as a
+result, no extra manual IP/MAC/Route configurations on the OVS bridge are needed.
 
 The packets that are sent to/from the Windows host should be forwarded on this interface. So the OVS bridge
 is also a valid entry point into the OVS pipeline. A special ofport number 65534 (named as LOCAL) for the
@@ -120,9 +123,9 @@ We should differentiate the traffic if it is entering OVS from the uplink interf
 table. In encap mode, the packets entering OVS from the uplink interface is output to the bridge interface directly.
 In noEncap mode, there are three kinds of packets entering OVS from the uplink interface:
 
- 1) traffic that is sent to local Pods from Pod on a different Node,
- 2) traffic that is sent to local Pods from a different Node according to the routing configuration,
- 3) traffic on the host network
+ 1) Traffic that is sent to local Pods from Pod on a different Node
+ 2) Traffic that is sent to local Pods from a different Node according to the routing configuration
+ 3) Traffic on the host network
 
 For 1 and 2, the packet enters the OVS pipeline, and the `macRewriteMark` is set to ensure the destination MAC can be
 modified.
@@ -210,8 +213,43 @@ Kube-proxy userspace mode is configured to provide NodePort Service function. A 
 "HNS Internal NIC" is provided to kube-proxy to configure Service addresses. The OpenFlow entries for the
 NodePort Service traffic on Windows are the same as those on Linux.
 
-The ClusterIP Service function is implemented by Antrea leveraging OVS. Antrea installs OpenFlow entries
-to select the backend endpoint and performs DNAT on the traffic.
+AntreaProxy implements the ClusterIP Service function. Antrea Agent installs routes to send ClusterIP Service
+traffic from host network to the OVS bridge. For each Service, it adds a route that routes the traffic via a
+virtual IP (169.254.0.253), and it also adds a route to indicate that the virtual IP is reachable via
+antrea-gw0. The reason to add a virtual IP, rather than routing the traffic directly to antrea-gw0, is that
+then only one neighbor cache entry needs to be added, which resolves the virtual IP to a virtual MAC.
+
+When a Service's endpoints are in hostNetwork or external network, a request packet will have its
+destination IP DNAT'd to the selected endpoint IP and its source IP will be SNAT'd to the
+virtual IP (169.254.0.253). Such SNAT is needed for sending the reply packets back to the OVS pipeline
+from the host network, whose destination IP was the Node IP before d-SNATed to the virtual IP.
+Check the packet forwarding path described below.
+
+For a request packet from host, it will enter OVS pipeline via antrea-gw0 and exit via antrea-gw0
+as well to host network. On Windows host, with the help of NetNat, the request packet's source IP will
+be SNAT'd again to Node IP.
+
+The reply packets are the reverse for both situations regardless of whether the endpoint is in
+ClusterCIDR or not.
+
+The following path is an example of host accessing a Service whose endpoint is a hostNetwork Pod on
+another Node. The request packet is like:
+
+```text
+host -> antrea-gw0 -> OVS pipeline -> antrea-gw0 -> host NetNat -> br-int -> OVS pipeline -> peer Node
+                           |                            |
+                   DNAT(peer Node IP)              SNAT(Node IP)
+                    SNAT(virtual IP)
+```
+
+The forwarding path of a reply packet is like:
+
+```text
+peer Node -> OVS pipeline -> br-int -> host NetNat -> antrea-gw0 -> OVS pipeline -> antrea-gw0 -> host
+                                           |                              |
+                                   d-SNAT(virtual IP)          d-SNAT(antrea-gw0 IP)
+                                                                d-DNAT(Service IP)
+```
 
 ### External Traffic
 

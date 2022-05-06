@@ -32,6 +32,8 @@ Antrea has been tested with Kubernetes clusters running version 1.16 or later.
 * `NodeIPAMController` must be enabled in the Kubernetes cluster.\
   When deploying a cluster with kubeadm the `--pod-network-cidr <cidr>`
   option must be specified.
+  Alternately, NodeIPAM feature of Antrea Controller should be enabled and
+  configured.
 * Open vSwitch kernel module must be present on every Kubernetes node.
 
 ## Getting Started
@@ -62,7 +64,7 @@ Your feedback is more than welcome!
 every two weeks on Tuesday at 5AM GMT+1 (United Kingdom time). See Antrea team calendar for localized times.
     - [Meeting minutes](https://github.com/antrea-io/antrea/wiki/Community-Meetings)
     - [Meeting recordings](https://www.youtube.com/playlist?list=PLuzde2hYeDBdw0BuQCYbYqxzoJYY1hfwv)
-  + [Antrea office hours](https://VMware.zoom.us/j/94245798791?pwd=RzRNVXYxdDJnNjZnNjBiUVFHZGlXdz09),
+  + [Antrea live office hours](https://antrea.io/live),
 every two weeks on Tuesday at 10PM GMT+1 (United Kingdom time). See Antrea team calendar for localized times.
 * Join our mailing lists to always stay up-to-date with Antrea development:
   + [projectantrea-announce](https://groups.google.com/forum/#!forum/projectantrea-announce)

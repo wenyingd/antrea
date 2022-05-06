@@ -341,6 +341,7 @@ func (ic *ifConfigurator) configureContainerLink(
 	brSriovVFDeviceID string,
 	podSriovVFDeviceID string,
 	result *current.Result,
+	containerAccess *containerAccessArbitrator,
 ) error {
 	if brSriovVFDeviceID != "" {
 		if !ic.isOvsHardwareOffloadEnabled {
@@ -589,6 +590,6 @@ func isVeth(link netlink.Link) bool {
 	return isVeth
 }
 
-func (ic *ifConfigurator) getOVSInterfaceType() int {
+func (ic *ifConfigurator) getOVSInterfaceType(ovsPortName string) int {
 	return defaultOVSInterfaceType
 }

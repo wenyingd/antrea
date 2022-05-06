@@ -16,7 +16,6 @@ package support
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +27,7 @@ import (
 	"time"
 
 	"github.com/spf13/afero"
+	"gopkg.in/yaml.v2"
 	"k8s.io/utils/exec"
 
 	agentquerier "antrea.io/antrea/pkg/agent/querier"
@@ -216,12 +216,28 @@ func directoryCopy(fs afero.Fs, targetDir string, srcDir string, prefixFilter st
 	})
 }
 
-// writeFile writes the given data to the specified filePath. Param "resource" is used to identify the type of the given
-// data in the error message.
+// writeFile writes the given data to the specified filePath. Param "resource" is used to identify
+// the type of the given data in the error message.
 func writeFile(fs afero.Fs, filePath string, resource string, data []byte) error {
 	err := afero.WriteFile(fs, filePath, data, 0644)
 	if err != nil {
 		return fmt.Errorf("error when writing %s to file: %w", resource, err)
+	}
+	return nil
+}
+
+// writeYAMLFile writes the given data to the specified filePath in YAML format. Param "resource" is
+// used to identify the type of the given data in the error message.
+func writeYAMLFile(fs afero.Fs, filePath string, resource string, data interface{}) error {
+	f, err := fs.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("error when creating file %s to write %s: %w", filePath, resource, err)
+	}
+	defer f.Close()
+	encoder := yaml.NewEncoder(f)
+	defer encoder.Close()
+	if err := encoder.Encode(data); err != nil {
+		return fmt.Errorf("error when writing %s to %s in YAML format: %w", resource, filePath, err)
 	}
 	return nil
 }
@@ -265,31 +281,19 @@ type agentDumper struct {
 	aq           agentquerier.AgentQuerier
 	npq          querier.AgentNetworkPolicyInfoQuerier
 	since        string
+	v4Enabled    bool
+	v6Enabled    bool
 }
 
 func (d *agentDumper) DumpAgentInfo(basedir string) error {
-	ci := new(clusterinformationv1beta1.AntreaAgentInfo)
-	d.aq.GetAgentInfo(ci, false)
-	f, err := d.fs.Create(filepath.Join(basedir, "agentinfo"))
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	encoder := json.NewEncoder(f)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(ci)
+	ai := new(clusterinformationv1beta1.AntreaAgentInfo)
+	d.aq.GetAgentInfo(ai, false)
+	return writeYAMLFile(d.fs, filepath.Join(basedir, "agentinfo"), "agentinfo", ai)
 }
 
 func (d *agentDumper) DumpNetworkPolicyResources(basedir string) error {
 	dump := func(o interface{}, name string) error {
-		f, err := d.fs.Create(filepath.Join(basedir, "agentinfo"))
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		encoder := json.NewEncoder(f)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(o)
+		return writeYAMLFile(d.fs, filepath.Join(basedir, name), name, o)
 	}
 	if err := dump(d.npq.GetAddressGroups(), "addressgroups"); err != nil {
 		return err
@@ -324,7 +328,7 @@ func (d *agentDumper) DumpOVSPorts(basedir string) error {
 	return writeFile(d.fs, filepath.Join(basedir, "ovsports"), "ports", []byte(strings.Join(portData, "\n")))
 }
 
-func NewAgentDumper(fs afero.Fs, executor exec.Interface, ovsCtlClient ovsctl.OVSCtlClient, aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier, since string) AgentDumper {
+func NewAgentDumper(fs afero.Fs, executor exec.Interface, ovsCtlClient ovsctl.OVSCtlClient, aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier, since string, v4Enabled, v6Enabled bool) AgentDumper {
 	return &agentDumper{
 		fs:           fs,
 		executor:     executor,
@@ -332,5 +336,7 @@ func NewAgentDumper(fs afero.Fs, executor exec.Interface, ovsCtlClient ovsctl.OV
 		aq:           aq,
 		npq:          npq,
 		since:        since,
+		v4Enabled:    v4Enabled,
+		v6Enabled:    v6Enabled,
 	}
 }

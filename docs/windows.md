@@ -184,6 +184,13 @@ spec:
       hostNetwork: true
 ```
 
+If the powershell version on your Window Node is earlier than v6.0,
+change the command from `pwsh` to `powershell` in kube-proxy.yml.
+
+```bash
+sed -i 's/pwsh/powershell/g' kube-proxy.yml
+```
+
 Then apply the `kube-proxy.yml`.
 
 ```bash
@@ -297,13 +304,13 @@ Insert following line in kubelet service script `c:\k\StartKubelet.ps1` to invok
 `Prepare-AntreaAgent.ps1` when starting kubelet service:
 
 ```powershell
-& C:\k\Prepare-AntreaAgent.ps1
+& C:\k\antrea\Prepare-AntreaAgent.ps1
 ```
 
 * Example2: Create a ScheduledJob that runs at startup.
 
 ```powershell
-$trigger = New-JobTrigger -AtStartup
+$trigger = New-JobTrigger -AtStartup -RandomDelay 00:00:30 
 $options = New-ScheduledJobOption -RunElevated
 Register-ScheduledJob -Name PrepareAntreaAgent -Trigger $trigger  -ScriptBlock { Invoke-Expression C:\k\antrea\Prepare-AntreaAgent.ps1 } -ScheduledJobOption $options
 ```

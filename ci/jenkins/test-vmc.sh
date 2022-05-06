@@ -80,6 +80,10 @@ case $key in
     KUBECONFIG_PATH="$2"
     shift 2
     ;;
+    --k8s-version)
+    K8S_VERSION="$2"
+    shift 2
+    ;;
     --workdir)
     WORKDIR="$2"
     shift 2
@@ -94,6 +98,14 @@ case $key in
     ;;
     --registry)
     DOCKER_REGISTRY="$2"
+    shift 2
+    ;;
+    --username)
+    CLUSTER_USERNAME="$2"
+    shift 2
+    ;;
+    --password)
+    CLUSTER_PASSWORD="$2"
     shift 2
     ;;
     --garbage-collection)
@@ -168,6 +180,12 @@ function saveLogs() {
     kubectl get cluster-api -A -o yaml > ${CLUSTER_LOG_DIR}/cluster_api/cluster_api.yaml || true
 }
 
+function release_static_ip() {
+    echo '=== Releasing IP ==='
+    cat "$DEFAULT_WORKDIR/host-local.json" | CNI_COMMAND=DEL CNI_CONTAINERID="$CLUSTER" CNI_NETNS=/dev/null CNI_IFNAME=dummy0 CNI_PATH=. /usr/bin/host-local
+    echo Released IP
+}
+
 function setup_cluster() {
     export KUBECONFIG=$KUBECONFIG_PATH
     if [ -z $K8S_VERSION ]; then
@@ -178,6 +196,11 @@ function setup_cluster() {
     fi
     export OVA_TEMPLATE_NAME=${TEST_OS}-kube-${K8S_VERSION}
     rm -rf ${GIT_CHECKOUT_DIR}/jenkins || true
+
+    echo '=== Allocating IP ==='
+    cat "$DEFAULT_WORKDIR/host-local.json" | CNI_COMMAND=ADD CNI_CONTAINERID="$CLUSTER" CNI_NETNS=/dev/null CNI_IFNAME=dummy0 CNI_PATH=. /usr/bin/host-local > ip-result.json
+    CONTROL_VIP=$(cat ip-result.json | jq -r '.ips[0].address' | awk -F '/' '{print $1}')
+    echo Allocated "$CONTROL_VIP"
 
     echo '=== Generate key pair ==='
     mkdir -p ${GIT_CHECKOUT_DIR}/jenkins/key
@@ -192,6 +215,9 @@ function setup_cluster() {
     sed -i "s/OVATEMPLATENAME/${OVA_TEMPLATE_NAME}/g" ${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml
     sed -i "s/CLUSTERNAME/${CLUSTER}/g" ${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml
     sed -i "s|SSHAUTHORIZEDKEYS|${publickey}|g" ${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml
+    sed -i "s/CLUSTERUSERNAME/${CLUSTER_USERNAME}/g" ${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml
+    sed -i "s/CLUSTERPASSWORD/${CLUSTER_PASSWORD}/g" ${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml
+    sed -i "s/CONTROLVIP/${CONTROL_VIP}/g" ${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml
     sed -i "s/CLUSTERNAMESPACE/${CLUSTER}/g" ${GIT_CHECKOUT_DIR}/jenkins/out/namespace.yaml
 
     echo "=== network spec value substitution==="
@@ -206,8 +232,8 @@ function setup_cluster() {
     kubectl apply -f "${GIT_CHECKOUT_DIR}/jenkins/out/namespace.yaml"
     kubectl apply -f "${GIT_CHECKOUT_DIR}/jenkins/out/cluster.yaml"
 
-    echo '=== Wait for 10 min to get workload cluster secret ==='
-    for t in {1..10}
+    echo '=== Wait for 20 min to get workload cluster secret ==='
+    for t in {1..20}
     do
         sleep 1m
         echo '=== Get kubeconfig (try for 1m) ==='
@@ -228,10 +254,10 @@ function setup_cluster() {
         exit 1
     else
         export KUBECONFIG="${GIT_CHECKOUT_DIR}/jenkins/out/kubeconfig"
-        echo "=== Waiting for 10 minutes for all nodes to be up ==="
+        echo "=== Waiting for 20 minutes for all nodes to be up ==="
 
         set +e
-        for t in {1..10}
+        for t in {1..20}
         do
             sleep 1m
             echo "=== Get node (try for 1m) ==="
@@ -275,19 +301,40 @@ function copy_image {
   ${SSH_WITH_ANTREA_CI_KEY} -n capv@${IP} "sudo crictl images | grep '<none>' | awk '{print \$3}' | xargs -r crictl rmi"
 }
 
-function run_codecov {
+# We run the function in a subshell with "set -e" to ensure that it exists in
+# case of error (e.g. integrity check), no matter the context in which the
+# function is called.
+function run_codecov { (set -e
     flag=$1
     file=$2
     dir=$3
     remote=$4
     ip=$5
 
+    rm -f trustedkeys.gpg codecov
+    # This is supposed to be a one-time step, but there should be no harm in
+    # getting the key every time. It does not come from the codecov.io
+    # website. Anyway, this is needed when the VM is re-created for every test.
+    curl https://keybase.io/codecovsecurity/pgp_keys.asc | gpg --no-default-keyring --keyring trustedkeys.gpg --import
+    curl -Os https://uploader.codecov.io/latest/linux/codecov
+    curl -Os https://uploader.codecov.io/latest/linux/codecov.SHA256SUM
+    curl -Os https://uploader.codecov.io/latest/linux/codecov.SHA256SUM.sig
+
+    # Check that the sha256 matches the signature
+    gpgv codecov.SHA256SUM.sig codecov.SHA256SUM
+    # Then check the integrity of the codecov binary
+    shasum -a 256 -c codecov.SHA256SUM
+
+    chmod +x codecov
+
     if [[ $remote == true ]]; then
-        ${SSH_WITH_UTILS_KEY} -n jenkins@${ip} "curl -s https://codecov.io/bash | env -i bash -s -- -c -t ${CODECOV_TOKEN} -F ${flag} -f ${file}"
+        ${SCP_WITH_UTILS_KEY} codecov jenkins@${ip}:~
+        ${SSH_WITH_UTILS_KEY} -n jenkins@${ip} "~/codecov -c -t ${CODECOV_TOKEN} -F ${flag} -f ${file} -C ${GIT_COMMIT} -r antrea-io/antrea"
     else
-        curl -s https://codecov.io/bash | env -i bash -s -- -c -t ${CODECOV_TOKEN} -F ${flag} -f ${file} -s ${dir}
+        ./codecov -c -t ${CODECOV_TOKEN} -F ${flag} -f ${file} -s ${dir} -C ${GIT_COMMIT} -r antrea-io/antrea
     fi
-}
+    rm -f trustedkeys.gpg codecov
+)}
 
 function deliver_antrea {
     echo "====== Building Antrea for the Following Commit ======"
@@ -312,18 +359,18 @@ function deliver_antrea {
     # Pull images from Dockerhub first then try Harbor.
     for i in `seq 3`; do
         if [[ "$COVERAGE" == true ]]; then
-            VERSION="$CLUSTER" ./hack/build-antrea-ubuntu-all.sh --pull --coverage && break
+            VERSION="$CLUSTER" ./hack/build-antrea-linux-all.sh --pull --coverage && break
         else
-            VERSION="$CLUSTER" ./hack/build-antrea-ubuntu-all.sh --pull && break
+            VERSION="$CLUSTER" ./hack/build-antrea-linux-all.sh --pull && break
         fi
     done
     if [ $? -ne 0 ]; then
         echoerr "Failed to build antrea images with Dockerhub"
         for i in `seq 3`; do
             if [[ "$COVERAGE" == true ]]; then
-                VERSION="$CLUSTER" DOCKER_REGISTRY="${DOCKER_REGISTRY}" ./hack/build-antrea-ubuntu-all.sh --pull --coverage && break
+                VERSION="$CLUSTER" DOCKER_REGISTRY="${DOCKER_REGISTRY}" ./hack/build-antrea-linux-all.sh --pull --coverage && break
             else
-                VERSION="$CLUSTER" DOCKER_REGISTRY="${DOCKER_REGISTRY}" ./hack/build-antrea-ubuntu-all.sh --pull && break
+                VERSION="$CLUSTER" DOCKER_REGISTRY="${DOCKER_REGISTRY}" ./hack/build-antrea-linux-all.sh --pull && break
             fi
         done
         if [ $? -ne 0 ]; then
@@ -348,6 +395,9 @@ function deliver_antrea {
         make manifest-coverage -C $GIT_CHECKOUT_DIR
         antrea_yml="antrea-coverage.yml"
     fi
+
+    # Enable verbose log for troubleshooting.
+    sed -i "s/--v=0/--v=4/g" $GIT_CHECKOUT_DIR/build/yamls/$antrea_yml
 
     DOCKER_IMG_VERSION=$CLUSTER
     if [[ -n $OLD_ANTREA_VERSION ]]; then
@@ -375,7 +425,7 @@ function deliver_antrea {
         docker save -o flow-aggregator.tar projects.registry.vmware.com/antrea/flow-aggregator:${DOCKER_IMG_VERSION}
     fi
 
-    control_plane_ip="$(kubectl get nodes -o wide --no-headers=true | awk -v role="$CONTROL_PLANE_NODE_ROLE" '$3 == role {print $6}')"
+    control_plane_ip="$(kubectl get nodes -o wide --no-headers=true | awk -v role="$CONTROL_PLANE_NODE_ROLE" '$3 ~ role {print $6}')"
     ${SCP_WITH_ANTREA_CI_KEY} $GIT_CHECKOUT_DIR/build/yamls/*.yml capv@${control_plane_ip}:~
 
     IPs=($(kubectl get nodes -o wide --no-headers=true | awk '{print $6}' | xargs))
@@ -418,7 +468,9 @@ function deliver_antrea {
 }
 
 function run_integration {
+    flag=$1
     VM_NAME="antrea-integration-0"
+    export GOVC_INSECURE=1
     export GOVC_URL=${GOVC_URL}
     export GOVC_USERNAME=${GOVC_USERNAME}
     export GOVC_PASSWORD=${GOVC_PASSWORD}
@@ -427,11 +479,20 @@ function run_integration {
     VM_IP=$(govc vm.ip ${VM_NAME}) # wait for VM to be on
 
     set -x
-    echo "===== Run Integration tests ====="
-    # umask ensures that files are cloned with the correct permissions so that Docker caching can be leveraged
-    ${SSH_WITH_UTILS_KEY} -n jenkins@${VM_IP} "umask 0022 && git clone ${ghprbAuthorRepoGitUrl} antrea && cd antrea && git checkout ${GIT_BRANCH} && DOCKER_REGISTRY=${DOCKER_REGISTRY} ./build/images/ovs/build.sh --pull && NO_PULL=${NO_PULL} make docker-test-integration"
-    if [[ "$COVERAGE" == true ]]; then
-        run_codecov "integration-tests" ".coverage/coverage-integration.txt" "" true ${VM_IP}
+    if [[ ${flag} == "multicluster" ]];then
+      echo "===== Run Multi-cluster Integration tests ====="
+      # umask ensures that files are cloned with the correct permissions so that Docker caching can be leveraged
+      ${SSH_WITH_UTILS_KEY} -n jenkins@${VM_IP} "PATH=$PATH:/usr/local/go/bin && umask 0022 && git clone ${ghprbAuthorRepoGitUrl} antrea && cd antrea && git checkout ${GIT_BRANCH} && cd multicluster && NO_LOCAL=true make test-integration"
+      if [[ "$COVERAGE" == true ]]; then
+        run_codecov "mc-integration-tests" "antrea/multicluster/.coverage/coverage-integration.txt" "" true ${VM_IP}
+      fi
+    else
+      echo "===== Run Integration tests ====="
+      # umask ensures that files are cloned with the correct permissions so that Docker caching can be leveraged
+      ${SSH_WITH_UTILS_KEY} -n jenkins@${VM_IP} "umask 0022 && git clone ${ghprbAuthorRepoGitUrl} antrea && cd antrea && git checkout ${GIT_BRANCH} && DOCKER_REGISTRY=${DOCKER_REGISTRY} ./build/images/ovs/build.sh --pull && NO_PULL=${NO_PULL} make docker-test-integration"
+      if [[ "$COVERAGE" == true ]]; then
+        run_codecov "integration-tests" "antrea/.coverage/coverage-integration.txt" "" true ${VM_IP}
+      fi
     fi
 }
 
@@ -461,7 +522,7 @@ function run_e2e {
     done
 
     echo "=== Move kubeconfig to control-plane Node ==="
-    control_plane_ip="$(kubectl get nodes -o wide --no-headers=true | awk -v role="$CONTROL_PLANE_NODE_ROLE" '$3 == role {print $6}')"
+    control_plane_ip="$(kubectl get nodes -o wide --no-headers=true | awk -v role="$CONTROL_PLANE_NODE_ROLE" '$3 ~ role {print $6}')"
     ${SSH_WITH_ANTREA_CI_KEY} -n capv@${control_plane_ip} "if [ ! -d ".kube" ]; then mkdir .kube; fi"
     ${SCP_WITH_ANTREA_CI_KEY} $GIT_CHECKOUT_DIR/jenkins/out/kubeconfig capv@${control_plane_ip}:~/.kube/config
 
@@ -516,7 +577,7 @@ function run_conformance {
         $GIT_CHECKOUT_DIR/hack/generate-manifest.sh --mode dev --all-features --coverage > $GIT_CHECKOUT_DIR/build/yamls/antrea-all-coverage.yml
         antrea_yml="antrea-all-coverage.yml"
       else
-        $GIT_CHECKOUT_DIR/hack/generate-manifest.sh --mode dev --all-features > $GIT_CHECKOUT_DIR/build/yamls/antrea-all.yml
+        $GIT_CHECKOUT_DIR/hack/generate-manifest.sh --mode dev --all-features --verbose-log > $GIT_CHECKOUT_DIR/build/yamls/antrea-all.yml
         antrea_yml="antrea-all.yml"
       fi
     fi
@@ -527,7 +588,7 @@ function run_conformance {
     kubectl rollout status --timeout=5m deployment.apps/antrea-controller -n kube-system
     kubectl rollout status --timeout=5m daemonset/antrea-agent -n kube-system
 
-    control_plane_ip="$(kubectl get nodes -o wide --no-headers=true | awk -v role="$CONTROL_PLANE_NODE_ROLE" '$3 == role {print $6}')"
+    control_plane_ip="$(kubectl get nodes -o wide --no-headers=true | awk -v role="$CONTROL_PLANE_NODE_ROLE" '$3 ~ role {print $6}')"
     echo "=== Move kubeconfig to control-plane Node ==="
     ${SSH_WITH_ANTREA_CI_KEY} -n capv@${control_plane_ip} "if [ ! -d ".kube" ]; then mkdir .kube; fi"
     ${SCP_WITH_ANTREA_CI_KEY} $GIT_CHECKOUT_DIR/jenkins/out/kubeconfig capv@${control_plane_ip}:~/.kube/config
@@ -584,6 +645,8 @@ function cleanup_cluster() {
     kubectl delete ns ${CLUSTER}
     rm -rf "${GIT_CHECKOUT_DIR}/jenkins"
     echo "=== Cleanup cluster ${CLUSTER} succeeded ==="
+
+    release_static_ip
 }
 
 function garbage_collection() {
@@ -635,6 +698,7 @@ pushd "$THIS_DIR" > /dev/null
 SCP_WITH_ANTREA_CI_KEY="scp -q -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ${GIT_CHECKOUT_DIR}/jenkins/key/antrea-ci-key"
 SSH_WITH_ANTREA_CI_KEY="ssh -q -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ${GIT_CHECKOUT_DIR}/jenkins/key/antrea-ci-key"
 SSH_WITH_UTILS_KEY="ssh -q -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ${WORKDIR}/utils/key"
+SCP_WITH_UTILS_KEY="scp -q -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i ${WORKDIR}/utils/key"
 
 clean_tmp
 if [[ "$RUN_GARBAGE_COLLECTION" == true ]]; then
@@ -653,8 +717,8 @@ if [[ "$RUN_CLEANUP_ONLY" == true ]]; then
     exit 0
 fi
 
-if [[ "$TESTCASE" != "e2e" && "$TESTCASE" != "conformance" && "$TESTCASE" != "all-features-conformance" && "$TESTCASE" != "whole-conformance" && "$TESTCASE" != "networkpolicy" && "$TESTCASE" != "integration" ]]; then
-    echoerr "testcase should be e2e, integration, conformance, whole-conformance or networkpolicy"
+if [[ "$TESTCASE" != "e2e" && "$TESTCASE" != "conformance" && "$TESTCASE" != "all-features-conformance" && "$TESTCASE" != "whole-conformance" && "$TESTCASE" != "networkpolicy" && "$TESTCASE" != "integration" && "$TESTCASE" != "multicluster-integration" ]]; then
+    echoerr "testcase should be e2e, integration, multicluster-integration, conformance, whole-conformance or networkpolicy"
     exit 1
 fi
 
@@ -672,6 +736,11 @@ fi
 
 if [[ "$TESTCASE" == "integration" ]]; then
     run_integration
+    exit 0
+fi
+
+if [[ "$TESTCASE" == "multicluster-integration" ]]; then
+    run_integration "multicluster"
     exit 0
 fi
 

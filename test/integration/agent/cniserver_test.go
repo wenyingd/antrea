@@ -53,11 +53,11 @@ import (
 	"antrea.io/antrea/pkg/agent/metrics"
 	openflowtest "antrea.io/antrea/pkg/agent/openflow/testing"
 	routetest "antrea.io/antrea/pkg/agent/route/testing"
-	antreatypes "antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/agent/util"
 	cnimsg "antrea.io/antrea/pkg/apis/cni/v1beta1"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	ovsconfigtest "antrea.io/antrea/pkg/ovs/ovsconfig/testing"
+	"antrea.io/antrea/pkg/util/channel"
 )
 
 const (
@@ -142,7 +142,9 @@ const (
 	chainCNIConfStr = `{
 "cniVersion":"%s",
 "name":"azure",
-"prevResult":%s
+"type":"antrea",
+"prevResult":%s,
+"ipam":{"type":"unknown"}
 }`
 )
 
@@ -571,10 +573,10 @@ func newTester() *cmdAddDelTester {
 		"",
 		testNodeConfig,
 		k8sFake.NewSimpleClientset(),
-		false,
-		nil,
+		routeMock,
+		false, false, false,
 		tester.networkReadyCh)
-	tester.server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, make(chan antreatypes.EntityReference, 100))
+	tester.server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100), nil)
 	ctx := context.Background()
 	tester.ctx = ctx
 	return tester
@@ -599,15 +601,15 @@ func cmdAddDelCheckTest(testNS ns.NetNS, tc testCase, dataDir string) {
 	}()
 	tester.setNS(testNS, targetNS)
 
-	ipamResult := ipamtest.GenerateIPAMResult("0.4.0", tc.addresses, tc.Routes, tc.DNS)
-	ipamMock.EXPECT().Add(mock.Any(), mock.Any()).Return(ipamResult, nil).AnyTimes()
+	ipamResult := &ipam.IPAMResult{Result: *ipamtest.GenerateIPAMResult("0.4.0", tc.addresses, tc.Routes, tc.DNS)}
+	ipamMock.EXPECT().Add(mock.Any(), mock.Any(), mock.Any()).Return(true, ipamResult, nil).AnyTimes()
 
 	// Mock ovs output while get ovs port external configuration
 	ovsPortname := util.GenerateContainerInterfaceName(testPod, testPodNamespace, ContainerID)
 	ovsPortUUID := uuid.New().String()
 	ovsServiceMock.EXPECT().CreatePort(ovsPortname, ovsPortname, mock.Any()).Return(ovsPortUUID, nil).AnyTimes()
-	ovsServiceMock.EXPECT().GetOFPort(ovsPortname).Return(int32(10), nil).AnyTimes()
-	ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, mock.Any(), mock.Any(), mock.Any()).Return(nil)
+	ovsServiceMock.EXPECT().GetOFPort(ovsPortname, false).Return(int32(10), nil).AnyTimes()
+	ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, mock.Any(), mock.Any(), mock.Any(), uint16(0)).Return(nil)
 
 	close(tester.networkReadyCh)
 	// Test ips allocation
@@ -650,9 +652,10 @@ func TestAntreaServerFunc(t *testing.T) {
 	controller := mock.NewController(t)
 	defer controller.Finish()
 	ipamMock = ipamtest.NewMockIPAMDriver(controller)
-	_ = ipam.RegisterIPAMDriver("mock", ipamMock)
+	ipam.RegisterIPAMDriver("mock", ipamMock)
 	ovsServiceMock = ovsconfigtest.NewMockOVSBridgeClient(controller)
 	ofServiceMock = openflowtest.NewMockClient(controller)
+	routeMock = routetest.NewMockInterface(controller)
 
 	var originalNS ns.NetNS
 	var dataDir string
@@ -666,12 +669,15 @@ func TestAntreaServerFunc(t *testing.T) {
 		dataDir, err = ioutil.TempDir("", "antrea_server_test")
 		require.Nil(t, err)
 
-		ipamMock.EXPECT().Del(mock.Any(), mock.Any()).Return(nil).AnyTimes()
-		ipamMock.EXPECT().Check(mock.Any(), mock.Any()).Return(nil).AnyTimes()
+		ipamMock.EXPECT().Del(mock.Any(), mock.Any(), mock.Any()).Return(true, nil).AnyTimes()
+		ipamMock.EXPECT().Check(mock.Any(), mock.Any(), mock.Any()).Return(true, nil).AnyTimes()
 
 		ovsServiceMock.EXPECT().GetPortList().Return([]ovsconfig.OVSPortData{}, nil).AnyTimes()
 		ovsServiceMock.EXPECT().IsHardwareOffloadEnabled().Return(false).AnyTimes()
 		ovsServiceMock.EXPECT().GetOVSDatapathType().Return(ovsconfig.OVSDatapathSystem).AnyTimes()
+
+		routeMock.EXPECT().AddLocalAntreaFlexibleIPAMPodRule([]net.IP{net.ParseIP("10.1.2.100")}).Return(nil).Times(1)
+		routeMock.EXPECT().DeleteLocalAntreaFlexibleIPAMPodRule([]net.IP{net.ParseIP("10.1.2.100")}).Return(nil).Times(1)
 	}
 
 	teardown := func() {
@@ -731,8 +737,8 @@ func setupChainTest(
 			"",
 			testNodeConfig,
 			k8sFake.NewSimpleClientset(),
-			true,
 			routeMock,
+			true, false, false,
 			networkReadyCh)
 	} else {
 		server = inServer
@@ -793,7 +799,7 @@ func TestCNIServerChaining(t *testing.T) {
 			ifaceStore := interfacestore.NewInterfaceStore()
 			ovsServiceMock.EXPECT().IsHardwareOffloadEnabled().Return(false).AnyTimes()
 			ovsServiceMock.EXPECT().GetOVSDatapathType().Return(ovsconfig.OVSDatapathSystem).AnyTimes()
-			err = server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, make(chan antreatypes.EntityReference, 100))
+			err = server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100), nil)
 			testRequire.Nil(err)
 		}
 
@@ -821,8 +827,8 @@ func TestCNIServerChaining(t *testing.T) {
 		orderedCalls = append(orderedCalls,
 			routeMock.EXPECT().MigrateRoutesToGw(hostVeth.Name),
 			ovsServiceMock.EXPECT().CreatePort(ovsPortname, ovsPortname, mock.Any()).Return(ovsPortUUID, nil),
-			ovsServiceMock.EXPECT().GetOFPort(ovsPortname).Return(testContainerOFPort, nil),
-			ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, []net.IP{podIP}, containerIntf.HardwareAddr, mock.Any()),
+			ovsServiceMock.EXPECT().GetOFPort(ovsPortname, false).Return(testContainerOFPort, nil),
+			ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, []net.IP{podIP}, containerIntf.HardwareAddr, mock.Any(), uint16(0)),
 		)
 		mock.InOrder(orderedCalls...)
 		cniResp, err := server.CmdAdd(ctx, cniReq)
@@ -831,7 +837,7 @@ func TestCNIServerChaining(t *testing.T) {
 		testRequire.JSONEq(prevResult.String(), string(cniResp.CniResult))
 
 		// test cmdDel
-		containterHostRt := &net.IPNet{IP: podIP, Mask: net.CIDRMask(32, 32)}
+		containterHostRt := util.NewIPNet(podIP)
 		orderedCalls = nil
 		orderedCalls = append(orderedCalls,
 			routeMock.EXPECT().UnMigrateRoutesFromGw(containterHostRt, ""),

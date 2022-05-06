@@ -1,3 +1,17 @@
+// Copyright 2022 Antrea Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package config
 
 import (
@@ -40,10 +54,10 @@ func TestTrafficEncapModeTypeString(t *testing.T) {
 		modeType TrafficEncapModeType
 		expMode  string
 	}{
-		{"encap-mode", 0, "Encap"},
-		{"no-encap-mode", 1, "NoEncap"},
-		{"hybrid-mode", 2, "Hybrid"},
-		{"policy-only-mode-valid", 3, "NetworkPolicyOnly"},
+		{"encap-mode", 0, "encap"},
+		{"no-encap-mode", 1, "noEncap"},
+		{"hybrid-mode", 2, "hybrid"},
+		{"policy-only-mode-valid", 3, "networkPolicyOnly"},
 	}
 
 	for _, tt := range tests {

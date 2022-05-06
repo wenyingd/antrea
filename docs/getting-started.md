@@ -8,6 +8,14 @@ manifest.
 
 ## Ensuring requirements are satisfied
 
+### NodeIPAM
+
+Antrea relies on `NodeIPAM` for per-Node CIDR allocation. `NodeIPAM` can run
+within the Kubernetes `kube-controller-manager`, or within the Antrea
+Controller.
+
+#### NodeIPAM within kube-controller-manager
+
 When using `kubeadm` to create the Kubernetes cluster, passing
 `--pod-network-cidr=<CIDR Range for Pods>` to `kubeadm init` will enable
 `NodeIpamController`. Clusters created with kubeadm will always have
@@ -28,6 +36,13 @@ with the following flags:
 * To enable masquerading of traffic for Service cluster IP via iptables,
 `kube-proxy` should be started with the `--cluster-cidr=<CIDR Range for Pods>`
 flag.
+
+#### NodeIPAM within Antrea Controller
+
+For further info about running NodeIPAM within Antrea Controller, see
+[Antrea IPAM Capabilities](antrea-ipam.md)
+
+### Open vSwitch
 
 As for OVS, when using the built-in kernel module, kernel version >= 4.6 is
 required. On the other hand, when building it from OVS sources, OVS
@@ -140,13 +155,19 @@ information.
 To deploy Antrea in a [Kind](https://github.com/kubernetes-sigs/kind) cluster,
 please refer to this [guide](kind.md).
 
-### Deploying Antrea in EKS and GKE
+### Deploying Antrea in Minikube
 
-Antrea can be deployed in NetworkPolicy only mode to an EKS cluster or a GKE
-cluster, and enforce NetworkPolicies for the cluster.
+To deploy Antrea in a [Minikube](https://github.com/kubernetes/minikube) cluster,
+please refer to this [guide](minikube.md).
 
-* To deploy Antrea in an EKS cluster, please refer to [the EKS installation guide](eks-installation.md).
-* To deploy Antrea in a GKE cluster, please refer to [the GKE installation guide](gke-installation.md).
+### Deploying Antrea in AKS, EKS, and GKE
+
+Antrea can work with cloud managed Kubernetes services, and can be deployed to
+AKS, EKS, and GKE clusters.
+
+* To deploy Antrea to an AKS or an AKS Engine cluster, please refer to [the AKS installation guide](aks-installation.md).
+* To deploy Antrea to an EKS cluster, please refer to [the EKS installation guide](eks-installation.md).
+* To deploy Antrea to a GKE cluster, please refer to [the GKE installation guide](gke-installation.md).
 
 ### Deploying Antrea with Custom Certificates
 
@@ -166,10 +187,10 @@ CRDs, which provide advanced features including: policy priority, tiering, deny
 action, external entity, and policy statistics. For more information on usage of
 Antrea Network Policies, refer to the [Antrea Network Policy document](antrea-network-policy.md).
 
-### IPsec Encryption
+### Traffic Encryption
 
-Antrea supports encrypting GRE tunnel traffic with IPsec. To deploy Antrea with
-IPsec encryption enabled, please refer to [this guide](ipsec-tunnel.md).
+Antrea supports encrypting traffic between Linux Nodes using IPsec or WireGuard.
+To deploy Antrea with traffic encryption enabled, please refer to [this guide](traffic-encryption.md).
 
 ### Network Flow Visibility
 

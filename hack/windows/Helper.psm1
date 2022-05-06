@@ -74,7 +74,7 @@ function Install-AntreaAgent {
     $AntreaAgent = "$AntreaHome\bin\antrea-agent.exe"
     $AntreaCNI = "$CNIPath\antrea.exe"
     $StopScript = "$AntreaHome\Stop.ps1"
-    $Owner = "vmware-tanzu"
+    $Owner = "antrea-io"
     $Repo = "antrea"
 
     $env:Path = "$KubernetesHome;" + $env:Path
@@ -163,7 +163,7 @@ function New-KubeProxyServiceInterface {
         Write-Host "Network adapter $INTERFACE_TO_ADD_SERVICE_IP exists, exit."
         return
     }
-    if (!(Get-VMSwitch -Name $hnsSwitchName -ErrorAction SilentlyContinue)) {
+    if (!(Get-VMSwitch -ComputerName $(hostname) -Name $hnsSwitchName -ErrorAction SilentlyContinue)) {
         Write-Host "Creating internal switch: $hnsSwitchName for kube-proxy"
         New-VMSwitch -name $hnsSwitchName -SwitchType Internal
     }
@@ -216,7 +216,7 @@ function Start-OVSServices {
     }
     # Try to cleanup ovsdb-server configurations if the antrea-hnsnetwork is not existing. Or ovs-vswitchd service
     # will can not get started.
-    if (!(Get-VMswitch -Name "antrea-hnsnetwork" -SwitchType External -ErrorAction SilentlyContinue)) {
+    if (!(Get-VMswitch -ComputerName $(hostname) -Name "antrea-hnsnetwork" -SwitchType External -ErrorAction SilentlyContinue)) {
         & ovs-vsctl.exe --no-wait --if-exists del-br br-int
         if ($LASTEXITCODE) {
             return $false
@@ -262,7 +262,7 @@ function Start-AntreaAgent {
     $AntreaAgent = "$AntreaHome\bin\antrea-agent.exe"
     $AntreaAgentConfigPath = "$AntreaHome\etc\antrea-agent.conf"
     if ($LogDir -eq "") {
-        $LogDir = "$AntreaHome\logs"
+        $LogDir = "c:\var\log\antrea"
     }
     New-DirectoryIfNotExist $LogDir
     [Environment]::SetEnvironmentVariable("NODE_NAME", (hostname).ToLower())

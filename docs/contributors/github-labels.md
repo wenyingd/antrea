@@ -34,6 +34,7 @@ The labels in this list originated within Kubernetes at
 | area/flow-visibility/elk           | Issues or PRs related to the reference ELK configuration for flow visualization | Any |
 | area/flow-visibility/export        | Issues or PRs related to the Flow Exporter functions in the Agent | Any |
 | area/github-membership             | Categorizes an issue as a membership request to join the antrea-io Github organization | Any |
+| area/grouping                      | Issues or PRs related to ClusterGroup, Group API | Any |
 | area/ipam                          | Issues or PRs related to IP address management (IPAM) | Any |
 | area/interface                     | Issues or PRs related to network interfaces | Any |
 | area/licensing                     | Issues or PRs related to Antrea licensing | Any |
@@ -42,15 +43,15 @@ The labels in this list originated within Kubernetes at
 | area/monitoring/logging            | Issues or PRs related to logging | Any |
 | area/monitoring/mirroring          | Issues or PRs related to mirroring | Any |
 | area/monitoring/traffic-analysis   | Issues or PRs related to traffic analysis | Any |
+| area/multi-cluster                 | Issues or PRs related to multi cluster | Any |
+| area/network-policy                | Issues or PRs related to network policy | Any |
 | area/network-policy/action         | Issues or PRs related to network policy actions | Any |
+| area/network-policy/agent          | Issues or PRs related to the network policy agents | Any |
 | area/network-policy/api            | Issues or PRs related to the network policy API | Any |
-| area/network-polciy/failsafe       | Issues or PRs related to network policy failsafes | Any |
+| area/network-policy/controller     | Issues or PRs related to the network policy controller | Any |
 | area/network-policy/lifecycle      | Issues or PRs related to the network policy lifecycle | Any |
 | area/network-policy/match          | Issues or PRs related to matching packets | Any |
-| area/network-policy/named-set      | Issues or PRs releatd to network policy named sets | Any |
 | area/network-policy/precedence     | Issues or PRs related to network policy precedence | Any |
-| area/network-policy/scope          | Issues or PRs related to network policy scope (namespace, global, etc.) | Any |
-| area/network-policy/staging        | Issues or PRs related to staging network policies | Any |
 | area/octant                        | Issues or PRs related to Octant | Any |
 | area/ops                           | Issues or PRs related to features which support network operations and troubleshooting | Any |
 | area/ops/traceflow                 | Issues or PRs related to the Traceflow feature | Any |
@@ -73,9 +74,11 @@ The labels in this list originated within Kubernetes at
 | area/test/community                | Issues or PRs related to community testing | Any |
 | area/test/e2e                      | Issues or PRs related to Antrea specific end-to-end testing. | Any |
 | area/test/infra                    | Issues or PRs related to test infrastructure (Jenkins configuration, Ansible playbook, Kind wrappers, ...) | Any |
-| area/transit/encapsulation         | Issues or PRs related to encapsulation | Any |
 | area/transit/addressing            | Issues or PRs related to IP addressing category (unicast, multicast, broadcast, anycast) | Any |
-| area/transit/encryption            | Issues or PRs related to transit encryption (IPSec, SSL) | Any |
+| area/transit/egress                | Issues or PRs related to Egress (SNAT for traffic egressing the cluster) | Any |
+| area/transit/encapsulation         | Issues or PRs related to encapsulation | Any |
+| area/transit/encryption            | Issues or PRs related to transit encryption (IPsec, SSL) | Any |
+| area/transit/ipv6                  | Issues or PRs related to IPv6 | Any |
 | area/transit/qos                   | Issues or PRs related to transit qos or policing | Any |
 | area/transit/routing               | Issues or PRs related to routing and forwarding | Any |
 | kind/api-change                    | Categorizes issue or PR as related to adding, removing, or otherwise changing an API. | Any |
@@ -87,6 +90,7 @@ The labels in this list originated within Kubernetes at
 | kind/documentation                 | Categorizes issue or PR as related to a documentation.    | Any                |
 | kind/failing-test                  | Categorizes issue or PR as related to a consistently or frequently failing test | Any |
 | kind/feature                       | Categorizes issue or PR as related to a new feature.      | Any                |
+| kind/release                       | Categorizes a PR used to create a new release (with CHANGELOG and VERSION updates) | Maintainers |
 | kind/support                       | Categorizes issue or PR as related to a support question. | Any |
 | kind/task                          | Categorizes issue or PR as related to a routine task that needs to be performed. | Any |
 | lifecycle/active                   | Indicates that an issue or PR is actively being worked on by a contributor. | Any |
@@ -107,6 +111,8 @@ The labels in this list originated within Kubernetes at
 | triage/needs-information           | Indicates an issue needs more information in order to work on it. | Humans |
 | triage/not-reproducible            | Indicates an issue can not be reproduced as described. | Humans |
 | triage/unresolved                  | Indicates an issue that can not or will not be resolved. | Humans |
+| action/backport                    | Indicates a PR that requires backports. | Humans |
+| action/release-note                | Indicates a PR that should be included in release notes.  | Humans |
 
 ## Labels that apply only to issues
 

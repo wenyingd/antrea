@@ -23,6 +23,8 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
 	"k8s.io/klog/v2"
+
+	argtypes "antrea.io/antrea/pkg/agent/cniserver/types"
 )
 
 const (
@@ -34,7 +36,7 @@ type IPAMDelegator struct {
 	pluginType string
 }
 
-func (d *IPAMDelegator) Add(args *invoke.Args, networkConfig []byte) (*current.Result, error) {
+func (d *IPAMDelegator) Add(args *invoke.Args, k8sArgs *argtypes.K8sArgs, networkConfig []byte) (bool, *IPAMResult, error) {
 	var success = false
 	defer func() {
 		if !success {
@@ -48,32 +50,34 @@ func (d *IPAMDelegator) Add(args *invoke.Args, networkConfig []byte) (*current.R
 	args.Command = "ADD"
 	r, err := delegateWithResult(d.pluginType, networkConfig, args)
 	if err != nil {
-		return nil, err
+		return true, nil, err
 	}
 
 	ipamResult, err := current.NewResultFromResult(r)
 	if err != nil {
-		return nil, err
+		return true, nil, err
 	}
 	success = true
-	return ipamResult, nil
+	// IPAM Delegator always owns the request
+	return true, &IPAMResult{Result: *ipamResult}, nil
 }
 
-func (d *IPAMDelegator) Del(args *invoke.Args, networkConfig []byte) error {
+func (d *IPAMDelegator) Del(args *invoke.Args, k8sArgs *argtypes.K8sArgs, networkConfig []byte) (bool, error) {
 	args.Command = "DEL"
 	if err := delegateNoResult(d.pluginType, networkConfig, args); err != nil {
-		return err
+		return true, err
 	}
 
-	return nil
+	// IPAM Delegator always owns the request
+	return true, nil
 }
 
-func (d *IPAMDelegator) Check(args *invoke.Args, networkConfig []byte) error {
+func (d *IPAMDelegator) Check(args *invoke.Args, k8sArgs *argtypes.K8sArgs, networkConfig []byte) (bool, error) {
 	args.Command = "CHECK"
 	if err := delegateNoResult(d.pluginType, networkConfig, args); err != nil {
-		return err
+		return true, err
 	}
-	return nil
+	return true, nil
 }
 
 var defaultExec = &invoke.DefaultExec{
@@ -121,7 +125,5 @@ func delegateNoResult(delegatePlugin string, networkConfig []byte, args *invoke.
 }
 
 func init() {
-	if err := RegisterIPAMDriver(ipamHostLocal, &IPAMDelegator{pluginType: ipamHostLocal}); err != nil {
-		klog.Errorf("Failed to register IPAM plugin on type %s", ipamHostLocal)
-	}
+	RegisterIPAMDriver(ipamHostLocal, &IPAMDelegator{pluginType: ipamHostLocal})
 }

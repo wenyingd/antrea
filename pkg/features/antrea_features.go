@@ -15,8 +15,10 @@
 package features
 
 import (
-	"k8s.io/apimachinery/pkg/util/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/component-base/featuregate"
+
+	"antrea.io/antrea/pkg/util/runtime"
 )
 
 // When editing this file, make sure you edit the documentation as well to keep
@@ -61,12 +63,38 @@ const (
 	NetworkPolicyStats featuregate.Feature = "NetworkPolicyStats"
 
 	// alpha: v0.13
+	// beta: v1.4
 	// Expose Pod ports through NodePort
 	NodePortLocal featuregate.Feature = "NodePortLocal"
 
 	// alpha: v1.0
+	// beta: v1.6
 	// Enable controlling SNAT IPs of Pod egress traffic.
 	Egress featuregate.Feature = "Egress"
+
+	// alpha: v1.4
+	// Run Kubernetes NodeIPAM with Antrea.
+	NodeIPAM featuregate.Feature = "NodeIPAM"
+
+	// alpha: v1.4
+	// Enable AntreaIPAM, which is required by bridging mode Pods and secondary network IPAM.
+	AntreaIPAM featuregate.Feature = "AntreaIPAM"
+
+	// alpha: v1.5
+	// Enable Multicast.
+	Multicast featuregate.Feature = "Multicast"
+
+	// alpha: v1.5
+	// Enable Secondary interface feature for Antrea.
+	SecondaryNetwork featuregate.Feature = "SecondaryNetwork"
+
+	// alpha: v1.5
+	// Enable controlling Services with ExternalIP.
+	ServiceExternalIP featuregate.Feature = "ServiceExternalIP"
+
+	// alpha: v1.7
+	// Enable running agent on an unmanaged VM/BM.
+	ExternalNode featuregate.Feature = "ExternalNode"
 )
 
 var (
@@ -83,12 +111,18 @@ var (
 	DefaultAntreaFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 		AntreaPolicy:       {Default: true, PreRelease: featuregate.Beta},
 		AntreaProxy:        {Default: true, PreRelease: featuregate.Beta},
-		Egress:             {Default: false, PreRelease: featuregate.Alpha},
+		Egress:             {Default: true, PreRelease: featuregate.Beta},
 		EndpointSlice:      {Default: false, PreRelease: featuregate.Alpha},
 		Traceflow:          {Default: true, PreRelease: featuregate.Beta},
+		AntreaIPAM:         {Default: false, PreRelease: featuregate.Alpha},
 		FlowExporter:       {Default: false, PreRelease: featuregate.Alpha},
 		NetworkPolicyStats: {Default: true, PreRelease: featuregate.Beta},
-		NodePortLocal:      {Default: false, PreRelease: featuregate.Alpha},
+		NodePortLocal:      {Default: true, PreRelease: featuregate.Beta},
+		NodeIPAM:           {Default: false, PreRelease: featuregate.Alpha},
+		Multicast:          {Default: false, PreRelease: featuregate.Alpha},
+		SecondaryNetwork:   {Default: false, PreRelease: featuregate.Alpha},
+		ServiceExternalIP:  {Default: false, PreRelease: featuregate.Alpha},
+		ExternalNode:       {Default: false, PreRelease: featuregate.Alpha},
 	}
 
 	// UnsupportedFeaturesOnWindows records the features not supported on
@@ -102,13 +136,36 @@ var (
 	// can have different FeatureSpecs between Linux and Windows, we should
 	// still define a separate defaultAntreaFeatureGates map for Windows.
 	unsupportedFeaturesOnWindows = map[featuregate.Feature]struct{}{
-		NodePortLocal: {},
-		Egress:        {},
+		NodePortLocal:     {},
+		Egress:            {},
+		AntreaIPAM:        {},
+		Multicast:         {},
+		SecondaryNetwork:  {},
+		ServiceExternalIP: {},
+	}
+	// supportedFeaturesOnExternalNode records the features supported on an external
+	// Node. Antrea Agent checks the enabled features if it is running on an
+	// unmanaged VM/BM, and fails the startup if an unsupported feature is enabled.
+	supportedFeaturesOnExternalNode = map[featuregate.Feature]struct{}{
+		ExternalNode:       {},
+		AntreaPolicy:       {},
+		NetworkPolicyStats: {},
 	}
 )
 
 func init() {
-	runtime.Must(DefaultMutableFeatureGate.Add(DefaultAntreaFeatureGates))
+	if runtime.IsWindowsPlatform() {
+		for f := range unsupportedFeaturesOnWindows {
+			// A feature which is enabled by default on Linux might not be supported on
+			// Windows. So, override the default value here.
+			fg := DefaultAntreaFeatureGates[f]
+			if fg.Default {
+				fg.Default = false
+				DefaultAntreaFeatureGates[f] = fg
+			}
+		}
+	}
+	k8sruntime.Must(DefaultMutableFeatureGate.Add(DefaultAntreaFeatureGates))
 }
 
 // SupportedOnWindows checks whether a feature is supported on a Windows Node.
@@ -119,4 +176,14 @@ func SupportedOnWindows(feature featuregate.Feature) bool {
 	}
 	_, exists = unsupportedFeaturesOnWindows[feature]
 	return !exists
+}
+
+// SupportedOnExternalNode checks whether a feature is supported on a external Node.
+func SupportedOnExternalNode(feature featuregate.Feature) bool {
+	_, exists := DefaultAntreaFeatureGates[feature]
+	if !exists {
+		return false
+	}
+	_, exists = supportedFeaturesOnExternalNode[feature]
+	return exists
 }

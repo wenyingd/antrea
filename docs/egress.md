@@ -30,7 +30,7 @@ the egress IP when leaving that Node.
 You may be interested in using this capability if any of the following apply:
 
 - A consistent IP address is desired when specific Pods connect to services
-  outside of the cluster, for source tracing in audit logs, or whitelisting
+  outside of the cluster, for source tracing in audit logs, or for filtering
   by source IP in external firewall, etc.
 
 - You want to force outgoing external connections to leave the cluster via
@@ -40,10 +40,10 @@ This guide demonstrates how to configure `Egress` to achieve the above result.
 
 ## Prerequisites
 
-Egress is introduced in v1.0 as an alpha feature. As with other alpha features,
-a feature gate `Egress` must be enabled on the antrea-controller and
-antrea-agent for the feature to work. The following options in the
-`antrea-config` ConfigMap need to be set:
+Egress was introduced in v1.0 as an alpha feature, and was graduated to beta in
+v1.6, at which time it was enabled by default. Prior to v1.6, a feature gate,
+`Egress` must be enabled on the antrea-controller and antrea-agent in the
+`antrea-config` ConfigMap like the following options for the feature to work:
 
 ```yaml
 kind: ConfigMap

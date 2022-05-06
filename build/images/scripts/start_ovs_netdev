@@ -118,7 +118,7 @@ function quit {
     # when OVS is stopped.
     del_br_phy
     stop_ovs
-    # kill background sleep process
+    # terminate background sleep process
     if [ "$SLEEP_PID" != "" ]; then kill $SLEEP_PID > /dev/null 2>&1 || true; fi
     exit 0
 }
@@ -131,10 +131,6 @@ trap "quit" INT TERM
 
 fix_ovs_ctl
 start_ovs
-
-# Restrict read permissions for "others"
-# See discussion in https://github.com/antrea-io/antrea/issues/1292
-chmod 0640 $OVS_DB_FILE
 
 if [[ "$#" -ge 1 ]] && [[ "$1" == "--start-ovs-only" ]]; then
   exit 0

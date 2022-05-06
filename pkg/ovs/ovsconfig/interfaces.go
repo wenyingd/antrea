@@ -26,6 +26,8 @@ const (
 
 	OVSDatapathSystem OVSDatapathType = "system"
 	OVSDatapathNetdev OVSDatapathType = "netdev"
+
+	OVSOtherConfigDatapathIDKey string = "datapath-id"
 )
 
 type OVSBridgeClient interface {
@@ -37,13 +39,14 @@ type OVSBridgeClient interface {
 	GetInterfaceOptions(name string) (map[string]string, Error)
 	SetInterfaceOptions(name string, options map[string]interface{}) Error
 	CreatePort(name, ifDev string, externalIDs map[string]interface{}) (string, Error)
+	CreateAccessPort(name, ifDev string, externalIDs map[string]interface{}, vlanID uint16) (string, Error)
 	CreateInternalPort(name string, ofPortRequest int32, externalIDs map[string]interface{}) (string, Error)
 	CreateTunnelPort(name string, tunnelType TunnelType, ofPortRequest int32) (string, Error)
 	CreateTunnelPortExt(name string, tunnelType TunnelType, ofPortRequest int32, csum bool, localIP string, remoteIP string, psk string, externalIDs map[string]interface{}) (string, Error)
 	CreateUplinkPort(name string, ofPortRequest int32, externalIDs map[string]interface{}) (string, Error)
 	DeletePort(portUUID string) Error
 	DeletePorts(portUUIDList []string) Error
-	GetOFPort(ifName string) (int32, Error)
+	GetOFPort(ifName string, waitUntilValid bool) (int32, Error)
 	GetPortData(portUUID, ifName string) (*OVSPortData, Error)
 	GetPortList() ([]OVSPortData, Error)
 	SetInterfaceMTU(name string, MTU int) error
@@ -51,7 +54,11 @@ type OVSBridgeClient interface {
 	AddOVSOtherConfig(configs map[string]interface{}) Error
 	GetOVSOtherConfig() (map[string]string, Error)
 	DeleteOVSOtherConfig(configs map[string]interface{}) Error
+	AddBridgeOtherConfig(configs map[string]interface{}) Error
+	SetBridgeMcastSnooping(enabled bool) Error
 	GetBridgeName() string
 	IsHardwareOffloadEnabled() bool
 	GetOVSDatapathType() OVSDatapathType
+	SetInterfaceType(name, ifType string) Error
+	SetPortExternalIDs(portName string, externalIDs map[string]interface{}) Error
 }

@@ -15,38 +15,18 @@
 package networkpolicy
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"time"
 
 	"antrea.io/libOpenflow/openflow13"
-	"antrea.io/libOpenflow/protocol"
 	"antrea.io/ofnet/ofctrl"
 	"github.com/vmware/go-ipfix/pkg/registry"
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/openflow"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
-	"antrea.io/antrea/pkg/util/ip"
-)
-
-const (
-	IPv4HdrLen uint16 = 20
-	IPv6HdrLen uint16 = 40
-
-	ICMPUnusedHdrLen uint16 = 4
-
-	TCPAck uint8 = 0b010000
-	TCPRst uint8 = 0b000100
-
-	ICMPDstUnreachableType         uint8 = 3
-	ICMPDstHostAdminProhibitedCode uint8 = 10
-
-	ICMPv6DstUnreachableType     uint8 = 1
-	ICMPv6DstAdminProhibitedCode uint8 = 1
 )
 
 // HandlePacketIn is the packetin handler registered to openflow by Antrea network
@@ -94,19 +74,19 @@ func getMatchRegField(matchers *ofctrl.Matchers, field *binding.RegField) *ofctr
 
 // getMatch receives ofctrl matchers and table id, match field.
 // Modifies match field to Ingress/Egress register based on tableID.
-func getMatch(matchers *ofctrl.Matchers, tableID binding.TableIDType, disposition uint32) *ofctrl.MatchField {
-	// Get match from CNPDenyConjIDReg if disposition is not allow.
-	if disposition != openflow.DispositionAllow {
+func getMatch(matchers *ofctrl.Matchers, tableID uint8, disposition uint32) *ofctrl.MatchField {
+	// Get match from CNPDenyConjIDReg if disposition is Drop or Reject.
+	if disposition == openflow.DispositionDrop || disposition == openflow.DispositionRej {
 		return getMatchRegField(matchers, openflow.CNPDenyConjIDField)
 	}
-	// Get match from ingress/egress reg if disposition is allow
+	// Get match from ingress/egress reg if disposition is Allow or Pass.
 	for _, table := range append(openflow.GetAntreaPolicyEgressTables(), openflow.EgressRuleTable) {
-		if tableID == table {
+		if tableID == table.GetID() {
 			return getMatchRegField(matchers, openflow.TFEgressConjIDField)
 		}
 	}
 	for _, table := range append(openflow.GetAntreaPolicyIngressTables(), openflow.IngressRuleTable) {
-		if tableID == table {
+		if tableID == table.GetID() {
 			return getMatchRegField(matchers, openflow.TFIngressConjIDField)
 		}
 	}
@@ -123,172 +103,6 @@ func getInfoInReg(regMatch *ofctrl.MatchField, rng *openflow13.NXRange) (uint32,
 		return ofctrl.GetUint32ValueWithRange(regValue.Data, rng), nil
 	}
 	return regValue.Data, nil
-}
-
-// getNetworkPolicyInfo fills in tableName, npName, ofPriority, disposition of logInfo ob.
-func getNetworkPolicyInfo(pktIn *ofctrl.PacketIn, c *Controller, ob *logInfo) error {
-	matchers := pktIn.GetMatches()
-	var match *ofctrl.MatchField
-	// Get table name
-	tableID := binding.TableIDType(pktIn.TableId)
-	ob.tableName = openflow.GetFlowTableName(tableID)
-
-	// Get disposition Allow or Drop
-	match = getMatchRegField(matchers, openflow.APDispositionField)
-	info, err := getInfoInReg(match, openflow.APDispositionField.GetRange().ToNXRange())
-	if err != nil {
-		return fmt.Errorf("received error while unloading disposition from reg: %v", err)
-	}
-	ob.disposition = openflow.DispositionToString[info]
-
-	// Set match to corresponding ingress/egress reg according to disposition
-	match = getMatch(matchers, tableID, info)
-
-	// Get Network Policy full name and OF priority of the conjunction
-	info, err = getInfoInReg(match, nil)
-	if err != nil {
-		return fmt.Errorf("received error while unloading conjunction id from reg: %v", err)
-	}
-	ob.npRef, ob.ofPriority = c.ofClient.GetPolicyInfoFromConjunction(info)
-
-	return nil
-}
-
-// getPacketInfo fills in srcIP, destIP, pktLength, protocol of logInfo ob.
-func getPacketInfo(pktIn *ofctrl.PacketIn, ob *logInfo) error {
-	var prot uint8
-	switch ipPkt := pktIn.Data.Data.(type) {
-	case *protocol.IPv4:
-		ob.srcIP = ipPkt.NWSrc.String()
-		ob.destIP = ipPkt.NWDst.String()
-		ob.pktLength = ipPkt.Length
-		prot = ipPkt.Protocol
-	case *protocol.IPv6:
-		ob.srcIP = ipPkt.NWSrc.String()
-		ob.destIP = ipPkt.NWDst.String()
-		ob.pktLength = ipPkt.Length
-		prot = ipPkt.NextHeader
-	default:
-		return errors.New("unsupported packet-in: should be a valid IPv4 or IPv6 packet")
-	}
-
-	ob.protocolStr = ip.IPProtocolNumberToString(prot, "UnknownProtocol")
-
-	return nil
-}
-
-// logPacket retrieves information from openflow reg, controller cache, packet-in
-// packet to log. Log is deduplicated for non-Allow packets from record in logDeduplication.
-// Deduplication is safe guarded by logRecordDedupMap mutex.
-func (c *Controller) logPacket(pktIn *ofctrl.PacketIn) error {
-	ob := new(logInfo)
-
-	// Get Network Policy log info
-	err := getNetworkPolicyInfo(pktIn, c, ob)
-	if err != nil {
-		return fmt.Errorf("received error while retrieving NetworkPolicy info: %v", err)
-	}
-	// Get packet log info
-	err = getPacketInfo(pktIn, ob)
-	if err != nil {
-		return fmt.Errorf("received error while retrieving NetworkPolicy info: %v", err)
-	}
-
-	// Log the ob info to corresponding file w/ deduplication
-	c.antreaPolicyLogger.LogDedupPacket(ob)
-	return nil
-}
-
-// rejectRequest sends reject response to the requesting client, based on the
-// packet-in message.
-func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
-	// Get ethernet data.
-	srcMAC := pktIn.Data.HWDst
-	dstMAC := pktIn.Data.HWSrc
-
-	var (
-		srcIP  string
-		dstIP  string
-		prot   uint8
-		isIPv6 bool
-	)
-	switch ipPkt := pktIn.Data.Data.(type) {
-	case *protocol.IPv4:
-		// Get IP data.
-		srcIP = ipPkt.NWDst.String()
-		dstIP = ipPkt.NWSrc.String()
-		prot = ipPkt.Protocol
-		isIPv6 = false
-	case *protocol.IPv6:
-		// Get IP data.
-		srcIP = ipPkt.NWDst.String()
-		dstIP = ipPkt.NWSrc.String()
-		prot = ipPkt.NextHeader
-		isIPv6 = true
-	}
-
-	// Get the OpenFlow ports.
-	// 1. If we found the Interface of the src, it means the server is on this node.
-	// 	  We set `in_port` to the OF port of the Interface we found to simulate the reject
-	// 	  response from the server.
-	// 2. If we didn't find the Interface of the src, it means the server is outside
-	//    this node. We set `in_port` to the OF port of `antrea-gw0` to simulate the reject
-	//    response from external.
-	// 3. We don't need to set the output port. The pipeline will take care of it.
-	sIface, srcFound := c.ifaceStore.GetInterfaceByIP(srcIP)
-	inPort := uint32(config.HostGatewayOFPort)
-	if srcFound {
-		inPort = uint32(sIface.OFPort)
-	}
-
-	if prot == protocol.Type_TCP {
-		// Get TCP data.
-		oriTCPSrcPort, oriTCPDstPort, oriTCPSeqNum, _, _, err := binding.GetTCPHeaderData(pktIn.Data.Data)
-		if err != nil {
-			return err
-		}
-		// While sending TCP reject packet-out, switch original src/dst port,
-		// set the ackNum as original seqNum+1 and set the flag as ack+rst.
-		return c.ofClient.SendTCPPacketOut(
-			srcMAC.String(),
-			dstMAC.String(),
-			srcIP,
-			dstIP,
-			inPort,
-			-1,
-			isIPv6,
-			oriTCPDstPort,
-			oriTCPSrcPort,
-			oriTCPSeqNum+1,
-			TCPAck|TCPRst,
-			true)
-	}
-	// Use ICMP host administratively prohibited for ICMP, UDP, SCTP reject.
-	icmpType := ICMPDstUnreachableType
-	icmpCode := ICMPDstHostAdminProhibitedCode
-	ipHdrLen := IPv4HdrLen
-	if isIPv6 {
-		icmpType = ICMPv6DstUnreachableType
-		icmpCode = ICMPv6DstAdminProhibitedCode
-		ipHdrLen = IPv6HdrLen
-	}
-	ipHdr, _ := pktIn.Data.Data.MarshalBinary()
-	icmpData := make([]byte, int(ICMPUnusedHdrLen+ipHdrLen+8))
-	// Put ICMP unused header in Data prop and set it to zero.
-	binary.BigEndian.PutUint32(icmpData[:ICMPUnusedHdrLen], 0)
-	copy(icmpData[ICMPUnusedHdrLen:], ipHdr[:ipHdrLen+8])
-	return c.ofClient.SendICMPPacketOut(
-		srcMAC.String(),
-		dstMAC.String(),
-		srcIP,
-		dstIP,
-		inPort,
-		-1,
-		isIPv6,
-		icmpType,
-		icmpCode,
-		icmpData,
-		true)
 }
 
 func (c *Controller) storeDenyConnection(pktIn *ofctrl.PacketIn) error {
@@ -326,7 +140,7 @@ func (c *Controller) storeDenyConnection(pktIn *ofctrl.PacketIn) error {
 	matchers := pktIn.GetMatches()
 	var match *ofctrl.MatchField
 	// Get table ID
-	tableID := binding.TableIDType(pktIn.TableId)
+	tableID := pktIn.TableId
 	// Get disposition Allow, Drop or Reject
 	match = getMatchRegField(matchers, openflow.APDispositionField)
 	id, err := getInfoInReg(match, openflow.APDispositionField.GetRange().ToNXRange())
@@ -346,6 +160,9 @@ func (c *Controller) storeDenyConnection(pktIn *ofctrl.PacketIn) error {
 		rule := c.GetRuleByFlowID(ruleID)
 		if policy == nil || rule == nil {
 			klog.V(4).Infof("Cannot find NetworkPolicy or rule that has ruleID %v", ruleID)
+			// Ignore the connection if there is no matching NetworkPolicy or rule: the
+			// NetworkPolicy must have been deleted or updated.
+			return nil
 		}
 		// Get name and namespace for Antrea Network Policy or Antrea Cluster Network Policy
 		if isAntreaPolicyIngressTable(tableID) {
@@ -363,10 +180,10 @@ func (c *Controller) storeDenyConnection(pktIn *ofctrl.PacketIn) error {
 		}
 	} else {
 		// For K8s NetworkPolicy implicit drop action, we cannot get name/namespace.
-		if tableID == openflow.IngressDefaultTable {
+		if tableID == openflow.IngressDefaultTable.GetID() {
 			denyConn.IngressNetworkPolicyType = registry.PolicyTypeK8sNetworkPolicy
 			denyConn.IngressNetworkPolicyRuleAction = flowexporter.RuleActionToUint8(disposition)
-		} else if tableID == openflow.EgressDefaultTable {
+		} else if tableID == openflow.EgressDefaultTable.GetID() {
 			denyConn.EgressNetworkPolicyType = registry.PolicyTypeK8sNetworkPolicy
 			denyConn.EgressNetworkPolicyRuleAction = flowexporter.RuleActionToUint8(disposition)
 		}
@@ -375,18 +192,18 @@ func (c *Controller) storeDenyConnection(pktIn *ofctrl.PacketIn) error {
 	return nil
 }
 
-func isAntreaPolicyIngressTable(tableID binding.TableIDType) bool {
+func isAntreaPolicyIngressTable(tableID uint8) bool {
 	for _, table := range openflow.GetAntreaPolicyIngressTables() {
-		if table == tableID {
+		if table.GetID() == tableID {
 			return true
 		}
 	}
 	return false
 }
 
-func isAntreaPolicyEgressTable(tableID binding.TableIDType) bool {
+func isAntreaPolicyEgressTable(tableID uint8) bool {
 	for _, table := range openflow.GetAntreaPolicyEgressTables() {
-		if table == tableID {
+		if table.GetID() == tableID {
 			return true
 		}
 	}

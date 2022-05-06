@@ -10,10 +10,12 @@
   - [kubectl commands for Tier](#kubectl-commands-for-tier)
 - [Antrea ClusterNetworkPolicy](#antrea-clusternetworkpolicy)
   - [The Antrea ClusterNetworkPolicy resource](#the-antrea-clusternetworkpolicy-resource)
-    - [ACNP with stand alone selectors](#acnp-with-stand-alone-selectors)
+    - [ACNP with stand-alone selectors](#acnp-with-stand-alone-selectors)
     - [ACNP with ClusterGroup reference](#acnp-with-clustergroup-reference)
     - [ACNP for complete Pod isolation in selected Namespaces](#acnp-for-complete-pod-isolation-in-selected-namespaces)
-    - [ACNP for default Namespace isolation](#acnp-for-default-namespace-isolation)
+    - [ACNP for strict Namespace isolation](#acnp-for-strict-namespace-isolation)
+    - [ACNP for default zero-trust cluster security posture](#acnp-for-default-zero-trust-cluster-security-posture)
+    - [ACNP for toServices rule](#acnp-for-toservices-rule)
   - [Behavior of <em>to</em> and <em>from</em> selectors](#behavior-of-to-and-from-selectors)
   - [Key differences from K8s NetworkPolicy](#key-differences-from-k8s-networkpolicy)
   - [kubectl commands for Antrea ClusterNetworkPolicy](#kubectl-commands-for-antrea-clusternetworkpolicy)
@@ -28,10 +30,14 @@
 - [ClusterGroup](#clustergroup)
   - [The ClusterGroup resource](#the-clustergroup-resource)
   - [kubectl commands for ClusterGroup](#kubectl-commands-for-clustergroup)
+- [Audit logging for Antrea-native policies](#audit-logging-for-antrea-native-policies)
 - [Select Namespace by Name](#select-namespace-by-name)
   - [K8s clusters with version 1.21 and above](#k8s-clusters-with-version-121-and-above)
   - [K8s clusters with version 1.20 and below](#k8s-clusters-with-version-120-and-below)
 - [FQDN based filtering](#fqdn-based-filtering)
+- [Node Selector](#node-selector)
+- [toServices instruction](#toservices-instruction)
+- [ServiceAccount based selection](#serviceaccount-based-selection)
 - [RBAC](#rbac)
 - [Notes](#notes)
 <!-- /toc -->
@@ -136,7 +142,7 @@ K8s NetworkPolicies. If a Pod becomes isolated because a K8s NetworkPolicy is ap
 to it, and the policy does not explicitly allow communications with another Pod,
 this behavior cannot be changed by creating an Antrea-native policy with an "allow"
 action in the "baseline" tier. For this reason, it generally does not make sense to
-create policies in the "baseline" tier with the "allow" action。
+create policies in the "baseline" tier with the "allow" action.
 
 ### kubectl commands for Tier
 
@@ -185,7 +191,7 @@ rule belonging to a K8s NetworkPolicy.
 
 Example ClusterNetworkPolicies might look like these:
 
-#### ACNP with stand alone selectors
+#### ACNP with stand-alone selectors
 
 ```yaml
 apiVersion: crd.antrea.io/v1alpha1
@@ -278,7 +284,7 @@ metadata:
   name: isolate-all-pods-in-namespace
 spec:
   priority: 1
-  tier: securityOps
+  tier: securityops
   appliedTo:
     - namespaceSelector:
         matchLabels:
@@ -293,42 +299,86 @@ spec:
       enableLogging: true
 ```
 
-#### ACNP for default Namespace isolation
+#### ACNP for strict Namespace isolation
 
 ```yaml
 apiVersion: crd.antrea.io/v1alpha1
 kind: ClusterNetworkPolicy
 metadata:
-  name: default-ns-isolation
+  name: strict-ns-isolation
 spec:
-  priority: 2
-  tier: baseline
+  priority: 5
+  tier: securityops
   appliedTo:
     - namespaceSelector: {}       # Selects all Namespaces in the cluster
   ingress:
-    - action: Allow
+    - action: Pass
       from:
         - namespaces:
-            match: self           # Allow from Pods from same Namespace
-      name: AllowFromSameNS
+            match: Self           # Skip ACNP evaluation for traffic from Pods in the same Namespace
+      name: PassFromSameNS
       enableLogging: false
     - action: Drop
       from:
-        - namespaceSelector: {}   # Drop from Pods from other all Namespaces
+        - namespaceSelector: {}   # Drop from Pods from all other Namespaces
       name: DropFromAllOtherNS
       enableLogging: true
   egress:
-    - action: Allow
+    - action: Pass
       to:
         - namespaces:
-            match: self           # Allow to Pods from same Namespace
-      name: AllowToSameNS
+            match: Self           # Skip ACNP evaluation for traffic to Pods in the same Namespace
+      name: PassToSameNS
       enableLogging: false
     - action: Drop
       to:
         - namespaceSelector: {}   # Drop to Pods from all other Namespaces
       name: DropToAllOtherNS
       enableLogging: true
+```
+
+#### ACNP for default zero-trust cluster security posture
+
+```yaml
+apiVersion: crd.antrea.io/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: default-cluster-deny
+spec:
+  priority: 1
+  tier: baseline
+  appliedTo:
+    - namespaceSelector: {}       # Selects all Namespaces in the cluster
+  ingress:
+    - action: Drop
+  egress:
+    - action: Drop
+```
+
+#### ACNP for toServices rule
+
+```yaml
+apiVersion: crd.antrea.io/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: acnp-drop-to-services
+spec:
+    priority: 5
+    tier: securityops
+    appliedTo:
+      - podSelector:
+          matchLabels:
+            role: client
+        namespaceSelector:
+          matchLabels:
+            env: prod
+    egress:
+      - action: Drop
+        toServices:
+          - name: svcName
+            namespace: svcNamespace
+        name: DropToServices
+        enableLogging: true
 ```
 
 **spec**: The ClusterNetworkPolicy `spec` has all the information needed to
@@ -354,6 +404,8 @@ The [second example](#acnp-with-clustergroup-reference) policy applies to all ne
 "test-cg-with-db-selector" ClusterGroup.
 The [third example](#acnp-for-complete-pod-isolation-in-selected-namespaces) policy applies to all Pods in the
 Namespaces that matches label "app=no-network-access-required".
+`appliedTo' also supports ServiceAccount based selection. This allows users using ServiceAccount to select Pods.
+More details can be found in the [ServiceAccountSelector](#serviceaccount-based-selection) section.
 
 **priority**: The `priority` field determines the relative priority of the
 policy among all ClusterNetworkPolicies in the given cluster. This field is
@@ -368,11 +420,25 @@ field can be set with the name of the Tier CRD to which this policy must be
 associated with. If not set, the ACNP is associated with the lowest priority
 default tier i.e. the "application" Tier.
 
-**ingress**: Each ClusterNetworkPolicy may consist of zero or more ordered
-set of ingress rules. Each rule, depending on the `action` field of the rule,
-allows or drops traffic which matches all `from`, `ports` sections.
-Under `ports`, the optional field `endPort` can only be set when a numerical `port`
-is set to represent a range of ports from `port` to `endPort` inclusive.
+**action**: Each ingress or egress rule of a ClusterNetworkPolicy must have the
+`action` field set. As of now, the available actions are ["Allow", "Drop", "Reject", "Pass"].
+When the rule action is "Allow" or "Drop", Antrea will allow or drop traffic which
+matches both `from/to` and `ports` sections of that rule, given that traffic does not
+match a higher precedence rule in the cluster (ACNP rules created in higher order
+Tiers or policy instances in the same Tier with lower priority number). If a "Reject"
+rule is matched, the client initiating the traffic will receive `ICMP host administratively
+prohibited` code for ICMP, UDP and SCTP request, or an explicit reject response for
+TCP request, instead of timeout. A "Pass" rule, on the other hand, skips this packet
+for further ACNP rule evaluations (all ACNP rules that has lower priority than the
+current "Pass" rule will be skipped, except for the Baseline Tier rules), and delegates
+the decision to developer created namespaced NetworkPolicies. If no NetworkPolicy matches
+this traffic, then the Baseline Tier rules will still be matched against. Note that the
+"Pass" action does not make sense when configured in Baseline Tier ACNP rules, and such
+configurations will be rejected by the admission controller.
+
+**ingress**: Each ClusterNetworkPolicy may consist of zero or more ordered set of
+ingress rules. Under `ports`, the optional field `endPort` can only be set when a
+numerical `port` is set to represent a range of ports from `port` to `endPort` inclusive.
 Also, each rule has an optional `name` field, which should be unique within
 the policy describing the intention of this rule. If `name` is not provided for
 a rule, it will be auto-generated by Antrea. The auto-generated name will be
@@ -394,6 +460,8 @@ The [third example](#acnp-for-complete-pod-isolation-in-selected-namespaces) pol
 which drops all ingress traffic towards any Pod in Namespaces that have label `app` set to
 `no-network-access-required`. Note that an empty `From` in the ingress rule means that
 this rule matches all ingress sources.
+Ingress `From` section also supports ServiceAccount based selection. This allows users to use ServiceAccount
+to select Pods. More details can be found in the [ServiceAccountSelector](#serviceaccount-based-selection) section.
 **Note**: The order in which the ingress rules are specified matters, i.e., rules will
 be enforced in the order in which they are written.
 
@@ -408,6 +476,8 @@ a rule, it will be auto-generated by Antrea. The rule name auto-generation proce
 is the same as ingress rules.
 A ClusterGroup name can be set in the `group` field of a egress `to` section in place
 of stand-alone selectors to allow traffic to workloads/ipBlocks set in the ClusterGroup.
+`toServices` field contains a list of combinations of Service Namespace and Service Name to match traffic to this Service.
+More details can be found in the [toServices](#toservices-instruction) section.
 The [first example](#acnp-with-stand-alone-selectors) policy contains a single rule, which drops matched traffic on a
 single port, to the 10.0.10.0/24 subnet specified by the `ipBlock` field.
 The [second example](#acnp-with-clustergroup-reference) policy contains a single rule, which drops matched traffic on
@@ -415,10 +485,16 @@ TCP port 5978 to all network endpoints selected by the "test-cg-with-ip-block"
 ClusterGroup.
 The [third example](#acnp-for-complete-pod-isolation-in-selected-namespaces) policy contains a single rule,
 which drops all egress traffic initiated by any Pod in Namespaces that have `app` set to
-`no-network-access-required`. Note that an empty `To` in the egress rule means that
+`no-network-access-required`.
+The [sixth example](#acnp-for-toservices-rule) policy contains a single rule,
+which drops traffic from "role: client" labeled Pods from "env: prod" labeled Namespaces to Service svcNamespace/svcName
+via ClusterIP.
+Note that an empty `to` + an empty `toServices` in the egress rule means that
 this rule matches all egress destinations.
 Egress `To` section also supports FQDN based filtering. This can be applied to exact FQDNs or
 wildcard expressions. More details can be found in the [FQDN](#fqdn-based-filtering) section.
+Egress `To` section also supports ServiceAccount based selection. This allows users to use ServiceAccount
+to select Pods. More details can be found in the [ServiceAccountSelector](#serviceaccount-based-selection) section.
 **Note**: The order in which the egress rules are specified matters, i.e., rules will
 be enforced in the order in which they are written.
 
@@ -434,13 +510,13 @@ deduplication is applied to simplify multiple logs. Duplication buffer length is
 The rules are logged in the following format:
 
 ```text
-    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <action> <openflow-priority> <source-ip> <destination-ip> <packet-length> <protocol>
+    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <action> <openflow-priority> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length>
     Deduplication:
-    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <action> <openflow-priority> <source-ip> <destination-ip> <packet-length> <protocol> [<num of packets> packets in <duplicate duration>]
+    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <action> <openflow-priority> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> [<num of packets> packets in <duplicate duration>]
 
     Example:
-    2020/11/02 22:21:21.148395 AntreaPolicyAppTierIngressRule AntreaNetworkPolicy:default/test-anp Allow 61800 10.0.0.4 10.0.0.5 60 TCP
-    2021/06/24 23:56:41.346165 AntreaPolicyEgressRule AntreaNetworkPolicy:default/test-anp Drop 44900 10.0.0.5 10.0.0.4 60 TCP [3 packets in 1.011379442s]
+    2020/11/02 22:21:21.148395 AntreaPolicyAppTierIngressRule AntreaNetworkPolicy:default/test-anp Allow 61800 10.10.1.65 35402 10.0.0.5 80 TCP 60
+    2021/06/24 23:56:41.346165 AntreaPolicyEgressRule AntreaNetworkPolicy:default/test-anp Drop 44900 10.10.1.65 35402 10.0.0.5 80 TCP 60 [3 packets in 1.011379442s]
 ```
 
 **`appliedTo` per rule**: A ClusterNetworkPolicy ingress or egress rule may
@@ -456,7 +532,7 @@ Usage of ClusterGroups along with stand-alone selectors is not allowed.
 
 ### Behavior of *to* and *from* selectors
 
-There are six kinds of selectors that can be specified in an ingress `from`
+There are seven kinds of selectors that can be specified in an ingress `from`
 section or egress `to` section:
 
 **podSelector**: This selects particular Pods from all Namespaces as "sources",
@@ -470,14 +546,18 @@ with `namespaces` field.
 specifies both namespaceSelector and podSelector selects particular Pods within
 particular Namespaces.
 
+**nodeSelector**: This selects particular Nodes in cluster. The selected Node's
+IPs will be set as "sources" if `nodeSelector` set in `ingress` section, or as
+"destinations" if is set in the `egress` section.
+
 **namespaces**: A `namespaces` field allows users to perform advanced matching on
 Namespace objects which cannot be done via label selectors. Currently, the
-`namespaces` field has only one matching strategy, `self`. If set to `self`, it indicates
+`namespaces` field has only one matching strategy, `Self`. If set to `Self`, it indicates
 that the corresponding `podSelector` (or all Pods if `podSelector` is not set)
 should only select Pods belonging to the same Namespace as the workload targeted
 (either through a policy-level AppliedTo or a rule-level Applied-To) by the current
 ingress or egress rule. This enables policy writers to create per-Namespace rules within a
-single policy. See the [example](#acnp-for-default-namespace-isolation) YAML above. This field is
+single policy. See the [example](#acnp-for-strict-namespace-isolation) YAML above. This field is
 optional and cannot be set along with a `namespaceSelector` within the same peer.
 
 **group**: A `group` refers to a ClusterGroup to which this ingress/egress peer, or
@@ -587,7 +667,7 @@ spec:
 
 ### Key differences from Antrea ClusterNetworkPolicy
 
-Antrea NetworkPolicy shares it's spec with ClusterNetworkPolicy. However,
+Antrea NetworkPolicy shares its spec with ClusterNetworkPolicy. However,
 the following documents some of the key differences between the two Antrea
 policy CRDs.
 
@@ -695,7 +775,7 @@ In addition to `podSelector` and `namespaceSelector`, ClusterGroup also supports
 following ways to select endpoints:
 
 - Pod grouping by `serviceReference`. ClusterGroup specified by `serviceReference` will
-contain the same Pod members that are currently selected by the Service's selector.
+  contain the same Pod members that are currently selected by the Service's selector.
 - `ipBlock` or `ipBlocks` to share IPBlocks between ACNPs.
 - `childGroups` to select other ClusterGroups by name.
 
@@ -768,20 +848,20 @@ status:
       lastTransitionTime: "2021-01-29T20:21:48Z"
 ```
 
-There are a few __restrictions__ on how ClusterGroups can be configured:
+There are a few **restrictions** on how ClusterGroups can be configured:
 
 - A ClusterGroup is a cluster-scoped resource and therefore can only be set in an Antrea
-ClusterNetworkPolicy's `appliedTo` and `to`/`from` peers.
+  ClusterNetworkPolicy's `appliedTo` and `to`/`from` peers.
 - For the `childGroup` field, currently only one level of nesting is supported:
-If a ClusterGroup has childGroups, it cannot be selected as a childGroup by other ClusterGroups.
+  If a ClusterGroup has childGroups, it cannot be selected as a childGroup by other ClusterGroups.
 - ClusterGroup must exist before another ClusterGroup can select it by name as its childGroup.
-A ClusterGroup cannot be deleted if it is referred to by other ClusterGroup as childGroup.
-This restriction may be lifted in future releases.
+  A ClusterGroup cannot be deleted if it is referred to by other ClusterGroup as childGroup.
+  This restriction may be lifted in future releases.
 - At most one of `podSelector`, `serviceReference`, `ipBlock`, `ipBlocks` or `childGroups`
-can be set for a ClusterGroup, i.e. a single ClusterGroup can either group workloads,
-represent IP CIDRs or select other ClusterGroups. A parent ClusterGroup can select different
-types of ClusterGroups (Pod/Service/CIDRs), but as mentioned above, it cannot select a
-ClusterGroup that has childGroups itself.
+  can be set for a ClusterGroup, i.e. a single ClusterGroup can either group workloads,
+  represent IP CIDRs or select other ClusterGroups. A parent ClusterGroup can select different
+  types of ClusterGroups (Pod/Service/CIDRs), but as mentioned above, it cannot select a
+  ClusterGroup that has childGroups itself.
 
 **spec**: The ClusterGroup `spec` has all the information needed to define a
 cluster-wide group.
@@ -842,6 +922,12 @@ The following kubectl commands can be used to retrieve CG resources:
     # Use short name with API Group
     kubectl get cg.crd.antrea.io
 ```
+
+## Audit logging for Antrea-native policies
+
+Logs are recorded in `/var/log/antrea/networkpolicy` when `enableLogging` is configured.
+Fluentd can be used to assist with analyzing the logs. Refer to the
+[Fluentd cookbook](cookbooks/fluentd) for documentation.
 
 ## Select Namespace by Name
 
@@ -1020,6 +1106,106 @@ spec:
     to:
       - fqdn: "svcA.default.svc.cluster.local"
 ```
+
+## Node Selector
+
+NodeSelector selects certain Nodes which match the label selector.
+When used in the `to` field of an egress rule, it adds the Node IPs to the rule's destination address group;
+when used in the `from` field of an ingress rule, it adds the Node IPs to the rule's source address group.
+
+Notice that when a rule with a nodeSelector applies to a Node, it only restricts the traffic to/from certain IPs of the Node.
+The IPs include:  
+
+1. The Node IP (the IP address in the Node API object)
+2. The Antrea gateway IP (the IP address of the interface antrea-agent will create and use for Node-to-Pod communication)
+3. The transport IP (the IP address of the interface used for tunneling or routing the traffic across Nodes) if it's different from Node IP
+
+Traffic to/from other IPs of the Node will be ignored.
+Meanwhile, `NodeSelector` doesn’t affect the traffic from Node to Pods running on that Node. Such traffic will always
+be allowed to make sure that [agents on a Node (e.g. system daemons, kubelet) can communicate with all Pods on
+that Node](https://kubernetes.io/docs/concepts/services-networking/#the-kubernetes-network-model) to perform liveness
+and readiness probes. For more information, see [https://github.com/antrea-io/antrea/pull/104](https://github.com/antrea-io/antrea/pull/104).
+
+For example, the following rule applies to Pods with label `app=antrea-test-app` and will `Drop` egress traffic to
+Nodes on TCP port 6443 which have the labels `node-role.kubernetes.io/control-plane`.
+
+```yaml
+apiVersion: crd.antrea.io/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: egress-control-plane
+spec:
+  priority: 1
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          app: antrea-test-app
+  egress:
+    - action: Drop
+      to:
+        - nodeSelector:
+            matchLabels:
+              node-role.kubernetes.io/control-plane: ""
+      ports:
+        - protocol: TCP
+          port: 6443
+```
+
+## toServices instruction
+
+A combination of Service name and Service Namespace can be used in `toServices` to refer to a Service.
+`toServices` match traffic based on the clusterIP, port and protocol of Services. So headless Service is not supported.
+Since `toServices` represents a combination of IP+port, it can't be used with `to` or `ports`. Also, this match process
+relies on the groupID assigned to the Service by AntreaProxy. So it can only be used when AntreaProxy is enabled.
+This clusterIP based match has one caveat: directly access to the Endpoints of this Service is not controlled by
+`toServices`. To control the access to the backend Endpoints, you could use `ClusterGroup` with `ServiceReference`.
+Because `ClusterGroup` with `ServiceReference` is equivalent to a podSelector that selects all backend Endpoints Pods of
+the Service referred in `ServiceReference`.
+
+## ServiceAccount based selection
+
+Antrea ClusterNetworkPolicy accepts a `serviceAccount` field to select all Pods that have been assigned the
+ServiceAccount selected by this field. This field could be used in `appliedTo`, ingress `from` and egress `to` section.
+No matter `serviceAccount` is used in which sections, it cannot be used with any other fields.
+
+`serviceAccount` uses `namespace` + `name` to select the ServiceAccount with a specific name under a specific namespace.
+
+An example policy using `serviceAccount` could look like this:
+
+```yaml
+apiVersion: crd.antrea.io/v1alpha1
+kind: ClusterNetworkPolicy
+metadata:
+  name: acnp-service-account
+spec:
+    priority: 5
+    tier: securityops
+    appliedTo:
+      - serviceAccount:
+          name: sa-1
+          namespace: ns-1
+    egress:
+      - action: Drop
+        to:
+          - serviceAccount:
+              name: sa-2
+              namespace: ns-2
+        name: ServiceAccountEgressRule
+        enableLogging: false
+```
+
+In this example, the policy will be applied to all Pods whose ServiceAccount is in `ns-1` namespace and name as `sa-1`.
+Let's call those Pods "appliedToPods".
+The egress `to` section will select all Pods whose ServiceAccount is in `ns-2` namespace and name as `sa-2`.
+Let's call those Pods "egressPods".
+
+So after this policy is applied, traffic from "appliedToPods" to "egressPods" will be dropped.
+
+There is a CAVEAT after introducing `serviceAccount`:
+
+Antrea will use a reserved label key for internal processing `serviceAccount`.
+The reserved label looks like: `internal.antrea.io/service-account:[ServiceAccountName]`. Users should avoid using
+this label key in any entities whether a policy with `serviceAccount` is applied in the cluster.
 
 ## RBAC
 

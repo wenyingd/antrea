@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2022 Antrea Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 export RECLONE=${RECLONE:-true}
 export WORKSPACE=${WORKSPACE:-/tmp/k8s_$$}
@@ -201,7 +215,7 @@ multus_install(){
     build_github_project "multus-cni" "sudo docker build -t $MULTUS_CNI_HARBOR_IMAGE ."
 
     change_k8s_resource "DaemonSet" "kube-multus-ds" "spec.template.spec.containers[0].image"\
-        "$MULTUS_CNI_HARBOR_IMAGE" "$WORKSPACE/multus-cni/images/multus-daemonset.yml"
+        "$MULTUS_CNI_HARBOR_IMAGE" "$WORKSPACE/multus-cni/deployments/multus-daemonset.yml"
 }
 
 multus_configuration() {
@@ -210,9 +224,9 @@ multus_configuration() {
     local arch=$(get_arch)
     date
     sleep 30
-    sed -i 's;/etc/cni/net.d/multus.d/multus.kubeconfig;/etc/kubernetes/admin.conf;g' $WORKSPACE/multus-cni/images/multus-daemonset.yml
+    sed -i 's;/etc/cni/net.d/multus.d/multus.kubeconfig;/etc/kubernetes/admin.conf;g' $WORKSPACE/multus-cni/deployments/multus-daemonset.yml
 
-    kubectl create -f $WORKSPACE/multus-cni/images/multus-daemonset.yml
+    kubectl create -f $WORKSPACE/multus-cni/deployments/multus-daemonset.yml
 
     kubectl -n kube-system get ds
     rc=$?

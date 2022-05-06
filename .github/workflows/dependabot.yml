@@ -32,13 +32,14 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v2
+      uses: actions/setup-go@v3
       with:
         go-version: 1.17
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         # Check out the pull request HEAD
         ref: ${{ github.event.pull_request.head.sha }}
+        token: ${{ secrets.ANTREA_BOT_WRITE_PAT }}
     - name: Run go mod tidy
       # the checks above (Github actor and PR labels) ensure that a malicious
       # actor cannot open a PR with a modified "tidy" Makefile target and

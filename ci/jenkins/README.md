@@ -113,6 +113,23 @@ DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
 ./ci/jenkins/test.sh --testcase windows-networkpolicy --registry ${DOCKER_REGISTRY}
 ```
 
+* windows e2e with proxyAll enabled: e2e tests in a Windows setup with proxyAll enabled.
+
+```shell
+#!/bin/bash
+DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+./ci/jenkins/test.sh --testcase windows-e2e --registry ${DOCKER_REGISTRY} --proxyall
+```
+
+* Multicast e2e: e2e tests in a multicast cluster
+
+```shell
+#!/bin/bash
+set -e
+DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+./ci/jenkins/test.sh --testcase multicast-e2e --registry ${DOCKER_REGISTRY}
+```
+
 * [whole-conformance [daily]](https://jenkins.antrea-ci.rocks/job/antrea-whole-conformance-for-pull-request/):
   community tests using sonobuoy, with certified-conformance mode.
 
@@ -142,7 +159,7 @@ DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
 
   |  K8s Version |    Node Type    |  Node AMI Family |  Status  |
   | :----------: | :-------------: | :--------------: | :------: |
-  |     1.17     |  EC2 t3.medium  |   AmazonLinux2   |[![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=cloud-antrea-eks-conformance-net-policy)](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-eks-conformance-net-policy/)|
+  |     1.21     |  EC2 t3.medium  |   AmazonLinux2   |[![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=cloud-antrea-eks-conformance-net-policy)](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-eks-conformance-net-policy/)|
 
 * [GKE conformance/network policy [bi-daily]](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-gke-conformance-net-policy/)
   community tests on GKE cluster using sonobuoy, focusing on "Conformance" and "Feature:NetworkPolicy", skipping the same regexes as in job __conformance__ above.\
@@ -150,7 +167,7 @@ DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
 
   |  K8s Version   |     Node OS     | VPC Native Mode (on by default) |  Status  |
   | :------------: | :-------------: | :-----------------------------: |:-------: |
-  |    1.17.12     |     Ubuntu      |  On                             |[![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=cloud-antrea-gke-conformance-net-policy)](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-gke-conformance-net-policy/)|
+  |    1.21.6      |     Ubuntu      |  On                             |[![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=cloud-antrea-gke-conformance-net-policy)](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-gke-conformance-net-policy/)|
 
 * [AKS conformance/network policy [bi-daily]](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-aks-conformance-net-policy/)
   community tests on AKS cluster using sonobuoy, focusing on "Conformance" and "Feature:NetworkPolicy", skipping the same regexes as in job __conformance__ above.\
@@ -158,11 +175,16 @@ DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
 
   |  K8s Version   |  Node Type          |  Node OS        |  Status  |
   | :------------: | :-----------------: | :-------------: | :------: |
-  |    1.19.9      |  Standard_DS2_v2    |  Ubuntu 18.04   |[![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=cloud-antrea-aks-conformance-net-policy)](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-aks-conformance-net-policy/)|
+  |    1.21.7      |  Standard_DS2_v2    |  Ubuntu 18.04   |[![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=cloud-antrea-aks-conformance-net-policy)](http://jenkins.antrea-ci.rocks/view/cloud/job/cloud-antrea-aks-conformance-net-policy/)|
 
 * [daily-elk-flow-collector-validate](https://jenkins.antrea-ci.rocks/job/antrea-daily-elk-flow-collector-validate-for-period/):
   [![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=antrea-daily-elk-flow-collector-validate-for-period)](http://jenkins.antrea-ci.rocks/view/cloud/job/antrea-daily-elk-flow-collector-validate-for-period/)
   daily validation of elk flow collector manifest. If build fails, Jenkins will send an email to
+  projectantrea-dev@googlegroups.com for notification.
+
+* [daily-flow-visibility-validate](https://jenkins.antrea-ci.rocks/job/antrea-daily-flow-visibility-validate-for-period/):
+  [![Build Status](http://jenkins.antrea-ci.rocks/buildStatus/icon?job=antrea-daily-flow-visibility-validate-for-period)](http://jenkins.antrea-ci.rocks/view/cloud/job/antrea-daily-flow-visibility-validate-for-period/)
+  daily validation of Flow Visibility manifest. If build fails, Jenkins will send an email to
   projectantrea-dev@googlegroups.com for notification.
 
 * [matrix-test [weekly]](https://jenkins.antrea-ci.rocks/job/antrea-weekly-matrix-compatibility-test/):

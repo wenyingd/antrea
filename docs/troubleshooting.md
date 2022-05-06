@@ -13,6 +13,9 @@
   - [Using antctl](#using-antctl-1)
   - [Using antctl proxy](#using-antctl-proxy-1)
   - [Directly accessing the antrea-agent API](#directly-accessing-the-antrea-agent-api)
+- [Accessing the flow-aggregator API](#accessing-the-flow-aggregator-api)
+  - [Using antctl](#using-antctl-2)
+  - [Directly accessing the flow-aggregator API](#directly-accessing-the-flow-aggregator-api)
 - [Troubleshooting Open vSwitch](#troubleshooting-open-vswitch)
 - [Troubleshooting with antctl](#troubleshooting-with-antctl)
 - [Profiling Antrea components](#profiling-antrea-components)
@@ -39,7 +42,7 @@ To check the OVS daemon logs (e.g. if the `antrea-ovs` container logs indicate
 that one of the OVS daemons generated an error), you can use `kubectl exec`:
 
 ```bash
-kubectl exec -n kube-system <antrea-agent Pod name> -c antrea-ovs tail /var/log/openvswitch/<DAEMON>.log
+kubectl exec -n kube-system <antrea-agent Pod name> -c antrea-ovs -- tail /var/log/openvswitch/<DAEMON>.log
 ```
 
 The `antrea-controller` Pod and the list of `antrea-agent` Pods, along with the
@@ -144,7 +147,7 @@ agent with this command:
 
 ```bash
 # Get into the antrea-agent container
-kubectl exec -it <antrea-agent Pod name> -n kube-system -c antrea-agent bash
+kubectl exec -it <antrea-agent Pod name> -n kube-system -c antrea-agent -- bash
 # View the agent's NetworkPolicy
 antctl get networkpolicy
 ```
@@ -181,6 +184,37 @@ curl --insecure --header "Authorization: Bearer $TOKEN" https://<Node IP address
 However, in this case you will be limited to the endpoints that `antctl` is
 allowed to access, as defined [here](/build/yamls/base/antctl.yml).
 
+## Accessing the flow-aggregator API
+
+flow-aggregator runs as a Deployment and exposes its API via a local endpoint.
+There are two ways you can access it:
+
+### Using antctl
+
+To use `antctl` to access the flow-aggregator API, you need to exec into the
+flow-aggregator container first. `antctl` is embedded in the image so it can be
+used directly.
+
+For example, you can dump the flow records with this command:
+
+```bash
+# Get into the flow-aggregator container
+kubectl exec -it <flow-aggregator Pod name> -n flow-aggregator -- bash
+# View the flow records
+antctl get flowrecords
+```
+
+### Directly accessing the flow-aggregator API
+
+If you want to directly access the flow-aggregator API, you need to exec into
+the flow-aggregator container. Then access the local endpoint directly using the
+Bearer Token stored in the file system:
+
+```bash
+TOKEN=$(cat /var/run/antrea/apiserver/loopback-client-token)
+curl --insecure --header "Authorization: Bearer $TOKEN" https://127.0.0.1:10348/
+```
+
 ## Troubleshooting Open vSwitch
 
 OVS daemons (`ovsdb-server` and `ovs-vswitchd`) run inside the `antrea-ovs`
@@ -189,7 +223,7 @@ command line tools (e.g. `ovs-vsctl`, `ovs-ofctl`, `ovs-appctl`) in the
 container, for example:
 
 ```bash
-kubectl exec -n kube-system <antrea-agent Pod name> -c antrea-ovs ovs-vsctl show
+kubectl exec -n kube-system <antrea-agent Pod name> -c antrea-ovs -- ovs-vsctl show
 ```
 
 By default the host directory `/var/run/antrea/openvswitch/` is mounted to
@@ -222,7 +256,7 @@ f06768ee-17ec-4abb-a971-b3b76abc8cda
         Port antrea-gw0
             Interface antrea-gw0
             type: internal
-    ovs_version: "2.15.1"
+    ovs_version: "2.17.0"
 ```
 
 - `ovs-ofctl show br-int`: show OpenFlow information of the OVS bridge.

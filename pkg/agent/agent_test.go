@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"testing"
 
 	mock "github.com/golang/mock/gomock"
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"antrea.io/antrea/pkg/agent/cniserver"
@@ -79,10 +81,10 @@ func TestInitstore(t *testing.T) {
 
 	ovsPort1 := ovsconfig.OVSPortData{UUID: uuid1, Name: "p1", IFName: "p1", OFPort: 11,
 		ExternalIDs: convertExternalIDMap(cniserver.BuildOVSPortExternalIDs(
-			interfacestore.NewContainerInterface("p1", uuid1, "pod1", "ns1", p1NetMAC, []net.IP{p1NetIP})))}
+			interfacestore.NewContainerInterface("p1", uuid1, "pod1", "ns1", p1NetMAC, []net.IP{p1NetIP}, 0)))}
 	ovsPort2 := ovsconfig.OVSPortData{UUID: uuid2, Name: "p2", IFName: "p2", OFPort: 12,
 		ExternalIDs: convertExternalIDMap(cniserver.BuildOVSPortExternalIDs(
-			interfacestore.NewContainerInterface("p2", uuid2, "pod2", "ns2", p2NetMAC, []net.IP{p2NetIP})))}
+			interfacestore.NewContainerInterface("p2", uuid2, "pod2", "ns2", p2NetMAC, []net.IP{p2NetIP}, 0)))}
 	initOVSPorts := []ovsconfig.OVSPortData{ovsPort1, ovsPort2}
 
 	mockOVSBridgeClient.EXPECT().GetPortList().Return(initOVSPorts, ovsconfig.NewTransactionError(fmt.Errorf("Failed to list OVS ports"), true))
@@ -106,6 +108,23 @@ func TestInitstore(t *testing.T) {
 	if !found2 {
 		t.Errorf("Failed to load OVS port into local store")
 	}
+
+	// OVS port external_ids should be updated to set AntreaInterfaceTypeKey if it doesn't exist in OVSPortData.
+	delete(ovsPort1.ExternalIDs, interfacestore.AntreaInterfaceTypeKey)
+	delete(ovsPort2.ExternalIDs, interfacestore.AntreaInterfaceTypeKey)
+	initOVSPorts2 := []ovsconfig.OVSPortData{ovsPort1, ovsPort2}
+	mockOVSBridgeClient.EXPECT().GetPortList().Return(initOVSPorts2, nil)
+	updateExtIDsFunc := func(p ovsconfig.OVSPortData) map[string]interface{} {
+		extIDs := make(map[string]interface{})
+		for k, v := range p.ExternalIDs {
+			extIDs[k] = v
+		}
+		extIDs[interfacestore.AntreaInterfaceTypeKey] = interfacestore.AntreaContainer
+		return extIDs
+	}
+	mockOVSBridgeClient.EXPECT().SetPortExternalIDs(ovsPort1.Name, updateExtIDsFunc(ovsPort1)).Return(nil)
+	mockOVSBridgeClient.EXPECT().SetPortExternalIDs(ovsPort2.Name, updateExtIDsFunc(ovsPort2)).Return(nil)
+	initializer.initInterfaceStore()
 }
 
 func TestPersistRoundNum(t *testing.T) {
@@ -157,13 +176,13 @@ func TestInitNodeLocalConfig(t *testing.T) {
 		HardwareAddr: macAddr,
 	}
 	podCIDRStr := "172.16.10.0/24"
+	transportCIDRs := []string{"172.16.100.7/24", "2002:1a23:fb46::11:3/32"}
 	_, podCIDR, _ := net.ParseCIDR(podCIDRStr)
-	transportIP, transportIPNet, _ := net.ParseCIDR("172.16.100.7/24")
-	transportIPNet.IP = transportIP
 	transportIfaceMAC, _ := net.ParseMAC("00:0c:29:f5:e2:ce")
 	type testTransInterface struct {
-		iface *net.Interface
-		ipNet *net.IPNet
+		iface   *net.Interface
+		ipV4Net *net.IPNet
+		ipV6Net *net.IPNet
 	}
 	testTransportIface := &testTransInterface{
 		iface: &net.Interface{
@@ -172,11 +191,22 @@ func TestInitNodeLocalConfig(t *testing.T) {
 			Name:         "ens192",
 			HardwareAddr: transportIfaceMAC,
 		},
-		ipNet: transportIPNet,
 	}
+	for _, cidr := range transportCIDRs {
+		parsedIP, parsedIPNet, _ := net.ParseCIDR(cidr)
+		parsedIPNet.IP = parsedIP
+		if parsedIP.To4() != nil {
+			testTransportIface.ipV4Net = parsedIPNet
+		} else {
+			testTransportIface.ipV6Net = parsedIPNet
+		}
+	}
+	transportAddresses := strings.Join([]string{testTransportIface.ipV4Net.IP.String(), testTransportIface.ipV6Net.IP.String()}, ",")
 	tests := []struct {
 		name                      string
 		trafficEncapMode          config.TrafficEncapModeType
+		transportIfName           string
+		transportIfCIDRs          []string
 		transportInterface        *testTransInterface
 		tunnelType                ovsconfig.TunnelType
 		mtu                       int
@@ -221,49 +251,105 @@ func TestInitNodeLocalConfig(t *testing.T) {
 		{
 			name:                      "noencap mode with transportInterface",
 			trafficEncapMode:          config.TrafficEncapModeNoEncap,
+			transportIfName:           testTransportIface.iface.Name,
 			transportInterface:        testTransportIface,
 			mtu:                       0,
 			expectedNodeLocalIfaceMTU: 1500,
 			expectedMTU:               1500,
 			expectedNodeAnnotation: map[string]string{
 				types.NodeMACAddressAnnotationKey:       transportIfaceMAC.String(),
-				types.NodeTransportAddressAnnotationKey: transportIP.String(),
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
 			},
 		},
 		{
 			name:                      "hybrid mode with transportInterface",
 			trafficEncapMode:          config.TrafficEncapModeHybrid,
+			transportIfName:           testTransportIface.iface.Name,
 			transportInterface:        testTransportIface,
 			mtu:                       0,
 			expectedNodeLocalIfaceMTU: 1500,
 			expectedMTU:               1500,
 			expectedNodeAnnotation: map[string]string{
 				types.NodeMACAddressAnnotationKey:       transportIfaceMAC.String(),
-				types.NodeTransportAddressAnnotationKey: transportIP.String(),
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
 			},
 		},
 		{
 			name:                      "encap mode with transportInterface, geneve tunnel",
 			trafficEncapMode:          config.TrafficEncapModeEncap,
+			transportIfName:           testTransportIface.iface.Name,
 			transportInterface:        testTransportIface,
 			tunnelType:                ovsconfig.GeneveTunnel,
 			mtu:                       0,
 			expectedNodeLocalIfaceMTU: 1500,
 			expectedMTU:               1450,
 			expectedNodeAnnotation: map[string]string{
-				types.NodeTransportAddressAnnotationKey: transportIP.String(),
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
 			},
 		},
 		{
 			name:                      "encap mode with transportInterface, mtu specified",
 			trafficEncapMode:          config.TrafficEncapModeEncap,
+			transportIfName:           testTransportIface.iface.Name,
 			transportInterface:        testTransportIface,
 			tunnelType:                ovsconfig.GeneveTunnel,
 			mtu:                       1400,
 			expectedNodeLocalIfaceMTU: 1500,
 			expectedMTU:               1400,
 			expectedNodeAnnotation: map[string]string{
-				types.NodeTransportAddressAnnotationKey: transportIP.String(),
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
+			},
+		},
+		{
+			name:                      "noencap mode with transportInterfaceCIDRs",
+			trafficEncapMode:          config.TrafficEncapModeNoEncap,
+			transportIfCIDRs:          transportCIDRs,
+			transportInterface:        testTransportIface,
+			mtu:                       0,
+			expectedNodeLocalIfaceMTU: 1500,
+			expectedMTU:               1500,
+			expectedNodeAnnotation: map[string]string{
+				types.NodeMACAddressAnnotationKey:       transportIfaceMAC.String(),
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
+			},
+		},
+		{
+			name:                      "hybrid mode with transportInterfaceCIDRs",
+			trafficEncapMode:          config.TrafficEncapModeHybrid,
+			transportIfCIDRs:          transportCIDRs,
+			transportInterface:        testTransportIface,
+			mtu:                       0,
+			expectedNodeLocalIfaceMTU: 1500,
+			expectedMTU:               1500,
+			expectedNodeAnnotation: map[string]string{
+				types.NodeMACAddressAnnotationKey:       transportIfaceMAC.String(),
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
+			},
+		},
+		{
+			name:                      "encap mode with transportInterfaceCIDRs, geneve tunnel",
+			trafficEncapMode:          config.TrafficEncapModeEncap,
+			transportIfCIDRs:          transportCIDRs,
+			transportInterface:        testTransportIface,
+			tunnelType:                ovsconfig.GeneveTunnel,
+			mtu:                       0,
+			expectedNodeLocalIfaceMTU: 1500,
+			expectedMTU:               1450,
+			expectedNodeAnnotation: map[string]string{
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
+			},
+		},
+		{
+			name:                      "encap mode with transportInterfaceCIDRs, mtu specified",
+			trafficEncapMode:          config.TrafficEncapModeEncap,
+			transportIfCIDRs:          transportCIDRs,
+			transportInterface:        testTransportIface,
+			tunnelType:                ovsconfig.GeneveTunnel,
+			mtu:                       1400,
+			expectedNodeLocalIfaceMTU: 1500,
+			expectedMTU:               1400,
+			expectedNodeAnnotation: map[string]string{
+				types.NodeTransportAddressAnnotationKey: transportAddresses,
 			},
 		},
 	}
@@ -288,15 +374,17 @@ func TestInitNodeLocalConfig(t *testing.T) {
 			client := fake.NewSimpleClientset(node)
 			ifaceStore := interfacestore.NewInterfaceStore()
 			expectedNodeConfig := config.NodeConfig{
-				Name:                  nodeName,
-				OVSBridge:             ovsBridge,
-				DefaultTunName:        defaultTunInterfaceName,
-				PodIPv4CIDR:           podCIDR,
-				NodeIPv4Addr:          nodeIPNet,
-				NodeTransportIPv4Addr: nodeIPNet,
-				NodeLocalInterfaceMTU: tt.expectedNodeLocalIfaceMTU,
-				NodeMTU:               tt.expectedMTU,
-				UplinkNetConfig:       new(config.AdapterNetConfig),
+				Name:                       nodeName,
+				Type:                       config.K8sNode,
+				OVSBridge:                  ovsBridge,
+				DefaultTunName:             defaultTunInterfaceName,
+				PodIPv4CIDR:                podCIDR,
+				NodeIPv4Addr:               nodeIPNet,
+				NodeTransportInterfaceName: ipDevice.Name,
+				NodeTransportIPv4Addr:      nodeIPNet,
+				NodeTransportInterfaceMTU:  tt.expectedNodeLocalIfaceMTU,
+				NodeMTU:                    tt.expectedMTU,
+				UplinkNetConfig:            new(config.AdapterNetConfig),
 			}
 
 			initializer := &Initializer{
@@ -309,15 +397,23 @@ func TestInitNodeLocalConfig(t *testing.T) {
 					TunnelType:       tt.tunnelType,
 				},
 			}
-			if tt.transportInterface != nil {
+			if tt.transportIfName != "" {
 				initializer.networkConfig.TransportIface = tt.transportInterface.iface.Name
-				expectedNodeConfig.NodeTransportIPv4Addr = tt.transportInterface.ipNet
-				defer mockGetTransportIPNetDeviceByName(tt.transportInterface.ipNet, tt.transportInterface.iface)()
+				expectedNodeConfig.NodeTransportInterfaceName = tt.transportInterface.iface.Name
+				expectedNodeConfig.NodeTransportIPv4Addr = tt.transportInterface.ipV4Net
+				expectedNodeConfig.NodeTransportIPv6Addr = tt.transportInterface.ipV6Net
+				defer mockGetTransportIPNetDeviceByName(tt.transportInterface.ipV4Net, tt.transportInterface.ipV6Net, tt.transportInterface.iface)()
+			} else if len(tt.transportIfCIDRs) > 0 {
+				initializer.networkConfig.TransportIfaceCIDRs = tt.transportIfCIDRs
+				expectedNodeConfig.NodeTransportInterfaceName = tt.transportInterface.iface.Name
+				expectedNodeConfig.NodeTransportIPv4Addr = tt.transportInterface.ipV4Net
+				expectedNodeConfig.NodeTransportIPv6Addr = tt.transportInterface.ipV6Net
+				defer mockGetIPNetDeviceByCIDRs(tt.transportInterface.ipV4Net, tt.transportInterface.ipV6Net, tt.transportInterface.iface)()
 			}
 			defer mockGetIPNetDeviceFromIP(nodeIPNet, ipDevice)()
 			defer mockNodeNameEnv(nodeName)()
 
-			require.NoError(t, initializer.initNodeLocalConfig())
+			require.NoError(t, initializer.initK8sNodeLocalConfig(nodeName))
 			assert.Equal(t, expectedNodeConfig, *initializer.nodeConfig)
 			node, err := client.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 			require.NoError(t, err)
@@ -328,7 +424,7 @@ func TestInitNodeLocalConfig(t *testing.T) {
 
 func mockGetIPNetDeviceFromIP(ipNet *net.IPNet, ipDevice *net.Interface) func() {
 	prevGetIPNetDeviceFromIP := getIPNetDeviceFromIP
-	getIPNetDeviceFromIP = func(localIP *ip.DualStackIPs) (*net.IPNet, *net.IPNet, *net.Interface, error) {
+	getIPNetDeviceFromIP = func(localIP *ip.DualStackIPs, ignoredHostInterfaces sets.String) (*net.IPNet, *net.IPNet, *net.Interface, error) {
 		return ipNet, nil, ipDevice, nil
 	}
 	return func() { getIPNetDeviceFromIP = prevGetIPNetDeviceFromIP }
@@ -339,10 +435,18 @@ func mockNodeNameEnv(name string) func() {
 	return func() { os.Unsetenv(env.NodeNameEnvKey) }
 }
 
-func mockGetTransportIPNetDeviceByName(ipNet *net.IPNet, ipDevice *net.Interface) func() {
+func mockGetTransportIPNetDeviceByName(ipV4Net, ipV6Net *net.IPNet, ipDevice *net.Interface) func() {
 	prevGetIPNetDeviceByName := getTransportIPNetDeviceByName
 	getTransportIPNetDeviceByName = func(ifName, brName string) (*net.IPNet, *net.IPNet, *net.Interface, error) {
-		return ipNet, nil, ipDevice, nil
+		return ipV4Net, ipV6Net, ipDevice, nil
 	}
 	return func() { getTransportIPNetDeviceByName = prevGetIPNetDeviceByName }
+}
+
+func mockGetIPNetDeviceByCIDRs(ipV4Net, ipV6Net *net.IPNet, ipDevice *net.Interface) func() {
+	prevGetIPNetDeviceByCIDRs := getIPNetDeviceByCIDRs
+	getIPNetDeviceByCIDRs = func(cidr []string) (*net.IPNet, *net.IPNet, *net.Interface, error) {
+		return ipV4Net, ipV6Net, ipDevice, nil
+	}
+	return func() { getIPNetDeviceByCIDRs = prevGetIPNetDeviceByCIDRs }
 }

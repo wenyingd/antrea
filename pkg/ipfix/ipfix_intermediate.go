@@ -30,12 +30,14 @@ type IPFIXAggregationProcess interface {
 	Stop()
 	ForAllExpiredFlowRecordsDo(callback ipfixintermediate.FlowKeyRecordMapCallBack) error
 	GetExpiryFromExpirePriorityQueue() time.Duration
-	ResetStatElementsInRecord(record ipfixentities.Record) error
+	GetRecords(flowKey *ipfixintermediate.FlowKey) []map[string]interface{}
+	ResetStatAndThroughputElementsInRecord(record ipfixentities.Record) error
 	SetCorrelatedFieldsFilled(record *ipfixintermediate.AggregationFlowRecord)
 	AreCorrelatedFieldsFilled(record ipfixintermediate.AggregationFlowRecord) bool
 	IsAggregatedRecordIPv4(record ipfixintermediate.AggregationFlowRecord) bool
 	SetExternalFieldsFilled(record *ipfixintermediate.AggregationFlowRecord)
 	AreExternalFieldsFilled(record ipfixintermediate.AggregationFlowRecord) bool
+	GetNumFlows() int64
 }
 
 type ipfixAggregationProcess struct {
@@ -70,8 +72,12 @@ func (ap *ipfixAggregationProcess) GetExpiryFromExpirePriorityQueue() time.Durat
 	return ap.AggregationProcess.GetExpiryFromExpirePriorityQueue()
 }
 
-func (ap *ipfixAggregationProcess) ResetStatElementsInRecord(record ipfixentities.Record) error {
-	return ap.AggregationProcess.ResetStatElementsInRecord(record)
+func (ap *ipfixAggregationProcess) GetRecords(flowKey *ipfixintermediate.FlowKey) []map[string]interface{} {
+	return ap.AggregationProcess.GetRecords(flowKey)
+}
+
+func (ap *ipfixAggregationProcess) ResetStatAndThroughputElementsInRecord(record ipfixentities.Record) error {
+	return ap.AggregationProcess.ResetStatAndThroughputElementsInRecord(record)
 }
 
 func (ap *ipfixAggregationProcess) SetCorrelatedFieldsFilled(record *ipfixintermediate.AggregationFlowRecord) {
@@ -92,4 +98,8 @@ func (ap *ipfixAggregationProcess) SetExternalFieldsFilled(record *ipfixintermed
 
 func (ap *ipfixAggregationProcess) AreExternalFieldsFilled(record ipfixintermediate.AggregationFlowRecord) bool {
 	return ap.AggregationProcess.AreExternalFieldsFilled(record)
+}
+
+func (ap *ipfixAggregationProcess) GetNumFlows() int64 {
+	return ap.AggregationProcess.GetNumFlows()
 }

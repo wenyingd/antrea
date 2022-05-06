@@ -44,6 +44,12 @@ type PodReference struct {
 	Namespace string `json:"namespace,omitempty" protobuf:"bytes,2,opt,name=namespace"`
 }
 
+// NodeReference represents a Node Reference.
+type NodeReference struct {
+	// The name of this Node.
+	Name string `json:"name,omitempty" protobuf:"bytes,1,opt,name=name"`
+}
+
 // ServiceReference represents reference to a v1.Service.
 type ServiceReference struct {
 	// The name of this Service.
@@ -80,6 +86,8 @@ type GroupMember struct {
 	IPs []IPAddress `json:"ips,omitempty" protobuf:"bytes,3,rep,name=ips"`
 	// Ports is the list NamedPort of the GroupMember.
 	Ports []NamedPort `json:"ports,omitempty" protobuf:"bytes,4,rep,name=ports"`
+	// Node maintains the reference to the Node.
+	Node *NodeReference `json:"node,omitempty" protobuf:"bytes,5,opt,name=node"`
 }
 
 // +genclient
@@ -93,6 +101,18 @@ type ClusterGroupMembers struct {
 	metav1.ObjectMeta `json:"metadata,omitempty" protobuf:"bytes,1,opt,name=metadata"`
 	EffectiveMembers  []GroupMember `json:"effectiveMembers" protobuf:"bytes,2,rep,name=effectiveMembers"`
 	EffectiveIPBlocks []IPNet       `json:"effectiveIPBlocks" protobuf:"bytes,3,rep,name=effectiveIPBlocks"`
+	TotalMembers      int64         `json:"totalMembers" protobuf:"varint,4,opt,name=totalMembers"`
+	TotalPages        int64         `json:"totalPages" protobuf:"varint,5,opt,name=totalPages"`
+	CurrentPage       int64         `json:"currentPage" protobuf:"varint,6,opt,name=currentPage"`
+}
+
+// +k8s:conversion-gen:explicit-from=net/url.Values
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type PaginationGetOptions struct {
+	metav1.TypeMeta `json:",inline"`
+	Page            int64 `json:"page" protobuf:"varint,1,opt,name=page"`
+	Limit           int64 `json:"limit" protobuf:"varint,2,opt,name=limit"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -245,21 +265,30 @@ const (
 	ProtocolUDP Protocol = "UDP"
 	// ProtocolSCTP is the SCTP protocol.
 	ProtocolSCTP Protocol = "SCTP"
+	// ProtocolICMP is the ICMP protocol.
+	ProtocolICMP Protocol = "ICMP"
 )
 
 // Service describes a port to allow traffic on.
 type Service struct {
-	// The protocol (TCP, UDP, or SCTP) which traffic must match. If not specified, this
+	// The protocol (TCP, UDP, SCTP, or ICMP) which traffic must match. If not specified, this
 	// field defaults to TCP.
 	// +optional
 	Protocol *Protocol `json:"protocol,omitempty" protobuf:"bytes,1,opt,name=protocol"`
-	// The port name or number on the given protocol. If not specified, this matches all port numbers.
+	// Port and EndPort can only be specified, when the Protocol is TCP, UDP, or SCTP.
+	// Port defines the port name or number on the given protocol. If not specified
+	// and the Protocol is TCP, UDP, or SCTP, this matches all port numbers.
 	// +optional
 	Port *intstr.IntOrString `json:"port,omitempty" protobuf:"bytes,2,opt,name=port"`
 	// EndPort defines the end of the port range, being the end included within the range.
 	// It can only be specified when a numerical `port` is specified.
 	// +optional
 	EndPort *int32 `json:"endPort,omitempty" protobuf:"bytes,3,opt,name=endPort"`
+	// ICMPType and ICMPCode can only be specified, when the Protocol is ICMP. If they
+	// both are not specified and the Protocol is ICMP, this matches all ICMP traffic.
+	// +optional
+	ICMPType *int32 `json:"icmpType,omitempty" protobuf:"bytes,4,opt,name=icmpType"`
+	ICMPCode *int32 `json:"icmpCode,omitempty" protobuf:"bytes,5,opt,name=icmpCode"`
 }
 
 // NetworkPolicyPeer describes a peer of NetworkPolicyRules.
@@ -272,6 +301,9 @@ type NetworkPolicyPeer struct {
 	// A list of exact FQDN names or FQDN wildcard expressions.
 	// This field can only be possibly set for NetworkPolicyPeer of egress rules.
 	FQDNs []string `json:"fqdns,omitempty" protobuf:"bytes,3,rep,name=fqdns"`
+	// A list of ServiceReference.
+	// This field can only be possibly set for NetworkPolicyPeer of egress rules.
+	ToServices []ServiceReference `json:"toServices,omitempty" protobuf:"bytes,4,rep,name=toServices"`
 }
 
 // IPBlock describes a particular CIDR (Ex. "192.168.1.1/24"). The except entry describes CIDRs that should

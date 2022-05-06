@@ -21,11 +21,13 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -41,6 +43,7 @@ const informerDefaultResync time.Duration = 30 * time.Second
 
 type traceflowController struct {
 	*Controller
+	kubeClient         clientset.Interface
 	client             versioned.Interface
 	informerFactory    informers.SharedInformerFactory
 	crdInformerFactory crdinformers.SharedInformerFactory
@@ -57,6 +60,7 @@ func newController() *traceflowController {
 	controller.traceflowListerSynced = alwaysReady
 	return &traceflowController{
 		controller,
+		client,
 		crdClient,
 		informerFactory,
 		crdInformerFactory,
@@ -69,7 +73,13 @@ func TestTraceflow(t *testing.T) {
 
 	tfc := newController()
 	stopCh := make(chan struct{})
+	tfc.informerFactory.Start(stopCh)
 	tfc.crdInformerFactory.Start(stopCh)
+	// Must wait for cache sync, otherwise resource creation events will be missing if the resources are created
+	// in-between list and watch call of an informer. This is because fake clientset doesn't support watching with
+	// resourceVersion. A watcher of fake clientset only gets events that happen after the watcher is created.
+	tfc.informerFactory.WaitForCacheSync(stopCh)
+	tfc.crdInformerFactory.WaitForCacheSync(stopCh)
 	go tfc.Run(stopCh)
 
 	numRunningTraceflows := func() int {
@@ -87,45 +97,102 @@ func TestTraceflow(t *testing.T) {
 		},
 	}
 
-	tfc.client.CrdV1alpha1().Traceflows().Create(context.TODO(), &tf1, metav1.CreateOptions{})
-	res, _ := tfc.waitForTraceflow("tf1", crdv1alpha1.Running, time.Second)
-	assert.NotNil(t, res)
-	// DataplaneTag should be allocated by Controller.
-	assert.True(t, res.Status.DataplaneTag > 0)
-	assert.Equal(t, numRunningTraceflows(), 1)
+	t.Run("normalTraceflow", func(t *testing.T) {
+		pod1 := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod1",
+				Namespace: "ns1",
+			},
+		}
 
-	// Test Controller handling of successful Traceflow.
-	res.Status.Results = []crdv1alpha1.NodeResult{
-		// Sender
-		{
-			Observations: []crdv1alpha1.Observation{{Component: crdv1alpha1.ComponentSpoofGuard}},
-		},
-		// Receiver
-		{
-			Observations: []crdv1alpha1.Observation{{Action: crdv1alpha1.ActionDelivered}},
-		},
-	}
-	tfc.client.CrdV1alpha1().Traceflows().Update(context.TODO(), res, metav1.UpdateOptions{})
-	res, _ = tfc.waitForTraceflow("tf1", crdv1alpha1.Succeeded, time.Second)
-	assert.NotNil(t, res)
-	// DataplaneTag should be deallocated by Controller.
-	assert.True(t, res.Status.DataplaneTag == 0)
-	assert.Equal(t, numRunningTraceflows(), 0)
-	tfc.client.CrdV1alpha1().Traceflows().Delete(context.TODO(), "tf1", metav1.DeleteOptions{})
+		tfc.kubeClient.CoreV1().Pods("ns1").Create(context.TODO(), &pod1, metav1.CreateOptions{})
+		createdPod, _ := tfc.waitForPodInNamespace("ns1", "pod1", time.Second)
+		require.NotNil(t, createdPod)
+		tfc.client.CrdV1alpha1().Traceflows().Create(context.TODO(), &tf1, metav1.CreateOptions{})
+		res, _ := tfc.waitForTraceflow("tf1", crdv1alpha1.Running, time.Second)
+		require.NotNil(t, res)
+		// DataplaneTag should be allocated by Controller.
+		assert.True(t, res.Status.DataplaneTag > 0)
+		assert.Equal(t, numRunningTraceflows(), 1)
 
-	// Test Traceflow timeout.
-	startTime := time.Now()
-	tfc.client.CrdV1alpha1().Traceflows().Create(context.TODO(), &tf1, metav1.CreateOptions{})
-	res, _ = tfc.waitForTraceflow("tf1", crdv1alpha1.Running, time.Second)
-	assert.NotNil(t, res)
-	res, _ = tfc.waitForTraceflow("tf1", crdv1alpha1.Failed, defaultTimeoutDuration*2)
-	assert.NotNil(t, res)
-	assert.True(t, time.Now().Sub(startTime) >= time.Second*time.Duration(tf1.Spec.Timeout))
-	assert.Equal(t, res.Status.Reason, traceflowTimeout)
-	assert.True(t, res.Status.DataplaneTag == 0)
-	assert.Equal(t, numRunningTraceflows(), 0)
+		// Test Controller handling of successful Traceflow.
+		res.Status.Results = []crdv1alpha1.NodeResult{
+			// Sender
+			{
+				Observations: []crdv1alpha1.Observation{{Component: crdv1alpha1.ComponentSpoofGuard}},
+			},
+			// Receiver
+			{
+				Observations: []crdv1alpha1.Observation{{Action: crdv1alpha1.ActionDelivered}},
+			},
+		}
+		tfc.client.CrdV1alpha1().Traceflows().Update(context.TODO(), res, metav1.UpdateOptions{})
+		res, _ = tfc.waitForTraceflow("tf1", crdv1alpha1.Succeeded, time.Second)
+		assert.NotNil(t, res)
+		// DataplaneTag should be deallocated by Controller.
+		assert.True(t, res.Status.DataplaneTag == 0)
+		assert.Equal(t, numRunningTraceflows(), 0)
+		tfc.client.CrdV1alpha1().Traceflows().Delete(context.TODO(), "tf1", metav1.DeleteOptions{})
+	})
+
+	t.Run("timeoutTraceflow", func(t *testing.T) {
+		startTime := time.Now()
+		tfc.client.CrdV1alpha1().Traceflows().Create(context.TODO(), &tf1, metav1.CreateOptions{})
+		res, _ := tfc.waitForTraceflow("tf1", crdv1alpha1.Running, time.Second)
+		assert.NotNil(t, res)
+		res, _ = tfc.waitForTraceflow("tf1", crdv1alpha1.Failed, defaultTimeoutDuration*2)
+		assert.NotNil(t, res)
+		assert.True(t, time.Now().Sub(startTime) >= time.Second*time.Duration(tf1.Spec.Timeout))
+		assert.Equal(t, res.Status.Reason, traceflowTimeout)
+		assert.True(t, res.Status.DataplaneTag == 0)
+		assert.Equal(t, numRunningTraceflows(), 0)
+	})
+
+	t.Run("timeoutHostnetworkTraceflow", func(t *testing.T) {
+		tf2 := crdv1alpha1.Traceflow{
+			ObjectMeta: metav1.ObjectMeta{Name: "tf2", UID: "uid2"},
+			Spec: crdv1alpha1.TraceflowSpec{
+				Source:      crdv1alpha1.Source{Namespace: "ns1", Pod: "pod2"},
+				Destination: crdv1alpha1.Destination{Namespace: "ns2", Pod: "pod2"},
+				Timeout:     2, // 2 seconds timeout
+			},
+		}
+		pod2 := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "pod2",
+				Namespace: "ns1",
+			},
+			Spec: corev1.PodSpec{HostNetwork: true},
+		}
+
+		tfc.kubeClient.CoreV1().Pods("ns1").Create(context.TODO(), &pod2, metav1.CreateOptions{})
+		createdPod, _ := tfc.waitForPodInNamespace("ns1", "pod2", time.Second)
+		require.NotNil(t, createdPod)
+		tfc.client.CrdV1alpha1().Traceflows().Create(context.TODO(), &tf2, metav1.CreateOptions{})
+		res, _ := tfc.waitForTraceflow("tf2", crdv1alpha1.Failed, time.Second)
+		require.NotNil(t, res)
+		// DataplaneTag should not be allocated by Controller.
+		assert.True(t, res.Status.DataplaneTag == 0)
+		assert.Equal(t, numRunningTraceflows(), 0)
+	})
 
 	close(stopCh)
+}
+
+func (tfc *traceflowController) waitForPodInNamespace(ns string, name string, timeout time.Duration) (*corev1.Pod, error) {
+	var pod *corev1.Pod
+	var err error
+	if err = wait.Poll(100*time.Millisecond, timeout, func() (bool, error) {
+		// Make sure dummy Pod is synced by informer
+		pod, err = tfc.podLister.Pods(ns).Get(name)
+		if err != nil {
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		return nil, err
+	}
+	return pod, nil
 }
 
 func (tfc *traceflowController) waitForTraceflow(name string, phase crdv1alpha1.TraceflowPhase, timeout time.Duration) (*crdv1alpha1.Traceflow, error) {

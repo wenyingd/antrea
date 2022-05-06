@@ -23,6 +23,7 @@ import (
 type TraceflowPhase string
 
 const (
+	// Pending is not used anymore
 	Pending   TraceflowPhase = "Pending"
 	Running   TraceflowPhase = "Running"
 	Succeeded TraceflowPhase = "Succeeded"
@@ -55,23 +56,23 @@ const (
 // List the supported protocols and their codes in traceflow.
 // According to code in Antrea agent and controller, default protocol is ICMP if protocol is not inputted by users.
 const (
-	ICMPProtocol int32 = 1
-	TCPProtocol  int32 = 6
-	UDPProtocol  int32 = 17
-	SCTPProtocol int32 = 132
+	ICMPProtocolNumber int32 = 1
+	TCPProtocolNumber  int32 = 6
+	UDPProtocolNumber  int32 = 17
+	SCTPProtocolNumber int32 = 132
 )
 
 var SupportedProtocols = map[string]int32{
-	"TCP":  TCPProtocol,
-	"UDP":  UDPProtocol,
-	"ICMP": ICMPProtocol,
+	"TCP":  TCPProtocolNumber,
+	"UDP":  UDPProtocolNumber,
+	"ICMP": ICMPProtocolNumber,
 }
 
 var ProtocolsToString = map[int32]string{
-	TCPProtocol:  "TCP",
-	UDPProtocol:  "UDP",
-	ICMPProtocol: "ICMP",
-	SCTPProtocol: "SCTP",
+	TCPProtocolNumber:  "TCP",
+	UDPProtocolNumber:  "UDP",
+	ICMPProtocolNumber: "ICMP",
+	SCTPProtocolNumber: "SCTP",
 }
 
 // List the supported destination types in traceflow.
@@ -221,6 +222,13 @@ type TraceflowStatus struct {
 	Phase TraceflowPhase `json:"phase,omitempty"`
 	// Reason is a message indicating the reason of the traceflow's current phase.
 	Reason string `json:"reason,omitempty"`
+	// StartTime is the time at which the Traceflow as started by the Antrea Controller.
+	// Before K8s v1.20, null values (field not set) are not pruned, and a CR where a
+	// metav1.Time field is not set would fail OpenAPI validation (type string). The
+	// recommendation seems to be to use a pointer instead, and the field will be omitted when
+	// serializing.
+	// See https://github.com/kubernetes/kubernetes/issues/86811
+	StartTime *metav1.Time `json:"startTime,omitempty"`
 	// DataplaneTag is a tag to identify a traceflow session across Nodes.
 	DataplaneTag uint8 `json:"dataplaneTag,omitempty"`
 	// Results is the collection of all observations on different nodes.
@@ -306,12 +314,12 @@ type NetworkPolicySpec struct {
 	// Currently Ingress rule supports setting the `From` field but not the `To`
 	// field within a Rule.
 	// +optional
-	Ingress []Rule `json:"ingress"`
+	Ingress []Rule `json:"ingress,omitempty"`
 	// Set of egress rules evaluated based on the order in which they are set.
 	// Currently Egress rule supports setting the `To` field but not the `From`
 	// field within a Rule.
 	// +optional
-	Egress []Rule `json:"egress"`
+	Egress []Rule `json:"egress,omitempty"`
 }
 
 // NetworkPolicyPhase defines the phase in which a NetworkPolicy is.
@@ -345,25 +353,37 @@ type NetworkPolicyStatus struct {
 type Rule struct {
 	// Action specifies the action to be applied on the rule.
 	Action *RuleAction `json:"action"`
-	// Set of port and protocol allowed/denied by the rule. If this field is unset
-	// or empty, this rule matches all ports.
+	// Set of ports and protocols matched by the rule. If this field and Protocols
+	// are unset or empty, this rule matches all ports.
 	// +optional
 	Ports []NetworkPolicyPort `json:"ports,omitempty"`
+	// Set of protocols matched by the rule. If this field and Ports are unset or
+	// empty, this rule matches all protocols supported.
+	// +optional
+	Protocols []NetworkPolicyProtocol `json:"protocols,omitempty"`
 	// Rule is matched if traffic originates from workloads selected by
 	// this field. If this field is empty, this rule matches all sources.
 	// +optional
-	From []NetworkPolicyPeer `json:"from"`
+	From []NetworkPolicyPeer `json:"from,omitempty"`
 	// Rule is matched if traffic is intended for workloads selected by
-	// this field. If this field is empty or missing, this rule matches all
+	// this field. This field can't be used with ToServices. If this field
+	// and ToServices are both empty or missing this rule matches all destinations.
+	// +optional
+	To []NetworkPolicyPeer `json:"to,omitempty"`
+	// Rule is matched if traffic is intended for a Service listed in this field.
+	// Currently only ClusterIP types Services are supported in this field. This field
+	// can only be used when AntreaProxy is enabled. This field can't be used with To
+	// or Ports. If this field and To are both empty or missing, this rule matches all
 	// destinations.
 	// +optional
-	To []NetworkPolicyPeer `json:"to"`
+	ToServices []NamespacedName `json:"toServices,omitempty"`
 	// Name describes the intention of this rule.
 	// Name should be unique within the policy.
 	// +optional
-	Name string `json:"name"`
+	Name string `json:"name,omitempty"`
 	// EnableLogging is used to indicate if agent should generate logs
 	// when rules are matched. Should be default to false.
+	// +optional
 	EnableLogging bool `json:"enableLogging"`
 	// Select workloads on which this rule will be applied to. Cannot be set in
 	// conjunction with NetworkPolicySpec/ClusterNetworkPolicySpec.AppliedTo.
@@ -419,6 +439,15 @@ type NetworkPolicyPeer struct {
 	//  Exact FQDNs, i.e. "google.com", "db-svc.default.svc.cluster.local"
 	//  Wildcard expressions, i.e. "*wayfair.com".
 	FQDN string `json:"fqdn,omitempty"`
+	// Select all Pods with the ServiceAccount matched by this field, as
+	// workloads in AppliedTo/To/From fields.
+	// Cannot be set with any other selector.
+	// +optional
+	ServiceAccount *NamespacedName `json:"serviceAccount,omitempty"`
+	// Select certain Nodes which match the label selector.
+	// A NodeSelector cannot be set in AppliedTo field or set with any other selector.
+	// +optional
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector,omitempty"`
 }
 
 type PeerNamespaces struct {
@@ -465,6 +494,10 @@ const (
 	RuleActionAllow RuleAction = "Allow"
 	// RuleActionDrop describes that the traffic matching the rule must be dropped.
 	RuleActionDrop RuleAction = "Drop"
+	// RuleActionPass indicates that the traffic matching the rule will not be evalutated
+	// by Antrea NetworkPolicy or ClusterNetworkPolicy, but rather punt to K8s namespaced
+	// NetworkPolicy for evaluaion.
+	RuleActionPass RuleAction = "Pass"
 	// RuleActionReject indicates that the traffic matching the rule must be rejected and the
 	// client will receive a response.
 	RuleActionReject RuleAction = "Reject"
@@ -514,12 +547,12 @@ type ClusterNetworkPolicySpec struct {
 	// Currently Ingress rule supports setting the `From` field but not the `To`
 	// field within a Rule.
 	// +optional
-	Ingress []Rule `json:"ingress"`
+	Ingress []Rule `json:"ingress,omitempty"`
 	// Set of egress rules evaluated based on the order in which they are set.
 	// Currently Egress rule supports setting the `To` field but not the `From`
 	// field within a Rule.
 	// +optional
-	Egress []Rule `json:"egress"`
+	Egress []Rule `json:"egress,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
@@ -563,4 +596,60 @@ type TierList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 
 	Items []Tier `json:"items"`
+}
+
+// NamespacedName refers to a Namespace scoped resource.
+// All fields must be used together.
+type NamespacedName struct {
+	Name      string `json:"name,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// NetworkPolicyProtocol defines additional protocols that are not supported by
+// `ports`. All fields should be used as a standalone field.
+type NetworkPolicyProtocol struct {
+	ICMP *ICMPProtocol `json:"icmp,omitempty"`
+}
+
+// ICMPProtocol matches ICMP traffic with specific ICMPType and/or ICMPCode. All
+// fields could be used alone or together. If all fields are not provided, this
+// matches all ICMP traffic.
+type ICMPProtocol struct {
+	ICMPType *int32 `json:"icmpType,omitempty"`
+	ICMPCode *int32 `json:"icmpCode,omitempty"`
+}
+
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// ExternalNode refers to a virtual machine or a bare-metal server
+// which is not a K8s node, but has Antrea agent running on it.
+type ExternalNode struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec ExternalNodeSpec `json:"spec,omitempty"`
+}
+
+// ExternalNodeSpec defines the desired state for ExternalNode.
+type ExternalNodeSpec struct {
+	// Only one network interface is supported now.
+	// Other interfaces except interfaces[0] will be ignored if there are more than one interfaces.
+	Interfaces []NetworkInterface `json:"interfaces,omitempty"`
+}
+
+type NetworkInterface struct {
+	Name string `json:"name,omitempty"`
+
+	IPs []string `json:"ips,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type ExternalNodeList struct {
+	metav1.TypeMeta `json:",inline"`
+	// +optional
+	metav1.ListMeta `json:"metadata,omitempty"`
+
+	Items []ExternalNode `json:"items,omitempty"`
 }

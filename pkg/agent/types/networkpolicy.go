@@ -53,6 +53,8 @@ const (
 	IPNetAddr
 	OFPortAddr
 	L4PortAddr
+	ICMPAddr
+	ServiceGroupIDAddr
 	UnSupported
 )
 
@@ -79,7 +81,7 @@ type PolicyRule struct {
 	Priority      *uint16
 	Name          string
 	FlowID        uint32
-	TableID       binding.TableIDType
+	TableID       uint8
 	PolicyRef     *v1beta2.NetworkPolicyReference
 	EnableLogging bool
 }
@@ -147,12 +149,4 @@ func (m *RuleMetric) Merge(m1 *RuleMetric) {
 type BitRange struct {
 	Value uint16
 	Mask  *uint16
-}
-
-// EntityReference represents a reference to either a Pod or an ExternalEntity.
-type EntityReference struct {
-	// Pod maintains the reference to the Pod.
-	Pod *v1beta2.PodReference
-	// ExternalEntity maintains the reference to the ExternalEntity.
-	ExternalEntity *v1beta2.ExternalEntityReference
 }

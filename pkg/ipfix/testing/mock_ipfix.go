@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2022 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -178,6 +178,34 @@ func (mr *MockIPFIXCollectingProcessMockRecorder) GetMsgChan() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMsgChan", reflect.TypeOf((*MockIPFIXCollectingProcess)(nil).GetMsgChan))
 }
 
+// GetNumConnToCollector mocks base method
+func (m *MockIPFIXCollectingProcess) GetNumConnToCollector() int64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetNumConnToCollector")
+	ret0, _ := ret[0].(int64)
+	return ret0
+}
+
+// GetNumConnToCollector indicates an expected call of GetNumConnToCollector
+func (mr *MockIPFIXCollectingProcessMockRecorder) GetNumConnToCollector() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetNumConnToCollector", reflect.TypeOf((*MockIPFIXCollectingProcess)(nil).GetNumConnToCollector))
+}
+
+// GetNumRecordsReceived mocks base method
+func (m *MockIPFIXCollectingProcess) GetNumRecordsReceived() int64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetNumRecordsReceived")
+	ret0, _ := ret[0].(int64)
+	return ret0
+}
+
+// GetNumRecordsReceived indicates an expected call of GetNumRecordsReceived
+func (mr *MockIPFIXCollectingProcessMockRecorder) GetNumRecordsReceived() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetNumRecordsReceived", reflect.TypeOf((*MockIPFIXCollectingProcess)(nil).GetNumRecordsReceived))
+}
+
 // Start mocks base method
 func (m *MockIPFIXCollectingProcess) Start() {
 	m.ctrl.T.Helper()
@@ -281,6 +309,34 @@ func (mr *MockIPFIXAggregationProcessMockRecorder) GetExpiryFromExpirePriorityQu
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetExpiryFromExpirePriorityQueue", reflect.TypeOf((*MockIPFIXAggregationProcess)(nil).GetExpiryFromExpirePriorityQueue))
 }
 
+// GetNumFlows mocks base method
+func (m *MockIPFIXAggregationProcess) GetNumFlows() int64 {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetNumFlows")
+	ret0, _ := ret[0].(int64)
+	return ret0
+}
+
+// GetNumFlows indicates an expected call of GetNumFlows
+func (mr *MockIPFIXAggregationProcessMockRecorder) GetNumFlows() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetNumFlows", reflect.TypeOf((*MockIPFIXAggregationProcess)(nil).GetNumFlows))
+}
+
+// GetRecords mocks base method
+func (m *MockIPFIXAggregationProcess) GetRecords(arg0 *intermediate.FlowKey) []map[string]interface{} {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRecords", arg0)
+	ret0, _ := ret[0].([]map[string]interface{})
+	return ret0
+}
+
+// GetRecords indicates an expected call of GetRecords
+func (mr *MockIPFIXAggregationProcessMockRecorder) GetRecords(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRecords", reflect.TypeOf((*MockIPFIXAggregationProcess)(nil).GetRecords), arg0)
+}
+
 // IsAggregatedRecordIPv4 mocks base method
 func (m *MockIPFIXAggregationProcess) IsAggregatedRecordIPv4(arg0 intermediate.AggregationFlowRecord) bool {
 	m.ctrl.T.Helper()
@@ -295,18 +351,18 @@ func (mr *MockIPFIXAggregationProcessMockRecorder) IsAggregatedRecordIPv4(arg0 i
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsAggregatedRecordIPv4", reflect.TypeOf((*MockIPFIXAggregationProcess)(nil).IsAggregatedRecordIPv4), arg0)
 }
 
-// ResetStatElementsInRecord mocks base method
-func (m *MockIPFIXAggregationProcess) ResetStatElementsInRecord(arg0 entities.Record) error {
+// ResetStatAndThroughputElementsInRecord mocks base method
+func (m *MockIPFIXAggregationProcess) ResetStatAndThroughputElementsInRecord(arg0 entities.Record) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ResetStatElementsInRecord", arg0)
+	ret := m.ctrl.Call(m, "ResetStatAndThroughputElementsInRecord", arg0)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// ResetStatElementsInRecord indicates an expected call of ResetStatElementsInRecord
-func (mr *MockIPFIXAggregationProcessMockRecorder) ResetStatElementsInRecord(arg0 interface{}) *gomock.Call {
+// ResetStatAndThroughputElementsInRecord indicates an expected call of ResetStatAndThroughputElementsInRecord
+func (mr *MockIPFIXAggregationProcessMockRecorder) ResetStatAndThroughputElementsInRecord(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetStatElementsInRecord", reflect.TypeOf((*MockIPFIXAggregationProcess)(nil).ResetStatElementsInRecord), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetStatAndThroughputElementsInRecord", reflect.TypeOf((*MockIPFIXAggregationProcess)(nil).ResetStatAndThroughputElementsInRecord), arg0)
 }
 
 // SetCorrelatedFieldsFilled mocks base method

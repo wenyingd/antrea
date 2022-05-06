@@ -20,8 +20,8 @@
 package testing
 
 import (
-	portcache "antrea.io/antrea/pkg/agent/nodeportlocal/portcache"
 	gomock "github.com/golang/mock/gomock"
+	io "io"
 	reflect "reflect"
 )
 
@@ -49,16 +49,16 @@ func (m *MockLocalPortOpener) EXPECT() *MockLocalPortOpenerMockRecorder {
 }
 
 // OpenLocalPort mocks base method
-func (m *MockLocalPortOpener) OpenLocalPort(arg0 int) (portcache.Closeable, error) {
+func (m *MockLocalPortOpener) OpenLocalPort(arg0 int, arg1 string) (io.Closer, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "OpenLocalPort", arg0)
-	ret0, _ := ret[0].(portcache.Closeable)
+	ret := m.ctrl.Call(m, "OpenLocalPort", arg0, arg1)
+	ret0, _ := ret[0].(io.Closer)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // OpenLocalPort indicates an expected call of OpenLocalPort
-func (mr *MockLocalPortOpenerMockRecorder) OpenLocalPort(arg0 interface{}) *gomock.Call {
+func (mr *MockLocalPortOpenerMockRecorder) OpenLocalPort(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OpenLocalPort", reflect.TypeOf((*MockLocalPortOpener)(nil).OpenLocalPort), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OpenLocalPort", reflect.TypeOf((*MockLocalPortOpener)(nil).OpenLocalPort), arg0, arg1)
 }

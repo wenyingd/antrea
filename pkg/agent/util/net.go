@@ -15,6 +15,7 @@
 package util
 
 import (
+	"crypto/rand"
 	"crypto/sha1" // #nosec G505: not used for security purposes
 	"encoding/hex"
 	"errors"
@@ -22,7 +23,14 @@ import (
 	"io"
 	"net"
 	"strings"
+	"time"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
+
+	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/util/ip"
 )
 
@@ -33,6 +41,7 @@ const (
 
 	FamilyIPv4 uint8 = 4
 	FamilyIPv6 uint8 = 6
+	PrefixPhy        = "phy-"
 )
 
 func generateInterfaceName(key string, name string, useHead bool) string {
@@ -108,8 +117,9 @@ func dialUnix(address string) (net.Conn, error) {
 	return net.Dial("unix", address)
 }
 
-// GetIPNetDeviceFromIP returns local IPs/masks and associated device from IP.
-func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs) (v4IPNet *net.IPNet, v6IPNet *net.IPNet, iface *net.Interface, err error) {
+// GetIPNetDeviceFromIP returns local IPs/masks and associated device from IP, and ignores the interfaces which have
+// names in the ignoredInterfaces.
+func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs, ignoredInterfaces sets.String) (v4IPNet *net.IPNet, v6IPNet *net.IPNet, iface *net.Interface, err error) {
 	linkList, err := net.Interfaces()
 	if err != nil {
 		return nil, nil, nil, err
@@ -126,19 +136,23 @@ func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs) (v4IPNet *net.IPNet, v6IPNe
 		return nil
 	}
 	for i := range linkList {
-		addrList, err := linkList[i].Addrs()
+		link := linkList[i]
+		if ignoredInterfaces.Has(link.Name) {
+			continue
+		}
+		addrList, err := link.Addrs()
 		if err != nil {
 			continue
 		}
 		for _, addr := range addrList {
 			if ipNet, ok := addr.(*net.IPNet); ok {
 				if ipNet.IP.Equal(localIPs.IPv4) {
-					if err := saveIface(&linkList[i]); err != nil {
+					if err := saveIface(&link); err != nil {
 						return nil, nil, nil, err
 					}
 					v4IPNet = ipNet
 				} else if ipNet.IP.Equal(localIPs.IPv6) {
-					if err := saveIface(&linkList[i]); err != nil {
+					if err := saveIface(&link); err != nil {
 						return nil, nil, nil, err
 					}
 					v6IPNet = ipNet
@@ -180,6 +194,57 @@ func GetIPNetDeviceByName(ifaceName string) (v4IPNet *net.IPNet, v6IPNet *net.IP
 	return nil, nil, nil, fmt.Errorf("unable to find local IP and device")
 }
 
+func GetIPNetDeviceByCIDRs(cidrsList []string) (v4IPNet, v6IPNet *net.IPNet, link *net.Interface, err error) {
+	cidrs, err := utilnet.ParseCIDRs(cidrsList)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	dualStack, err := utilnet.IsDualStackCIDRs(cidrs)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	if len(cidrs) > 1 && !dualStack {
+		return nil, nil, nil, fmt.Errorf("len of cidrs is %v and they are not configured as dual stack (at least one from each IPFamily)", len(cidrs))
+	}
+
+	if len(cidrs) > 2 {
+		return nil, nil, nil, fmt.Errorf("length of cidrs is %v more than max allowed of 2", len(cidrs))
+	}
+
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, i := range ifaces {
+		addresses, err := i.Addrs()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, addr := range addresses {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || !ipNet.IP.IsGlobalUnicast() {
+				continue
+			}
+			for _, cidr := range cidrs {
+				if !cidr.Contains(ipNet.IP) {
+					continue
+				}
+				if v4IPNet == nil && ipNet.IP.To4() != nil {
+					v4IPNet = ipNet
+				} else if v6IPNet == nil && ipNet.IP.To4() == nil {
+					v6IPNet = ipNet
+				}
+			}
+		}
+		if v4IPNet != nil || v6IPNet != nil {
+			return v4IPNet, v6IPNet, &i, nil
+		}
+	}
+	return nil, nil, nil, fmt.Errorf("unable to find local IP and device")
+}
+
 func GetIPv4Addr(ips []net.IP) net.IP {
 	for _, ip := range ips {
 		if ip.To4() != nil {
@@ -204,4 +269,181 @@ func GetIPWithFamily(ips []net.IP, addrFamily uint8) (net.IP, error) {
 		}
 	}
 	return nil, errors.New("no IP found with IPv4 AddressFamily")
+}
+
+// ExtendCIDRWithIP is used for extending an IPNet with an IP.
+func ExtendCIDRWithIP(ipNet *net.IPNet, ip net.IP) (*net.IPNet, error) {
+	cpl := commonPrefixLen(ipNet.IP, ip)
+	if cpl == 0 {
+		return nil, fmt.Errorf("invalid common prefix length")
+	}
+	_, newIPNet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ipNet.IP.String(), cpl))
+	if err != nil {
+		return nil, err
+	}
+	return newIPNet, nil
+}
+
+// This is copied from net/addrselect.go as this function cannot be used outside of standard lib net.
+// Modifies:
+// - Replace argument type IP with argument type net.IP.
+func commonPrefixLen(a, b net.IP) (cpl int) {
+	if a4 := a.To4(); a4 != nil {
+		a = a4
+	}
+	if b4 := b.To4(); b4 != nil {
+		b = b4
+	}
+	if len(a) != len(b) {
+		return 0
+	}
+	// If IPv6, only up to the prefix (first 64 bits)
+	if len(a) > 8 {
+		a = a[:8]
+		b = b[:8]
+	}
+	for len(a) > 0 {
+		if a[0] == b[0] {
+			cpl += 8
+			a = a[1:]
+			b = b[1:]
+			continue
+		}
+		bits := 8
+		ab, bb := a[0], b[0]
+		for {
+			ab >>= 1
+			bb >>= 1
+			bits--
+			if ab == bb {
+				cpl += bits
+				return
+			}
+		}
+	}
+	return
+}
+
+// GetAllNodeAddresses gets all Node IP addresses (not including IPv6 link local address).
+func GetAllNodeAddresses(excludeDevices []string) ([]net.IP, []net.IP, error) {
+	var nodeAddressesIPv4, nodeAddressesIPv6 []net.IP
+	_, ipv6LinkLocalNet, _ := net.ParseCIDR("fe80::/64")
+
+	// Get all interfaces.
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Transform excludeDevices to a set
+	excludeDevicesSet := sets.NewString(excludeDevices...)
+
+	for _, itf := range interfaces {
+		// If the device is in excludeDevicesSet, skip it.
+		if excludeDevicesSet.Has(itf.Name) {
+			continue
+		}
+
+		// Get all IPs of every interface
+		addrs, err := itf.Addrs()
+		if err != nil {
+			return nil, nil, err
+		}
+
+		for _, addr := range addrs {
+			ip, _, _ := net.ParseCIDR(addr.String())
+			if ipv6LinkLocalNet.Contains(ip) {
+				continue // Skip IPv6 link local address
+			}
+
+			if ip.To4() != nil {
+				nodeAddressesIPv4 = append(nodeAddressesIPv4, ip)
+			} else {
+				nodeAddressesIPv6 = append(nodeAddressesIPv6, ip)
+			}
+		}
+	}
+	return nodeAddressesIPv4, nodeAddressesIPv6, nil
+}
+
+// Copied from github.com/vishvananda/netlink/netlink.go
+// NewIPNet generates an IPNet from an ip address using a netmask of 32 or 128.
+func NewIPNet(ip net.IP) *net.IPNet {
+	if ip.To4() != nil {
+		return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+	}
+	return &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
+}
+
+func RandomMAC() (net.HardwareAddr, error) {
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	// Set the local bit
+	buf[0] |= 2
+	return buf[:6], nil
+}
+
+func GetGlobalIPNetsByName(link *net.Interface) ([]*net.IPNet, error) {
+	addrList, err := link.Addrs()
+	if err != nil {
+		return nil, err
+	}
+	var addrs []*net.IPNet
+	for _, a := range addrList {
+		if ipNet, ok := a.(*net.IPNet); ok {
+			if ipNet.IP.IsGlobalUnicast() {
+				addrs = append(addrs, ipNet)
+			}
+		}
+	}
+	return addrs, nil
+}
+
+func GenUplinkInterfaceName(hostIfName string) string {
+	return fmt.Sprintf("%s%s", PrefixPhy, hostIfName)
+}
+
+func GetUplinkConfig(uplinkIfName string) (*config.AdapterNetConfig, error) {
+	iface, err := net.InterfaceByName(uplinkIfName)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get interface", "uplinkIfName", uplinkIfName)
+		return nil, err
+	}
+	addrs, err := GetGlobalIPNetsByName(iface)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get address", "iface", iface)
+		return nil, err
+	}
+	gw, routes, err := GetNetRoutesOnAdapter(iface.Index)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get routes", "iface.Index", iface.Index)
+		return nil, err
+	}
+	return &config.AdapterNetConfig{
+		Name:    uplinkIfName,
+		Index:   iface.Index,
+		MAC:     iface.HardwareAddr,
+		IPs:     addrs,
+		Routes:  routes,
+		Gateway: gw,
+		MTU:     iface.MTU,
+	}, nil
+}
+
+func RenameInterface(from, to string) error {
+	var renameErr error
+	pollErr := wait.Poll(time.Millisecond*100, time.Second, func() (done bool, err error) {
+		renameErr = renameHostInterface(from, to)
+		if renameErr != nil {
+			klog.InfoS("Unable to rename host interface name with error, retrying", "oldName", from, "newName", to, "err", renameErr)
+			return false, nil
+		}
+		return true, nil
+	})
+	if pollErr != nil {
+		return fmt.Errorf("failed to rename host interface name %s to %s", from, to)
+	}
+	return nil
 }

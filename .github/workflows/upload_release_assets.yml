@@ -9,7 +9,11 @@ jobs:
   build:
     runs-on: [ubuntu-latest]
     steps:
-    - uses: actions/checkout@v2
+    - name: Set up Go 1.17
+      uses: actions/setup-go@v3
+      with:
+        go-version: 1.17
+    - uses: actions/checkout@v3
     - name: Build assets
       env:
         TAG: ${{ github.ref }}
@@ -151,15 +155,6 @@ jobs:
         asset_path: ./assets/antrea-aks.yml
         asset_name: antrea-aks.yml
         asset_content_type: application/octet-stream
-    - name: Upload antrea-kind.yml
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ github.event.release.upload_url }}
-        asset_path: ./assets/antrea-kind.yml
-        asset_name: antrea-kind.yml
-        asset_content_type: application/octet-stream
     - name: Upload antrea-octant.yml
       uses: actions/upload-release-asset@v1
       env:
@@ -186,6 +181,42 @@ jobs:
         upload_url: ${{ github.event.release.upload_url }}
         asset_path: ./assets/flow-aggregator.yml
         asset_name: flow-aggregator.yml
+        asset_content_type: application/octet-stream
+    - name: Upload flow-visibility.yml
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./assets/flow-visibility.yml
+        asset_name: flow-visibility.yml
+        asset_content_type: application/octet-stream
+    - name: Upload antrea-multicluster-leader-global.yml
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./assets/antrea-multicluster-leader-global.yml
+        asset_name: antrea-multicluster-leader-global.yml
+        asset_content_type: application/octet-stream
+    - name: Upload antrea-multicluster-leader-namespaced.yml
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./assets/antrea-multicluster-leader-namespaced.yml
+        asset_name: antrea-multicluster-leader-namespaced.yml
+        asset_content_type: application/octet-stream
+    - name: Upload antrea-multicluster-member.yml
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ github.event.release.upload_url }}
+        asset_path: ./assets/antrea-multicluster-member.yml
+        asset_name: antrea-multicluster-member.yml
         asset_content_type: application/octet-stream
     - name: Upload antrea-agent-windows-x86_64.exe
       uses: actions/upload-release-asset@v1

@@ -52,7 +52,8 @@ func (cl *commandList) applyToRootCommand(root *cobra.Command, client AntctlClie
 	for i := range cl.definitions {
 		def := &cl.definitions[i]
 		if (runtime.Mode == runtime.ModeAgent && def.agentEndpoint == nil) ||
-			(runtime.Mode == runtime.ModeController && def.controllerEndpoint == nil) {
+			(runtime.Mode == runtime.ModeController && def.controllerEndpoint == nil) ||
+			(runtime.Mode == runtime.ModeFlowAggregator && def.flowAggregatorEndpoint == nil) {
 			continue
 		}
 		def.applySubCommandToRoot(root, client, out)
@@ -62,7 +63,8 @@ func (cl *commandList) applyToRootCommand(root *cobra.Command, client AntctlClie
 
 	for _, cmd := range cl.rawCommands {
 		if (runtime.Mode == runtime.ModeAgent && cmd.supportAgent) ||
-			(runtime.Mode == runtime.ModeController && cmd.supportController) {
+			(runtime.Mode == runtime.ModeController && cmd.supportController) ||
+			(!runtime.InPod && cmd.commandGroup == mc) {
 			if groupCommand, ok := groupCommands[cmd.commandGroup]; ok {
 				groupCommand.AddCommand(cmd.cobraCommand)
 			} else {
@@ -113,8 +115,8 @@ func (cl *commandList) validate() []error {
 	return errs
 }
 
-// GetDebugCommands returns all commands supported by Controller or Agent that
-// are used for debugging purpose.
+// GetDebugCommands returns all commands supported by Controller, Agent or Flow Aggregator
+// that are used for debugging purpose.
 func (cl *commandList) GetDebugCommands(mode string) [][]string {
 	var allCommands [][]string
 	for _, def := range cl.definitions {
@@ -126,9 +128,9 @@ func (cl *commandList) GetDebugCommands(mode string) [][]string {
 			// log-level command does not support remote execution.
 			continue
 		}
-
 		if mode == runtime.ModeAgent && def.agentEndpoint != nil ||
-			mode == runtime.ModeController && def.controllerEndpoint != nil {
+			mode == runtime.ModeController && def.controllerEndpoint != nil ||
+			mode == runtime.ModeFlowAggregator && def.flowAggregatorEndpoint != nil {
 			var currentCommand []string
 			if group, ok := groupCommands[def.commandGroup]; ok {
 				currentCommand = append(currentCommand, group.Use)

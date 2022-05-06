@@ -19,13 +19,17 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
+	"antrea.io/ofnet/ofctrl"
 	"gopkg.in/natefinch/lumberjack.v2"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/openflow"
+	binding "antrea.io/antrea/pkg/ovs/openflow"
+	"antrea.io/antrea/pkg/util/ip"
 	"antrea.io/antrea/pkg/util/logdir"
 )
 
@@ -34,10 +38,26 @@ const (
 	logfileName   string = "np.log"
 )
 
+type Clock interface {
+	Now() time.Time
+	After(d time.Duration) <-chan time.Time
+}
+
+type realClock struct{}
+
+func (c realClock) Now() time.Time {
+	return time.Now()
+}
+
+func (c realClock) After(d time.Duration) <-chan time.Time {
+	return time.After(d)
+}
+
 // AntreaPolicyLogger is used for Antrea policy audit logging.
 // Includes a lumberjack logger and a map used for log deduplication.
 type AntreaPolicyLogger struct {
 	bufferLength     time.Duration
+	clock            Clock // enable the use of a "virtual" clock for unit tests
 	anpLogger        *log.Logger
 	logDeduplication logRecordDedupMap
 }
@@ -49,16 +69,18 @@ type logInfo struct {
 	disposition string // Allow/Drop of the rule sending packetin
 	ofPriority  string // openflow priority of the flow sending packetin
 	srcIP       string // source IP of the traffic logged
+	srcPort     string // source port of the traffic logged
 	destIP      string // destination IP of the traffic logged
+	destPort    string // destination port of the traffic logged
 	pktLength   uint16 // packet length of packetin
 	protocolStr string // protocol of the traffic logged
 }
 
 // logDedupRecord will be used as 1 sec buffer for log deduplication.
 type logDedupRecord struct {
-	count       int64       // record count of duplicate log
-	initTime    time.Time   // initial time upon receiving packet log
-	bufferTimer *time.Timer // 1 sec buffer for each log
+	count         int64            // record count of duplicate log
+	initTime      time.Time        // initial time upon receiving packet log
+	bufferTimerCh <-chan time.Time // 1 sec buffer for each log
 }
 
 // logRecordDedupMap includes a map of log buffers and a r/w mutex for accessing the map.
@@ -76,8 +98,8 @@ func (l *AntreaPolicyLogger) getLogKey(logMsg string) *logDedupRecord {
 
 // logAfterTimer runs concurrently until buffer timer stops, then call terminateLogKey.
 func (l *AntreaPolicyLogger) logAfterTimer(logMsg string) {
-	logRecordTimer := l.getLogKey(logMsg).bufferTimer
-	<-logRecordTimer.C
+	ch := l.getLogKey(logMsg).bufferTimerCh
+	<-ch
 	l.terminateLogKey(logMsg)
 }
 
@@ -102,7 +124,7 @@ func (l *AntreaPolicyLogger) updateLogKey(logMsg string, bufferLength time.Durat
 	if exists {
 		l.logDeduplication.logMap[logMsg].count++
 	} else {
-		record := logDedupRecord{1, time.Now(), time.NewTimer(bufferLength)}
+		record := logDedupRecord{1, l.clock.Now(), l.clock.After(bufferLength)}
 		l.logDeduplication.logMap[logMsg] = &record
 	}
 	return exists
@@ -111,7 +133,7 @@ func (l *AntreaPolicyLogger) updateLogKey(logMsg string, bufferLength time.Durat
 // LogDedupPacket logs information in ob based on disposition and duplication conditions.
 func (l *AntreaPolicyLogger) LogDedupPacket(ob *logInfo) {
 	// Deduplicate non-Allow packet log.
-	logMsg := fmt.Sprintf("%s %s %s %s %s %s %d %s", ob.tableName, ob.npRef, ob.disposition, ob.ofPriority, ob.srcIP, ob.destIP, ob.pktLength, ob.protocolStr)
+	logMsg := fmt.Sprintf("%s %s %s %s %s %s %s %s %s %d", ob.tableName, ob.npRef, ob.disposition, ob.ofPriority, ob.srcIP, ob.srcPort, ob.destIP, ob.destPort, ob.protocolStr, ob.pktLength)
 	if ob.disposition == openflow.DispositionToString[openflow.DispositionAllow] {
 		l.anpLogger.Printf(logMsg)
 	} else {
@@ -147,9 +169,71 @@ func newAntreaPolicyLogger() (*AntreaPolicyLogger, error) {
 
 	antreaPolicyLogger := &AntreaPolicyLogger{
 		bufferLength:     time.Second,
+		clock:            &realClock{},
 		anpLogger:        log.New(logOutput, "", log.Ldate|log.Lmicroseconds),
 		logDeduplication: logRecordDedupMap{logMap: make(map[string]*logDedupRecord)},
 	}
 	klog.InfoS("Initialized Antrea-native Policy Logger for audit logging", "logFile", logFile)
 	return antreaPolicyLogger, nil
+}
+
+// getNetworkPolicyInfo fills in tableName, npName, ofPriority, disposition of logInfo ob.
+func getNetworkPolicyInfo(pktIn *ofctrl.PacketIn, c *Controller, ob *logInfo) error {
+	matchers := pktIn.GetMatches()
+	var match *ofctrl.MatchField
+	// Get table name.
+	tableID := pktIn.TableId
+	ob.tableName = openflow.GetFlowTableName(tableID)
+
+	// Get disposition Allow or Drop.
+	match = getMatchRegField(matchers, openflow.APDispositionField)
+	info, err := getInfoInReg(match, openflow.APDispositionField.GetRange().ToNXRange())
+	if err != nil {
+		return fmt.Errorf("received error while unloading disposition from reg: %v", err)
+	}
+	ob.disposition = openflow.DispositionToString[info]
+
+	// Set match to corresponding ingress/egress reg according to disposition.
+	match = getMatch(matchers, tableID, info)
+
+	// Get Network Policy full name and OF priority of the conjunction.
+	info, err = getInfoInReg(match, nil)
+	if err != nil {
+		return fmt.Errorf("received error while unloading conjunction id from reg: %v", err)
+	}
+	ob.npRef, ob.ofPriority = c.ofClient.GetPolicyInfoFromConjunction(info)
+
+	return nil
+}
+
+// logPacket retrieves information from openflow reg, controller cache, packet-in
+// packet to log. Log is deduplicated for non-Allow packets from record in logDeduplication.
+// Deduplication is safe guarded by logRecordDedupMap mutex.
+func (c *Controller) logPacket(pktIn *ofctrl.PacketIn) error {
+	ob := new(logInfo)
+	packet, err := binding.ParsePacketIn(pktIn)
+	if err != nil {
+		return fmt.Errorf("received error while parsing packetin: %v", err)
+	}
+
+	// Set Network Policy and packet info to log.
+	err = getNetworkPolicyInfo(pktIn, c, ob)
+	if err != nil {
+		return fmt.Errorf("received error while retrieving NetworkPolicy info: %v", err)
+	}
+	ob.srcIP = packet.SourceIP.String()
+	ob.destIP = packet.DestinationIP.String()
+	ob.pktLength = packet.IPLength
+	ob.protocolStr = ip.IPProtocolNumberToString(packet.IPProto, "UnknownProtocol")
+	if ob.protocolStr == "TCP" || ob.protocolStr == "UDP" {
+		ob.srcPort = strconv.Itoa(int(packet.SourcePort))
+		ob.destPort = strconv.Itoa(int(packet.DestinationPort))
+	} else {
+		// Placeholders for ICMP packets without port numbers.
+		ob.srcPort, ob.destPort = "<nil>", "<nil>"
+	}
+
+	// Log the ob info to corresponding file w/ deduplication.
+	c.antreaPolicyLogger.LogDedupPacket(ob)
+	return nil
 }

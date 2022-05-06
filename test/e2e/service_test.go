@@ -17,93 +17,111 @@ package e2e
 import (
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
-// TestClusterIP tests traffic from Nodes and Pods to ClusterIP Service.
-func TestClusterIP(t *testing.T) {
-	// TODO: Support for dual-stack and IPv6-only clusters
-	skipIfIPv6Cluster(t)
+func TestClusterIPv4(t *testing.T) {
+	skipIfNotIPv4Cluster(t)
+	testClusterIP(t, false)
+}
 
+func TestClusterIPv6(t *testing.T) {
+	skipIfNotIPv6Cluster(t)
+	testClusterIP(t, true)
+}
+
+func testClusterIP(t *testing.T, isIPv6 bool) {
+	skipIfNumNodesLessThan(t, 2)
 	data, err := setupTest(t)
 	if err != nil {
 		t.Fatalf("Error when setting up test: %v", err)
 	}
 	defer teardownTest(t, data)
 
-	svcName := "nginx"
-	serverPodNode := nodeName(0)
-	svc, cleanup := data.createClusterIPServiceAndBackendPods(t, svcName, serverPodNode)
-	defer cleanup()
-	t.Logf("%s Service is ready", svcName)
+	data.testClusterIP(t, isIPv6, testNamespace, testNamespace)
+}
 
-	testFromNode := func(node string) {
-		// Retry is needed for rules to be installed by kube-proxy/antrea-proxy.
-		cmd := fmt.Sprintf("curl --connect-timeout 1 --retry 5 --retry-connrefused %s:80", svc.Spec.ClusterIP)
-		rc, stdout, stderr, err := RunCommandOnNode(node, cmd)
-		if rc != 0 || err != nil {
-			t.Errorf("Error when running command '%s' on Node '%s', rc: %d, stdout: %s, stderr: %s, error: %v",
-				cmd, node, rc, stdout, stderr, err)
-		}
+func (data *TestData) testClusterIP(t *testing.T, isIPv6 bool, clientNamespace, serverNamespace string) {
+	nodes := []string{nodeName(0), nodeName(1)}
+	clients := make(map[string]string)
+	for idx, node := range nodes {
+		podName, _, cleanupFunc := createAndWaitForPod(t, data, data.createAgnhostPodOnNode, fmt.Sprintf("client-%d-", idx), node, clientNamespace, false)
+		clients[node] = podName
+		defer cleanupFunc()
+	}
+	hostNetworkClients := make(map[string]string)
+	for idx, node := range nodes {
+		podName, _, cleanupFunc := createAndWaitForPod(t, data, data.createAgnhostPodOnNode, fmt.Sprintf("hostnet-client-%d-", idx), node, clientNamespace, true)
+		hostNetworkClients[node] = podName
+		defer cleanupFunc()
 	}
 
-	testFromPod := func(podName, nodeName string, hostNetwork bool) {
-		require.NoError(t, data.createPodOnNode(podName, testNamespace, nodeName, busyboxImage, []string{"sleep", strconv.Itoa(3600)}, nil, nil, nil, hostNetwork, nil))
-		defer data.deletePodAndWait(defaultTimeout, podName, testNamespace)
-		require.NoError(t, data.podWaitForRunning(defaultTimeout, podName, testNamespace))
-		err := data.runNetcatCommandFromTestPod(podName, testNamespace, svc.Spec.ClusterIP, 80)
-		require.NoError(t, err, "Pod %s should be able to connect %s, but was not able to connect", podName, net.JoinHostPort(svc.Spec.ClusterIP, fmt.Sprint(80)))
+	nginx := fmt.Sprintf("nginx-%v", isIPv6)
+	hostNginx := fmt.Sprintf("nginx-host-%v", isIPv6)
+	ipProtocol := corev1.IPv4Protocol
+	if isIPv6 {
+		ipProtocol = corev1.IPv6Protocol
 	}
+	clusterIPSvc, err := data.createNginxClusterIPService(fmt.Sprintf("nginx-%v", isIPv6), serverNamespace, true, &ipProtocol)
+	require.NoError(t, err)
+	defer data.deleteService(clusterIPSvc.Namespace, clusterIPSvc.Name)
+	require.NotEqual(t, "", clusterIPSvc.Spec.ClusterIP, "ClusterIP should not be empty")
+	url := net.JoinHostPort(clusterIPSvc.Spec.ClusterIP, "80")
 
-	t.Run("ClusterIP", func(t *testing.T) {
-		t.Run("Same Linux Node can access the Service", func(t *testing.T) {
-			t.Parallel()
-			testFromPod("hostnetwork-client-on-same-node", serverPodNode, true)
-		})
-		t.Run("Different Linux Node can access the Service", func(t *testing.T) {
-			t.Parallel()
-			skipIfNumNodesLessThan(t, 2)
-			testFromPod("hostnetwork-client-on-different-node", nodeName(1), true)
-		})
-		t.Run("Windows host can access the Service", func(t *testing.T) {
-			t.Parallel()
-			skipIfNoWindowsNodes(t)
-			idx := clusterInfo.windowsNodes[0]
-			winNode := clusterInfo.nodes[idx].name
-			testFromNode(winNode)
-		})
-		t.Run("Linux Pod on same Node can access the Service", func(t *testing.T) {
-			t.Parallel()
-			testFromPod("client-on-same-node", serverPodNode, false)
-		})
-		t.Run("Linux Pod on different Node can access the Service", func(t *testing.T) {
-			t.Parallel()
-			skipIfNumNodesLessThan(t, 2)
-			testFromPod("client-on-different-node", nodeName(1), false)
-		})
+	_, _, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, nginx, nodeName(0), serverNamespace, false)
+	defer cleanupFunc()
+	t.Run("Non-HostNetwork Endpoints", func(t *testing.T) {
+		testClusterIPCases(t, data, url, clients, hostNetworkClients, clientNamespace)
+	})
+
+	require.NoError(t, data.DeletePod(serverNamespace, nginx))
+	_, _, cleanupFunc = createAndWaitForPod(t, data, data.createNginxPodOnNode, hostNginx, nodeName(0), serverNamespace, true)
+	defer cleanupFunc()
+	t.Run("HostNetwork Endpoints", func(t *testing.T) {
+		skipIfNamespaceIsNotEqual(t, serverNamespace, testNamespace)
+		testClusterIPCases(t, data, url, clients, hostNetworkClients, clientNamespace)
 	})
 }
 
-func (data *TestData) createClusterIPServiceAndBackendPods(t *testing.T, name string, node string) (*corev1.Service, func()) {
-	ipv4Protocol := corev1.IPv4Protocol
-	require.NoError(t, data.createNginxPodOnNode(name, testNamespace, node))
-	_, err := data.podWaitForIPs(defaultTimeout, name, testNamespace)
-	require.NoError(t, err)
-	require.NoError(t, data.podWaitForRunning(defaultTimeout, name, testNamespace))
-	svc, err := data.createNginxClusterIPService(name, false, &ipv4Protocol)
-	require.NoError(t, err)
+func testClusterIPCases(t *testing.T, data *TestData, url string, clients, hostNetworkClients map[string]string, namespace string) {
+	t.Run("All Nodes can access Service ClusterIP", func(t *testing.T) {
+		skipIfProxyAllDisabled(t, data)
+		skipIfKubeProxyEnabled(t, data)
+		skipIfNamespaceIsNotEqual(t, namespace, testNamespace)
+		for node, pod := range hostNetworkClients {
+			testClusterIPFromPod(t, data, url, node, pod, true, namespace)
+		}
+	})
+	t.Run("Pods from all Nodes can access Service ClusterIP", func(t *testing.T) {
+		for node, pod := range clients {
+			testClusterIPFromPod(t, data, url, node, pod, false, namespace)
+		}
+	})
+}
 
-	cleanup := func() {
-		data.deletePodAndWait(defaultTimeout, name, testNamespace)
-		data.deleteServiceAndWait(defaultTimeout, name)
+func testClusterIPFromPod(t *testing.T, data *TestData, url, nodeName, podName string, hostNetwork bool, namespace string) {
+	cmd := []string{"/agnhost", "connect", url, "--timeout=1s", "--protocol=tcp"}
+	err := wait.PollImmediate(1*time.Second, 5*time.Second, func() (bool, error) {
+		t.Logf(strings.Join(cmd, " "))
+		stdout, stderr, err := data.RunCommandFromPod(namespace, podName, agnhostContainerName, cmd)
+		t.Logf("stdout: %s - stderr: %s - err: %v", stdout, stderr, err)
+		if err == nil {
+			return true, nil
+		}
+		return false, nil
+	})
+	if err != nil {
+		t.Errorf(
+			"Pod '%s' on Node '%s' (hostNetwork: %t) should be able to connect to Service ClusterIP",
+			podName, nodeName, hostNetwork,
+		)
 	}
-
-	return svc, cleanup
 }
 
 // TestNodePortWindows tests NodePort Service on Windows Node. It is a temporary test to replace upstream Kubernetes one:
@@ -118,54 +136,64 @@ func TestNodePortWindows(t *testing.T) {
 	}
 	defer teardownTest(t, data)
 
+	data.testNodePort(t, true, testNamespace, testNamespace)
+}
+
+func (data *TestData) testNodePort(t *testing.T, isWindows bool, clientNamespace, serverNamespace string) {
 	svcName := "agnhost"
-	svcNode := nodeName(clusterInfo.windowsNodes[0])
-	svc, cleanup := data.createAgnhostServiceAndBackendPods(t, svcName, svcNode, corev1.ServiceTypeNodePort)
+	svcNode := ""
+	if isWindows {
+		svcNode = nodeName(clusterInfo.windowsNodes[0])
+	} else {
+		svcNode = nodeName(1)
+	}
+	svc, cleanup := data.createAgnhostServiceAndBackendPods(t, svcName, serverNamespace, svcNode, corev1.ServiceTypeNodePort)
 	defer cleanup()
 	t.Logf("%s Service is ready", svcName)
 
 	// Unlike upstream Kubernetes Conformance, here the client is on a Linux Node (nodeName(0)).
 	// It doesn't need to be the control-plane for e2e test and other Linux workers will work as well. However, in this
 	// e2e framework, nodeName(0)/Control-plane Node is guaranteed to be a Linux one.
-	clientName := "agnhost-client"
-	require.NoError(t, data.createAgnhostPodOnNode(clientName, testNamespace, nodeName(0)))
-	defer data.deletePodAndWait(defaultTimeout, clientName, testNamespace)
-	_, err = data.podWaitForIPs(defaultTimeout, clientName, testNamespace)
+	clientName := "busybox-client"
+	require.NoError(t, data.createBusyboxPodOnNode(clientName, clientNamespace, nodeName(0), false))
+	defer data.deletePodAndWait(defaultTimeout, clientName, clientNamespace)
+	podIPs, err := data.podWaitForIPs(defaultTimeout, clientName, clientNamespace)
 	require.NoError(t, err)
+	t.Logf("Created client Pod IPs %v", podIPs.ipStrings)
 
-	nodeIP := clusterInfo.nodes[0].ip
+	nodeIP := clusterInfo.nodes[0].ip()
 	nodePort := int(svc.Spec.Ports[0].NodePort)
-	addr := fmt.Sprintf("http://%s:%d", nodeIP, nodePort)
+	url := fmt.Sprintf("http://%s:%d", nodeIP, nodePort)
 
-	cmd := append([]string{"curl", "--connect-timeout", "1", "--retry", "5", "--retry-connrefused"}, addr)
-	stdout, stderr, err := data.runCommandFromPod(testNamespace, clientName, agnhostContainerName, cmd)
+	stdout, stderr, err := data.runWgetCommandOnBusyboxWithRetry(clientName, clientNamespace, url, 5)
 	if err != nil {
-		t.Errorf("Error when running command '%s' from Pod '%s', stdout: %s, stderr: %s, error: %v",
-			strings.Join(cmd, " "), clientName, stdout, stderr, err)
+		t.Errorf("Error when running 'wget -O - %s' from Pod '%s', stdout: %s, stderr: %s, error: %v",
+			url, clientName, stdout, stderr, err)
 	} else {
-		t.Logf("curl from Pod '%s' to '%s' succeeded", clientName, addr)
+		t.Logf("wget from Pod '%s' to '%s' succeeded", clientName, url)
 	}
 }
 
-func (data *TestData) createAgnhostServiceAndBackendPods(t *testing.T, name string, node string, svcType corev1.ServiceType) (*corev1.Service, func()) {
+func (data *TestData) createAgnhostServiceAndBackendPods(t *testing.T, name, namespace string, node string, svcType corev1.ServiceType) (*corev1.Service, func()) {
 	ipv4Protocol := corev1.IPv4Protocol
 	args := []string{"netexec", "--http-port=80", "--udp-port=80"}
-	require.NoError(t, data.createPodOnNode(name, testNamespace, node, agnhostImage, []string{}, args, nil, []corev1.ContainerPort{
+	require.NoError(t, data.createPodOnNode(name, namespace, node, agnhostImage, []string{}, args, nil, []corev1.ContainerPort{
 		{
 			Name:          "http",
 			ContainerPort: 80,
 			Protocol:      corev1.ProtocolTCP,
 		},
 	}, false, nil))
-	_, err := data.podWaitForIPs(defaultTimeout, name, testNamespace)
+	podIPs, err := data.podWaitForIPs(defaultTimeout, name, namespace)
 	require.NoError(t, err)
-	require.NoError(t, data.podWaitForRunning(defaultTimeout, name, testNamespace))
-	svc, err := data.createService(name, 80, 80, map[string]string{"app": "agnhost"}, false, svcType, &ipv4Protocol)
+	t.Logf("Created service Pod IPs %v", podIPs.ipStrings)
+	require.NoError(t, data.podWaitForRunning(defaultTimeout, name, namespace))
+	svc, err := data.CreateService(name, namespace, 80, 80, map[string]string{"app": "agnhost"}, false, false, svcType, &ipv4Protocol)
 	require.NoError(t, err)
 
 	cleanup := func() {
-		data.deletePodAndWait(defaultTimeout, name, testNamespace)
-		data.deleteServiceAndWait(defaultTimeout, name)
+		data.deletePodAndWait(defaultTimeout, name, namespace)
+		data.deleteServiceAndWait(defaultTimeout, name, namespace)
 	}
 
 	return svc, cleanup

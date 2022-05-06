@@ -30,12 +30,15 @@ import (
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent"
+	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/flowexporter/connections"
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/openflow"
+	proxytypes "antrea.io/antrea/pkg/agent/proxy/types"
 	"antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	"antrea.io/antrea/pkg/querier"
+	"antrea.io/antrea/pkg/util/channel"
 )
 
 const (
@@ -50,6 +53,8 @@ const (
 	// It is a special OVS rule which intercepts DNS query responses from DNS
 	// services to the workloads that have FQDN policy rules applied.
 	dnsInterceptRuleID = uint32(1)
+
+	eeStoreReadyTimeout = 30 * time.Second
 )
 
 var emptyWatch = watch.NewEmptyWatch()
@@ -69,10 +74,14 @@ type Controller struct {
 	// antreaPolicyEnabled indicates whether Antrea NetworkPolicy and
 	// ClusterNetworkPolicy are enabled.
 	antreaPolicyEnabled bool
+	// antreaProxyEnabled indicates whether Antrea proxy is enabled.
+	antreaProxyEnabled bool
 	// statusManagerEnabled indicates whether a statusManager is configured.
 	statusManagerEnabled bool
 	// loggingEnabled indicates where Antrea policy audit logging is enabled.
 	loggingEnabled bool
+	// nodeType indicates if Antrea Agent is running on a K8s Node or an external Node.
+	nodeType config.NodeType
 	// antreaClientProvider provides interfaces to get antreaClient, which can be
 	// used to watch Antrea AddressGroups, AppliedToGroups, and NetworkPolicies.
 	// We need to get antreaClient dynamically because the apiserver cert can be
@@ -102,6 +111,8 @@ type Controller struct {
 	ifaceStore            interfacestore.InterfaceStore
 	// denyConnStore is for storing deny connections for flow exporter.
 	denyConnStore *connections.DenyConnectionStore
+	/// eeStoreReadyCh is for notifying that the ifaceStore is ready for network policy to read endpoint IPs.
+	eeStoreReadyCh <-chan struct{}
 }
 
 // NewNetworkPolicyController returns a new *Controller.
@@ -109,34 +120,46 @@ func NewNetworkPolicyController(antreaClientGetter agent.AntreaClientProvider,
 	ofClient openflow.Client,
 	ifaceStore interfacestore.InterfaceStore,
 	nodeName string,
-	entityUpdates <-chan types.EntityReference,
+	podUpdateSubscriber *channel.SubscribableChannel,
+	entityUpdateSubscriber *channel.SubscribableChannel,
+	groupCounters []proxytypes.GroupCounter,
+	groupIDUpdates <-chan string,
+	nodeType config.NodeType,
 	antreaPolicyEnabled bool,
+	antreaProxyEnabled bool,
 	statusManagerEnabled bool,
 	loggingEnabled bool,
-	denyConnStore *connections.DenyConnectionStore,
 	asyncRuleDeleteInterval time.Duration,
-	dnsServerOverride string) (*Controller, error) {
+	dnsServerOverride string,
+	v4Enabled bool,
+	v6Enabled bool,
+	eeStoreReadyCh <-chan struct{},
+) (*Controller, error) {
 	idAllocator := newIDAllocator(asyncRuleDeleteInterval, dnsInterceptRuleID)
 	c := &Controller{
 		antreaClientProvider: antreaClientGetter,
 		queue:                workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "networkpolicyrule"),
 		ofClient:             ofClient,
+		nodeType:             nodeType,
 		antreaPolicyEnabled:  antreaPolicyEnabled,
+		antreaProxyEnabled:   antreaProxyEnabled,
 		statusManagerEnabled: statusManagerEnabled,
 		loggingEnabled:       loggingEnabled,
-		denyConnStore:        denyConnStore,
+		eeStoreReadyCh:       eeStoreReadyCh,
 	}
 	if antreaPolicyEnabled {
 		var err error
-		if c.fqdnController, err = newFQDNController(ofClient, idAllocator, dnsServerOverride, c.enqueueRule); err != nil {
-			return nil, err
+		if nodeType == config.K8sNode {
+			if c.fqdnController, err = newFQDNController(ofClient, idAllocator, dnsServerOverride, c.enqueueRule, v4Enabled, v6Enabled); err != nil {
+				return nil, err
+			}
 		}
 		if c.ofClient != nil {
 			c.ofClient.RegisterPacketInHandler(uint8(openflow.PacketInReasonNP), "dnsresponse", c.fqdnController)
 		}
 	}
-	c.reconciler = newReconciler(ofClient, ifaceStore, idAllocator, c.fqdnController)
-	c.ruleCache = newRuleCache(c.enqueueRule, entityUpdates)
+	c.reconciler = newReconciler(ofClient, ifaceStore, idAllocator, c.fqdnController, groupCounters, v4Enabled, v6Enabled, antreaPolicyEnabled)
+	c.ruleCache = newRuleCache(c.enqueueRule, podUpdateSubscriber, entityUpdateSubscriber, groupIDUpdates)
 	if statusManagerEnabled {
 		c.statusManager = newStatusController(antreaClientGetter, nodeName, c.ruleCache)
 	}
@@ -197,7 +220,13 @@ func NewNetworkPolicyController(antreaClientGetter agent.AntreaClientProvider,
 					policy.SourceRef.ToString())
 				return nil
 			}
-			c.ruleCache.UpdateNetworkPolicy(policy)
+			anyRuleUpdate := c.ruleCache.UpdateNetworkPolicy(policy)
+			// If there is any rule update, we ensure statusManager will resync the policy's status once, in case that
+			// the added/deleted/updated rule is not effective, in which case the rule's realization status is not
+			// changed but the whole policy's generation is changed.
+			if c.statusManagerEnabled && anyRuleUpdate && policy.SourceRef.Type != v1beta2.K8sNetworkPolicy {
+				c.statusManager.Resync(policy.UID)
+			}
 			return nil
 		},
 		DeleteFunc: func(obj runtime.Object) error {
@@ -363,7 +392,7 @@ func (c *Controller) GetNetworkPolicies(npFilter *querier.NetworkPolicyQueryFilt
 	return c.ruleCache.getNetworkPolicies(npFilter)
 }
 
-// GetAppliedToNetworkPolicies returns the NetworkPolicies applied to the Pod and match the filter.
+// GetAppliedNetworkPolicies returns the NetworkPolicies applied to the Pod and match the filter.
 func (c *Controller) GetAppliedNetworkPolicies(pod, namespace string, npFilter *querier.NetworkPolicyQueryFilter) []v1beta2.NetworkPolicy {
 	return c.ruleCache.getAppliedNetworkPolicies(pod, namespace, npFilter)
 }
@@ -401,6 +430,10 @@ func (c *Controller) GetControllerConnectionStatus() bool {
 	return c.addressGroupWatcher.isConnected() && c.appliedToGroupWatcher.isConnected() && c.networkPolicyWatcher.isConnected()
 }
 
+func (c *Controller) SetDenyConnStore(denyConnStore *connections.DenyConnectionStore) {
+	c.denyConnStore = denyConnStore
+}
+
 // Run begins watching and processing Antrea AddressGroups, AppliedToGroups
 // and NetworkPolicies, and spawns workers that reconciles NetworkPolicy rules.
 // Run will not return until stopCh is closed.
@@ -428,7 +461,16 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	go wait.NonSlidingUntil(c.addressGroupWatcher.watch, 5*time.Second, stopCh)
 	go wait.NonSlidingUntil(c.networkPolicyWatcher.watch, 5*time.Second, stopCh)
 
-	if c.antreaPolicyEnabled {
+	if c.nodeType == config.ExternalNode {
+		select {
+		case <-time.After(eeStoreReadyTimeout):
+			klog.Errorf("Cannot process NetworkPolicy because interface store for ExternalEntity is not ready.")
+			return
+		case <-c.eeStoreReadyCh:
+		}
+	}
+
+	if c.antreaPolicyEnabled && c.nodeType == config.K8sNode {
 		for i := 0; i < defaultDNSWorkers; i++ {
 			go wait.Until(c.fqdnController.worker, time.Second, stopCh)
 		}
@@ -687,25 +729,23 @@ loop:
 			if !ok {
 				return
 			}
+			klog.V(2).InfoS("Received event", "eventType", event.Type, "objectType", w.objectType, "object", event.Object)
 			switch event.Type {
 			case watch.Added:
 				if err := w.AddFunc(event.Object); err != nil {
 					klog.Errorf("Failed to handle added event: %v", err)
 					return
 				}
-				klog.V(2).Infof("Added %s (%#v)", w.objectType, event.Object)
 			case watch.Modified:
 				if err := w.UpdateFunc(event.Object); err != nil {
 					klog.Errorf("Failed to handle modified event: %v", err)
 					return
 				}
-				klog.V(2).Infof("Updated %s (%#v)", w.objectType, event.Object)
 			case watch.Deleted:
 				if err := w.DeleteFunc(event.Object); err != nil {
 					klog.Errorf("Failed to handle deleted event: %v", err)
 					return
 				}
-				klog.V(2).Infof("Removed %s (%#v)", w.objectType, event.Object)
 			default:
 				klog.Errorf("Unknown event: %v", event)
 				return

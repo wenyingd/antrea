@@ -38,9 +38,11 @@ const (
 	AcceptTarget     = "ACCEPT"
 	MasqueradeTarget = "MASQUERADE"
 	MarkTarget       = "MARK"
+	ReturnTarget     = "RETURN"
 	ConnTrackTarget  = "CT"
 	NoTrackTarget    = "NOTRACK"
 	SNATTarget       = "SNAT"
+	DNATTarget       = "DNAT"
 
 	PreRoutingChain  = "PREROUTING"
 	ForwardChain     = "FORWARD"

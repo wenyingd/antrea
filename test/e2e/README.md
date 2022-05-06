@@ -110,6 +110,8 @@ were pushed to all the Nodes. You can then run the tests from the top-level
 directory with `go test -v -timeout=30m antrea.io/antrea/test/e2e`
 (the `-v` enables verbose output).
 
+### Running the tests with vagrant
+
 If you are running the test for the first time and are using the scripts we
 provide under `infra/vagrant` to provision your Kubernetes cluster, you will
 therefore need the following steps:
@@ -121,6 +123,86 @@ therefore need the following steps:
 
 If you need to test an updated version of Antrea, just run
 `./infra/vagrant/push_antrea.sh` and then run the tests again.
+
+### Running the tests with remote (existing K8s cluster)
+
+If you already have a K8s cluster, these steps should be followed to run the e2e tests.
+
+First, you should provide the ssh information for each Node in the cluster. Here is an example:
+
+```text
+Host <Control-Plane-Node>
+    HostName <Control-Plane-IP>
+    Port 22
+    user ubuntu
+    IdentityFile /home/ubuntu/.ssh/id_rsa
+Host <Worker-Node>
+    HostName <Worker-Node-IP>
+    Port 22
+    user ubuntu
+    IdentityFile /home/ubuntu/.ssh/id_rsa
+```
+
+Make sure the `Host` entry for each Node matches the K8s Node name. The `Port` is the port used by the ssh service on the Node.
+
+Besides, you should add the public key to `authorized_keys` of each Node and set `PubkeyAuthentication` of ssh service to `yes`.
+
+Second, the kubeconfig of the cluster should be copied to the right location, e.g. `$HOME/.kube/config` or the path specified by `-remote.kubeconfig`.
+
+Third, the `antrea.yml` (and `antrea-windows.yml` if the cluster has Windows Nodes) should be put under the `$HOME` directory of the control-plane Node.
+
+Now you can start e2e tests using the command below:
+
+```bash
+go test -v antrea.io/antrea/test/e2e -provider=remote
+```
+
+You can specify ssh and kubeconfig locations with `-remote.sshconfig` and `-remote.kubeconfig`. The default location of `-remote.sshconfig` is `$HOME/.ssh/config` and the default location of `-remote.kubeconfig` is `$HOME/.kube/config`.
+
+### Running the e2e tests on a Kind cluster
+
+The simplest way is to run the following command:
+
+```bash
+./ci/kind/test-e2e-kind.sh [options]
+```
+
+It will set up a two worker Node Kind cluster to run the e2e tests, and destroy
+the cluster after the tests stop (succeed or fail). `kubectl` needs to be
+present in your `PATH` to set up the test cluster. For more information on the
+usage of this script and the options, run:
+
+```bash
+./ci/kind/test-e2e-kind.sh --help
+```
+
+You can also run the e2e tests with an existing Kind cluster. Refer to this
+[document](/docs/kind.md) for instructions on how to create a Kind cluster and
+use Antrea as the CNI. You need at least one control-plane Node and one worker
+Node. Before running the Go e2e tests, you will also need to copy the Antrea
+manifest to the control-plane Docker container:
+
+```bash
+./hack/generate-manifest.sh | docker exec -i kind-control-plane dd of=/root/antrea.yml
+go test -timeout=75 -v antrea.io/antrea/test/e2e -provider=kind
+```
+
+The default timeout of `go test` is [10 minutes](https://pkg.go.dev/cmd/go#hdr-Testing_flags).
+If you encounter any timeout issue during e2e, you can try to increase timeout first. Some cases
+take more than 10 minutes. eg: `go test -v -timeout=20m antrea.io/antrea/test/e2e -run=TestAntreaPolicy -provider=kind`.
+
+`generate-manifest.sh` supports generating the Antrea manifest with different
+Antrea configurations. Run `./hack/generate-manifest.sh --help` to see the
+supported config options.
+
+As part of code development, if you want to run the tests with local changes,
+then make the code changes on the local repo and
+[build the image](../../CONTRIBUTING.md#building-and-testing-your-change).
+You can load the new image into the kind cluster using the command below:
+
+```bash
+kind load docker-image projects.registry.vmware.com/antrea/antrea-ubuntu:latest --name <kind_cluster_name>
+```
 
 By default, if a test case fails, we write some useful debug information to a
 temporary directory on disk. This information includes the detailed description
@@ -150,47 +232,6 @@ enabled explicitly.
 `./infra/vagrant/push_antrea.sh --prometheus`
 * To run the Prometheus tests within the e2e suite, use:
 `go test -v antrea.io/antrea/test/e2e --prometheus`
-
-## Running the e2e tests on a Kind cluster
-
-The simplest way is to run the following command:
-
-```bash
-./ci/kind/test-e2e-kind.sh [options]
-```
-
-It will set up a two worker Node Kind cluster to run the e2e tests, and destroy
-the cluster after the tests stop (succeed or fail). `kubectl` needs to be
-present in your `PATH` to set up the test cluster. For more information on the
-usage of this script and the options, run:
-
-```bash
-./ci/kind/test-e2e-kind.sh --help
-```
-
-You can also run the e2e tests with an existing Kind cluster. Refer to this
-[document](/docs/kind.md) for instructions on how to create a Kind cluster and
-use Antrea as the CNI. You need at least one control-plane Node and one worker
-Node. Before running the Go e2e tests, you will also need to copy the Antrea
-manifest to the control-plane Docker container:
-
-```bash
-./hack/generate-manifest.sh --kind | docker exec -i kind-control-plane dd of=/root/antrea.yml
-go test -v antrea.io/antrea/test/e2e -provider=kind
-```
-
-`generate-manifest.sh` supports generating the Antrea manifest with different
-Antrea configurations. Run `./hack/generate-manifest.sh --help` to see the
-supported config options.
-
-As part of code development, if you want to run the tests with local changes,
-then make the code changes on the local repo and
-[build the image](../../CONTRIBUTING.md#building-and-testing-your-change).
-You can load the new image into the kind cluster using the command below:
-
-```bash
-kind load docker-image projects.registry.vmware.com/antrea/antrea-ubuntu:latest --name <kind_cluster_name>
-```
 
 ## Running the performance test
 

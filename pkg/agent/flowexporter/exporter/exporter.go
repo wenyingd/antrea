@@ -23,18 +23,35 @@ import (
 	ipfixentities "github.com/vmware/go-ipfix/pkg/entities"
 	"github.com/vmware/go-ipfix/pkg/exporter"
 	ipfixregistry "github.com/vmware/go-ipfix/pkg/registry"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/controller/noderoute"
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/flowexporter/connections"
-	"antrea.io/antrea/pkg/agent/flowexporter/flowrecords"
+	"antrea.io/antrea/pkg/agent/flowexporter/priorityqueue"
+	"antrea.io/antrea/pkg/agent/interfacestore"
+	"antrea.io/antrea/pkg/agent/metrics"
 	"antrea.io/antrea/pkg/agent/openflow"
+	"antrea.io/antrea/pkg/agent/proxy"
 	"antrea.io/antrea/pkg/ipfix"
+	"antrea.io/antrea/pkg/ovs/ovsconfig"
+	"antrea.io/antrea/pkg/querier"
 	"antrea.io/antrea/pkg/util/env"
 )
+
+// When initializing flowExporter, a slice is allocated with a fixed size to
+// store expired connections. The advantage is every time we export, the connection
+// store lock will only be held for a bounded time. The disadvantages are: 1. the
+// constant is independent of actual number of expired connections 2. when the
+// number of expired connections goes over the constant, the export can not be
+// finished in a single round. It could be delayed by conntrack connections polling
+// routine, which also acquires the connection store lock. The possible solution
+// can be taking a fraction of the size of connection store to approximate the
+// number of expired connections, while having a min and a max to handle edge cases,
+// e.g. min(50 + 0.1 * connectionStore.size(), 200)
+const maxConnsToExport = 64
 
 var (
 	IANAInfoElementsCommon = []string{
@@ -84,27 +101,27 @@ var (
 	AntreaInfoElementsIPv6 = append(antreaInfoElementsCommon, []string{"destinationClusterIPv6"}...)
 )
 
-type flowExporter struct {
-	conntrackConnStore  *connections.ConntrackConnectionStore
-	flowRecords         *flowrecords.FlowRecords
-	denyConnStore       *connections.DenyConnectionStore
-	process             ipfix.IPFIXExportingProcess
-	elementsListv4      []ipfixentities.InfoElementWithValue
-	elementsListv6      []ipfixentities.InfoElementWithValue
-	ipfixSet            ipfixentities.Set
-	numDataSetsSent     uint64 // used for unit tests.
-	templateIDv4        uint16
-	templateIDv6        uint16
-	registry            ipfix.IPFIXRegistry
-	v4Enabled           bool
-	v6Enabled           bool
-	exporterInput       exporter.ExporterInput
-	activeFlowTimeout   time.Duration
-	idleFlowTimeout     time.Duration
-	k8sClient           kubernetes.Interface
-	nodeRouteController *noderoute.Controller
-	isNetworkPolicyOnly bool
-	nodeName            string
+type FlowExporter struct {
+	conntrackConnStore     *connections.ConntrackConnectionStore
+	denyConnStore          *connections.DenyConnectionStore
+	process                ipfix.IPFIXExportingProcess
+	elementsListv4         []ipfixentities.InfoElementWithValue
+	elementsListv6         []ipfixentities.InfoElementWithValue
+	ipfixSet               ipfixentities.Set
+	numDataSetsSent        uint64 // used for unit tests.
+	templateIDv4           uint16
+	templateIDv6           uint16
+	registry               ipfix.IPFIXRegistry
+	v4Enabled              bool
+	v6Enabled              bool
+	exporterInput          exporter.ExporterInput
+	k8sClient              kubernetes.Interface
+	nodeRouteController    *noderoute.Controller
+	isNetworkPolicyOnly    bool
+	nodeName               string
+	conntrackPriorityQueue *priorityqueue.ExpirePriorityQueue
+	denyPriorityQueue      *priorityqueue.ExpirePriorityQueue
+	expiredConns           []flowexporter.Connection
 }
 
 func genObservationID(nodeName string) uint32 {
@@ -126,15 +143,13 @@ func prepareExporterInputArgs(collectorAddr, collectorProto, nodeName string) ex
 		expInput.IsEncrypted = false
 		expInput.CollectorProtocol = collectorProto
 	}
-	expInput.PathMTU = 0
 
 	return expInput
 }
 
-func NewFlowExporter(connStore *connections.ConntrackConnectionStore, records *flowrecords.FlowRecords, denyConnStore *connections.DenyConnectionStore,
-	collectorAddr string, collectorProto string, activeFlowTimeout time.Duration, idleFlowTimeout time.Duration,
-	v4Enabled bool, v6Enabled bool, k8sClient kubernetes.Interface,
-	nodeRouteController *noderoute.Controller, isNetworkPolicyOnly bool) (*flowExporter, error) {
+func NewFlowExporter(ifaceStore interfacestore.InterfaceStore, proxier proxy.Proxier, k8sClient kubernetes.Interface, nodeRouteController *noderoute.Controller,
+	trafficEncapMode config.TrafficEncapModeType, nodeConfig *config.NodeConfig, v4Enabled, v6Enabled bool, serviceCIDRNet, serviceCIDRNetv6 *net.IPNet,
+	ovsDatapathType ovsconfig.OVSDatapathType, proxyEnabled bool, npQuerier querier.AgentNetworkPolicyInfoQuerier, o *flowexporter.FlowExporterOptions) (*FlowExporter, error) {
 	// Initialize IPFIX registry
 	registry := ipfix.NewIPFIXRegistry()
 	registry.LoadRegistry()
@@ -144,63 +159,105 @@ func NewFlowExporter(connStore *connections.ConntrackConnectionStore, records *f
 	if err != nil {
 		return nil, err
 	}
-	expInput := prepareExporterInputArgs(collectorAddr, collectorProto, nodeName)
+	expInput := prepareExporterInputArgs(o.FlowCollectorAddr, o.FlowCollectorProto, nodeName)
 
-	return &flowExporter{
-		conntrackConnStore:  connStore,
-		flowRecords:         records,
-		denyConnStore:       denyConnStore,
-		registry:            registry,
-		v4Enabled:           v4Enabled,
-		v6Enabled:           v6Enabled,
-		exporterInput:       expInput,
-		activeFlowTimeout:   activeFlowTimeout,
-		idleFlowTimeout:     idleFlowTimeout,
-		ipfixSet:            ipfixentities.NewSet(false),
-		k8sClient:           k8sClient,
-		nodeRouteController: nodeRouteController,
-		isNetworkPolicyOnly: isNetworkPolicyOnly,
-		nodeName:            nodeName,
+	connTrackDumper := connections.InitializeConnTrackDumper(nodeConfig, serviceCIDRNet, serviceCIDRNetv6, ovsDatapathType, proxyEnabled)
+	denyConnStore := connections.NewDenyConnectionStore(ifaceStore, proxier, o)
+	conntrackConnStore := connections.NewConntrackConnectionStore(connTrackDumper, v4Enabled, v6Enabled, npQuerier, ifaceStore, proxier, o)
+
+	return &FlowExporter{
+		conntrackConnStore:     conntrackConnStore,
+		denyConnStore:          denyConnStore,
+		registry:               registry,
+		v4Enabled:              v4Enabled,
+		v6Enabled:              v6Enabled,
+		exporterInput:          expInput,
+		ipfixSet:               ipfixentities.NewSet(false),
+		k8sClient:              k8sClient,
+		nodeRouteController:    nodeRouteController,
+		isNetworkPolicyOnly:    trafficEncapMode.IsNetworkPolicyOnly(),
+		nodeName:               nodeName,
+		conntrackPriorityQueue: conntrackConnStore.GetPriorityQueue(),
+		denyPriorityQueue:      denyConnStore.GetPriorityQueue(),
+		expiredConns:           make([]flowexporter.Connection, 0, maxConnsToExport*2),
 	}, nil
 }
 
-// Run calls Export function periodically to check if flow records need to be exported
-// based on active flow and idle flow timeouts.
-func (exp *flowExporter) Run(stopCh <-chan struct{}) {
-	go wait.Until(exp.Export, time.Second, stopCh)
-
-	<-stopCh
+func (exp *FlowExporter) GetDenyConnStore() *connections.DenyConnectionStore {
+	return exp.denyConnStore
 }
 
-func (exp *flowExporter) Export() {
-	// Retry to connect to IPFIX collector if the exporting process gets reset
-	if exp.process == nil {
-		err := exp.initFlowExporter()
-		if err != nil {
-			klog.Errorf("Error when initializing flow exporter: %v", err)
-			// There could be other errors while initializing flow exporter other than connecting to IPFIX collector,
-			// therefore closing the connection and resetting the process.
+func (exp *FlowExporter) Run(stopCh <-chan struct{}) {
+	// Start the goroutine to periodically delete stale deny connections.
+	go exp.denyConnStore.RunPeriodicDeletion(stopCh)
+
+	// Start the goroutine to poll conntrack flows.
+	go exp.conntrackConnStore.Run(stopCh)
+
+	defaultTimeout := exp.conntrackPriorityQueue.ActiveFlowTimeout
+	expireTimer := time.NewTimer(defaultTimeout)
+	for {
+		select {
+		case <-stopCh:
 			if exp.process != nil {
 				exp.process.CloseConnToCollector()
-				exp.process = nil
 			}
+			expireTimer.Stop()
 			return
+		case <-expireTimer.C:
+			if exp.process == nil {
+				err := exp.initFlowExporter()
+				if err != nil {
+					klog.ErrorS(err, "Error when initializing flow exporter")
+					// There could be other errors while initializing flow exporter
+					// other than connecting to IPFIX collector, therefore closing
+					// the connection and resetting the process.
+					if exp.process != nil {
+						exp.process.CloseConnToCollector()
+						exp.process = nil
+					}
+					// Initializing flow exporter fails, will retry in next cycle.
+					expireTimer.Reset(defaultTimeout)
+					continue
+				}
+			}
+			// Pop out the expired connections from the conntrack priority queue
+			// and the deny priority queue, and send the data records.
+			nextExpireTime, err := exp.sendFlowRecords()
+			if err != nil {
+				klog.ErrorS(err, "Error when sending expired flow records")
+				// If there is an error when sending flow records because of intermittent
+				// connectivity, we reset the connection to IPFIX collector and retry
+				// in the next export cycle to reinitialize the connection and send flow records.
+				exp.process.CloseConnToCollector()
+				exp.process = nil
+				expireTimer.Reset(defaultTimeout)
+				continue
+			}
+			expireTimer.Reset(nextExpireTime)
 		}
 	}
-	// Send flow records to IPFIX collector.
-	err := exp.sendFlowRecords()
-	if err != nil {
-		klog.Errorf("Error when sending flow records: %v", err)
-		// If there is an error when sending flow records because of intermittent connectivity, we reset the connection
-		// to IPFIX collector and retry in the next export cycle to reinitialize the connection and send flow records.
-		exp.process.CloseConnToCollector()
-		exp.process = nil
-		return
-	}
-	klog.V(2).Infof("Successfully exported IPFIX flow records")
 }
 
-func (exp *flowExporter) initFlowExporter() error {
+func (exp *FlowExporter) sendFlowRecords() (time.Duration, error) {
+	currTime := time.Now()
+	var expireTime1, expireTime2 time.Duration
+	exp.expiredConns, expireTime1 = exp.conntrackConnStore.GetExpiredConns(exp.expiredConns, currTime, maxConnsToExport)
+	exp.expiredConns, expireTime2 = exp.denyConnStore.GetExpiredConns(exp.expiredConns, currTime, maxConnsToExport)
+	// Select the shorter time out among two connection stores to do the next round of export.
+	nextExpireTime := getMinTime(expireTime1, expireTime2)
+	for i := range exp.expiredConns {
+		if err := exp.exportConn(&exp.expiredConns[i]); err != nil {
+			klog.ErrorS(err, "Error when sending expired flow record")
+			return nextExpireTime, err
+		}
+	}
+	// Clear expiredConns slice after exporting. Allocated memory is kept.
+	exp.expiredConns = exp.expiredConns[:0]
+	return nextExpireTime, nil
+}
+
+func (exp *FlowExporter) initFlowExporter() error {
 	var err error
 	if exp.exporterInput.IsEncrypted {
 		// if CA certificate, client certificate and key do not exist during initialization,
@@ -236,7 +293,6 @@ func (exp *flowExporter) initFlowExporter() error {
 		if err != nil {
 			return err
 		}
-
 		klog.V(2).Infof("Initialized flow exporter for IPv4 flow records and sent %d bytes size of template record", sentBytes)
 	}
 	if exp.v6Enabled {
@@ -248,108 +304,11 @@ func (exp *flowExporter) initFlowExporter() error {
 		}
 		klog.V(2).Infof("Initialized flow exporter for IPv6 flow records and sent %d bytes size of template record", sentBytes)
 	}
+	metrics.ReconnectionsToFlowCollector.Inc()
 	return nil
 }
 
-func (exp *flowExporter) sendFlowRecords() error {
-	updateOrSendFlowRecord := func(key flowexporter.ConnectionKey, record flowexporter.FlowRecord) error {
-		recordNeedsSending := false
-		// We do not check for any timeout as the connection is still idle since
-		// the idleFlowTimeout was triggered.
-		if !record.IsActive {
-			return nil
-		}
-		// Send a flow record if the conditions for either timeout
-		// (activeFlowTimeout or idleFlowTimeout) are met. A flow is considered
-		// to be idle if its packet counts haven't changed since the last export.
-		if time.Since(record.LastExportTime) >= exp.idleFlowTimeout {
-			if ((record.Conn.OriginalPackets <= record.PrevPackets) && (record.Conn.ReversePackets <= record.PrevReversePackets)) || flowexporter.IsConnectionDying(&record.Conn) {
-				// Idle flow timeout
-				record.IsActive = false
-				recordNeedsSending = true
-			}
-		}
-		if time.Since(record.LastExportTime) >= exp.activeFlowTimeout {
-			// Active flow timeout
-			recordNeedsSending = true
-		}
-		if recordNeedsSending {
-			exp.ipfixSet.ResetSet()
-			if record.IsIPv6 {
-				if err := exp.ipfixSet.PrepareSet(ipfixentities.Data, exp.templateIDv6); err != nil {
-					return err
-				}
-				// TODO: more records per data set will be supported when go-ipfix supports size check when adding records
-				if err := exp.addRecordToSet(record); err != nil {
-					return err
-				}
-				if _, err := exp.sendDataSet(); err != nil {
-					return err
-				}
-			} else {
-				if err := exp.ipfixSet.PrepareSet(ipfixentities.Data, exp.templateIDv4); err != nil {
-					return err
-				}
-				// TODO: more records per data set will be supported when go-ipfix supports size check when adding records
-				if err := exp.addRecordToSet(record); err != nil {
-					return err
-				}
-				if _, err := exp.sendDataSet(); err != nil {
-					return err
-				}
-			}
-			exp.numDataSetsSent = exp.numDataSetsSent + 1
-
-			if flowexporter.IsConnectionDying(&record.Conn) {
-				// If the connection is in dying state or connection is not in conntrack
-				// table, we set the DyingAndDoneExport flag to do the deletion later.
-				record.DyingAndDoneExport = true
-				exp.flowRecords.AddFlowRecordWithoutLock(&key, &record)
-			} else {
-				exp.flowRecords.ValidateAndUpdateStats(key, record)
-			}
-			klog.V(4).InfoS("Record sent successfully", "flowKey", key, "record", record)
-		}
-		return nil
-	}
-	err := exp.flowRecords.ForAllFlowRecordsDo(updateOrSendFlowRecord)
-	if err != nil {
-		return fmt.Errorf("error when iterating flow records: %v", err)
-	}
-
-	exportDenyConn := func(connKey flowexporter.ConnectionKey, conn *flowexporter.Connection) error {
-		if conn.DeltaPackets > 0 && time.Since(conn.LastExportTime) >= exp.activeFlowTimeout {
-			if err := exp.addDenyConnToSet(conn, ipfixregistry.ActiveTimeoutReason); err != nil {
-				return err
-			}
-			if _, err := exp.sendDataSet(); err != nil {
-				return err
-			}
-			exp.numDataSetsSent = exp.numDataSetsSent + 1
-			klog.V(4).InfoS("Record for deny connection sent successfully", "flowKey", connKey, "connection", conn)
-			exp.denyConnStore.ResetConnStatsWithoutLock(connKey)
-		}
-		if time.Since(conn.LastExportTime) >= exp.idleFlowTimeout {
-			if err := exp.addDenyConnToSet(conn, ipfixregistry.IdleTimeoutReason); err != nil {
-				return err
-			}
-			if _, err := exp.sendDataSet(); err != nil {
-				return err
-			}
-			exp.numDataSetsSent = exp.numDataSetsSent + 1
-			klog.V(4).InfoS("Record for deny connection sent successfully", "flowKey", connKey, "connection", conn)
-			exp.denyConnStore.DeleteConnWithoutLock(connKey)
-		}
-		return nil
-	}
-	err = exp.denyConnStore.ForAllConnectionsDo(exportDenyConn)
-	if err != nil {
-		return fmt.Errorf("error when iterating deny connections: %v", err)
-	}
-	return nil
-}
-
-func (exp *flowExporter) sendTemplateSet(isIPv6 bool) (int, error) {
+func (exp *FlowExporter) sendTemplateSet(isIPv6 bool) (int, error) {
 	elements := make([]ipfixentities.InfoElementWithValue, 0)
 
 	IANAInfoElements := IANAInfoElementsIPv4
@@ -365,7 +324,10 @@ func (exp *flowExporter) sendTemplateSet(isIPv6 bool) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
 		}
-		ieWithValue := ipfixentities.NewInfoElementWithValue(element, nil)
+		ieWithValue, err := ipfixentities.DecodeAndCreateInfoElementWithValue(element, nil)
+		if err != nil {
+			return 0, fmt.Errorf("error when creating information element: %v", err)
+		}
 		elements = append(elements, ieWithValue)
 	}
 	for _, ie := range IANAReverseInfoElements {
@@ -373,7 +335,10 @@ func (exp *flowExporter) sendTemplateSet(isIPv6 bool) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
 		}
-		ieWithValue := ipfixentities.NewInfoElementWithValue(element, nil)
+		ieWithValue, err := ipfixentities.DecodeAndCreateInfoElementWithValue(element, nil)
+		if err != nil {
+			return 0, fmt.Errorf("error when creating information element: %v", err)
+		}
 		elements = append(elements, ieWithValue)
 	}
 	for _, ie := range AntreaInfoElements {
@@ -381,7 +346,10 @@ func (exp *flowExporter) sendTemplateSet(isIPv6 bool) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("information element %s is not present in Antrea registry", ie)
 		}
-		ieWithValue := ipfixentities.NewInfoElementWithValue(element, nil)
+		ieWithValue, err := ipfixentities.DecodeAndCreateInfoElementWithValue(element, nil)
+		if err != nil {
+			return 0, fmt.Errorf("error when creating information element: %v", err)
+		}
 		elements = append(elements, ieWithValue)
 	}
 	exp.ipfixSet.ResetSet()
@@ -407,162 +375,7 @@ func (exp *flowExporter) sendTemplateSet(isIPv6 bool) (int, error) {
 	return sentBytes, nil
 }
 
-func (exp *flowExporter) addRecordToSet(record flowexporter.FlowRecord) error {
-	// Iterate over all infoElements in the list
-	eL := exp.elementsListv4
-	if record.IsIPv6 {
-		eL = exp.elementsListv6
-	}
-	for i := range eL {
-		ie := &eL[i]
-		switch ieName := ie.Element.Name; ieName {
-		case "flowStartSeconds":
-			ie.Value = uint32(record.Conn.StartTime.Unix())
-		case "flowEndSeconds":
-			ie.Value = uint32(record.Conn.StopTime.Unix())
-		case "flowEndReason":
-			if flowexporter.IsConnectionDying(&record.Conn) {
-				ie.Value = ipfixregistry.EndOfFlowReason
-			} else if record.IsActive {
-				ie.Value = ipfixregistry.ActiveTimeoutReason
-			} else {
-				ie.Value = ipfixregistry.IdleTimeoutReason
-			}
-		case "sourceIPv4Address":
-			ie.Value = record.Conn.FlowKey.SourceAddress
-		case "destinationIPv4Address":
-			ie.Value = record.Conn.FlowKey.DestinationAddress
-		case "sourceIPv6Address":
-			ie.Value = record.Conn.FlowKey.SourceAddress
-		case "destinationIPv6Address":
-			ie.Value = record.Conn.FlowKey.DestinationAddress
-		case "sourceTransportPort":
-			ie.Value = record.Conn.FlowKey.SourcePort
-		case "destinationTransportPort":
-			ie.Value = record.Conn.FlowKey.DestinationPort
-		case "protocolIdentifier":
-			ie.Value = record.Conn.FlowKey.Protocol
-		case "packetTotalCount":
-			ie.Value = record.Conn.OriginalPackets
-		case "octetTotalCount":
-			ie.Value = record.Conn.OriginalBytes
-		case "packetDeltaCount":
-			deltaPkts := int64(record.Conn.OriginalPackets) - int64(record.PrevPackets)
-			if deltaPkts < 0 {
-				klog.Warningf("Packet delta count for connection should not be negative: %d", deltaPkts)
-			}
-			ie.Value = uint64(deltaPkts)
-		case "octetDeltaCount":
-			deltaBytes := int64(record.Conn.OriginalBytes) - int64(record.PrevBytes)
-			if deltaBytes < 0 {
-				klog.Warningf("Byte delta count for connection should not be negative: %d", deltaBytes)
-			}
-			ie.Value = uint64(deltaBytes)
-		case "reversePacketTotalCount":
-			ie.Value = record.Conn.ReversePackets
-		case "reverseOctetTotalCount":
-			ie.Value = record.Conn.ReverseBytes
-		case "reversePacketDeltaCount":
-			deltaPkts := int64(record.Conn.ReversePackets) - int64(record.PrevReversePackets)
-			if deltaPkts < 0 {
-				klog.Warningf("Packet delta count for connection should not be negative: %d", deltaPkts)
-			}
-			ie.Value = uint64(deltaPkts)
-		case "reverseOctetDeltaCount":
-			deltaBytes := int64(record.Conn.ReverseBytes) - int64(record.PrevReverseBytes)
-			if deltaBytes < 0 {
-				klog.Warningf("Byte delta count for connection should not be negative: %d", deltaBytes)
-			}
-			ie.Value = uint64(deltaBytes)
-		case "sourcePodNamespace":
-			ie.Value = record.Conn.SourcePodNamespace
-		case "sourcePodName":
-			ie.Value = record.Conn.SourcePodName
-		case "sourceNodeName":
-			// Add nodeName for only local pods whose pod names are resolved.
-			if record.Conn.SourcePodName != "" {
-				ie.Value = exp.nodeName
-			} else {
-				ie.Value = ""
-			}
-		case "destinationPodNamespace":
-			ie.Value = record.Conn.DestinationPodNamespace
-		case "destinationPodName":
-			ie.Value = record.Conn.DestinationPodName
-		case "destinationNodeName":
-			// Add nodeName for only local pods whose pod names are resolved.
-			if record.Conn.DestinationPodName != "" {
-				ie.Value = exp.nodeName
-			} else {
-				ie.Value = ""
-			}
-		case "destinationClusterIPv4":
-			if record.Conn.DestinationServicePortName != "" {
-				ie.Value = record.Conn.DestinationServiceAddress
-			} else {
-				// Sending dummy IP as IPFIX collector expects constant length of data for IP field.
-				// We should probably think of better approach as this involves customization of IPFIX collector to ignore
-				// this dummy IP address.
-				ie.Value = net.IP{0, 0, 0, 0}
-			}
-		case "destinationClusterIPv6":
-			if record.Conn.DestinationServicePortName != "" {
-				ie.Value = record.Conn.DestinationServiceAddress
-			} else {
-				// Same as destinationClusterIPv4.
-				ie.Value = net.ParseIP("::")
-			}
-		case "destinationServicePort":
-			if record.Conn.DestinationServicePortName != "" {
-				ie.Value = record.Conn.DestinationServicePort
-			} else {
-				ie.Value = uint16(0)
-			}
-		case "destinationServicePortName":
-			if record.Conn.DestinationServicePortName != "" {
-				ie.Value = record.Conn.DestinationServicePortName
-			} else {
-				ie.Value = ""
-			}
-		case "ingressNetworkPolicyName":
-			ie.Value = record.Conn.IngressNetworkPolicyName
-		case "ingressNetworkPolicyNamespace":
-			ie.Value = record.Conn.IngressNetworkPolicyNamespace
-		case "ingressNetworkPolicyType":
-			ie.Value = record.Conn.IngressNetworkPolicyType
-		case "ingressNetworkPolicyRuleName":
-			ie.Value = record.Conn.IngressNetworkPolicyRuleName
-		case "ingressNetworkPolicyRuleAction":
-			ie.Value = record.Conn.IngressNetworkPolicyRuleAction
-		case "egressNetworkPolicyName":
-			ie.Value = record.Conn.EgressNetworkPolicyName
-		case "egressNetworkPolicyNamespace":
-			ie.Value = record.Conn.EgressNetworkPolicyNamespace
-		case "egressNetworkPolicyType":
-			ie.Value = record.Conn.EgressNetworkPolicyType
-		case "egressNetworkPolicyRuleName":
-			ie.Value = record.Conn.EgressNetworkPolicyRuleName
-		case "egressNetworkPolicyRuleAction":
-			ie.Value = record.Conn.EgressNetworkPolicyRuleAction
-		case "tcpState":
-			ie.Value = record.Conn.TCPState
-		case "flowType":
-			ie.Value = exp.findFlowType(record.Conn)
-		}
-	}
-
-	templateID := exp.templateIDv4
-	if record.IsIPv6 {
-		templateID = exp.templateIDv6
-	}
-	err := exp.ipfixSet.AddRecord(eL, templateID)
-	if err != nil {
-		return fmt.Errorf("error in adding record to data set: %v", err)
-	}
-	return nil
-}
-
-func (exp *flowExporter) addDenyConnToSet(conn *flowexporter.Connection, flowEndReason uint8) error {
+func (exp *FlowExporter) addConnToSet(conn *flowexporter.Connection) error {
 	exp.ipfixSet.ResetSet()
 
 	eL := exp.elementsListv4
@@ -576,107 +389,138 @@ func (exp *flowExporter) addDenyConnToSet(conn *flowexporter.Connection, flowEnd
 	}
 	// Iterate over all infoElements in the list
 	for i := range eL {
-		ie := &eL[i]
-		switch ieName := ie.Element.Name; ieName {
+		ie := eL[i]
+		switch ieName := ie.GetInfoElement().Name; ieName {
 		case "flowStartSeconds":
-			ie.Value = uint32(conn.StartTime.Unix())
+			ie.SetUnsigned32Value(uint32(conn.StartTime.Unix()))
 		case "flowEndSeconds":
-			ie.Value = uint32(conn.StopTime.Unix())
+			ie.SetUnsigned32Value(uint32(conn.StopTime.Unix()))
 		case "flowEndReason":
-			ie.Value = flowEndReason
+			if flowexporter.IsConnectionDying(conn) {
+				ie.SetUnsigned8Value(ipfixregistry.EndOfFlowReason)
+			} else if conn.IsActive {
+				ie.SetUnsigned8Value(ipfixregistry.ActiveTimeoutReason)
+			} else {
+				ie.SetUnsigned8Value(ipfixregistry.IdleTimeoutReason)
+			}
 		case "sourceIPv4Address":
-			ie.Value = conn.FlowKey.SourceAddress
+			ie.SetIPAddressValue(conn.FlowKey.SourceAddress)
 		case "destinationIPv4Address":
-			ie.Value = conn.FlowKey.DestinationAddress
+			ie.SetIPAddressValue(conn.FlowKey.DestinationAddress)
 		case "sourceIPv6Address":
-			ie.Value = conn.FlowKey.SourceAddress
+			ie.SetIPAddressValue(conn.FlowKey.SourceAddress)
 		case "destinationIPv6Address":
-			ie.Value = conn.FlowKey.DestinationAddress
+			ie.SetIPAddressValue(conn.FlowKey.DestinationAddress)
 		case "sourceTransportPort":
-			ie.Value = conn.FlowKey.SourcePort
+			ie.SetUnsigned16Value(conn.FlowKey.SourcePort)
 		case "destinationTransportPort":
-			ie.Value = conn.FlowKey.DestinationPort
+			ie.SetUnsigned16Value(conn.FlowKey.DestinationPort)
 		case "protocolIdentifier":
-			ie.Value = conn.FlowKey.Protocol
+			ie.SetUnsigned8Value(conn.FlowKey.Protocol)
 		case "packetTotalCount":
-			ie.Value = conn.OriginalPackets
+			ie.SetUnsigned64Value(conn.OriginalPackets)
 		case "octetTotalCount":
-			ie.Value = conn.OriginalBytes
+			ie.SetUnsigned64Value(conn.OriginalBytes)
 		case "packetDeltaCount":
-			ie.Value = conn.DeltaPackets
+			deltaPkts := int64(conn.OriginalPackets) - int64(conn.PrevPackets)
+			if deltaPkts < 0 {
+				klog.InfoS("Packet delta count for connection should not be negative", "packet delta count", deltaPkts)
+			}
+			ie.SetUnsigned64Value(uint64(deltaPkts))
 		case "octetDeltaCount":
-			ie.Value = conn.DeltaBytes
-		case "reversePacketTotalCount", "reverseOctetTotalCount", "reversePacketDeltaCount", "reverseOctetDeltaCount":
-			ie.Value = uint64(0)
+			deltaBytes := int64(conn.OriginalBytes) - int64(conn.PrevBytes)
+			if deltaBytes < 0 {
+				klog.InfoS("Byte delta count for connection should not be negative", "byte delta count", deltaBytes)
+			}
+			ie.SetUnsigned64Value(uint64(deltaBytes))
+		case "reversePacketTotalCount":
+			ie.SetUnsigned64Value(conn.ReversePackets)
+		case "reverseOctetTotalCount":
+			ie.SetUnsigned64Value(conn.ReverseBytes)
+		case "reversePacketDeltaCount":
+			deltaPkts := int64(conn.ReversePackets) - int64(conn.PrevReversePackets)
+			if deltaPkts < 0 {
+				klog.InfoS("Packet delta count for connection should not be negative", "packet delta count", deltaPkts)
+			}
+			ie.SetUnsigned64Value(uint64(deltaPkts))
+		case "reverseOctetDeltaCount":
+			deltaBytes := int64(conn.ReverseBytes) - int64(conn.PrevReverseBytes)
+			if deltaBytes < 0 {
+				klog.InfoS("Byte delta count for connection should not be negative", "byte delta count", deltaBytes)
+			}
+			ie.SetUnsigned64Value(uint64(deltaBytes))
 		case "sourcePodNamespace":
-			ie.Value = conn.SourcePodNamespace
+			ie.SetStringValue(conn.SourcePodNamespace)
 		case "sourcePodName":
-			ie.Value = conn.SourcePodName
+			ie.SetStringValue(conn.SourcePodName)
 		case "sourceNodeName":
 			// Add nodeName for only local pods whose pod names are resolved.
 			if conn.SourcePodName != "" {
-				ie.Value = exp.nodeName
+				ie.SetStringValue(exp.nodeName)
 			} else {
-				ie.Value = ""
+				ie.SetStringValue("")
 			}
 		case "destinationPodNamespace":
-			ie.Value = conn.DestinationPodNamespace
+			ie.SetStringValue(conn.DestinationPodNamespace)
 		case "destinationPodName":
-			ie.Value = conn.DestinationPodName
+			ie.SetStringValue(conn.DestinationPodName)
 		case "destinationNodeName":
 			// Add nodeName for only local pods whose pod names are resolved.
 			if conn.DestinationPodName != "" {
-				ie.Value = exp.nodeName
+				ie.SetStringValue(exp.nodeName)
 			} else {
-				ie.Value = ""
+				ie.SetStringValue("")
 			}
 		case "destinationClusterIPv4":
 			if conn.DestinationServicePortName != "" {
-				ie.Value = conn.DestinationServiceAddress
+				ie.SetIPAddressValue(conn.DestinationServiceAddress)
 			} else {
-				ie.Value = net.IP{0, 0, 0, 0}
+				// Sending dummy IP as IPFIX collector expects constant length of data for IP field.
+				// We should probably think of better approach as this involves customization of IPFIX collector to ignore
+				// this dummy IP address.
+				ie.SetIPAddressValue(net.IP{0, 0, 0, 0})
 			}
 		case "destinationClusterIPv6":
 			if conn.DestinationServicePortName != "" {
-				ie.Value = conn.DestinationServiceAddress
+				ie.SetIPAddressValue(conn.DestinationServiceAddress)
 			} else {
-				ie.Value = net.ParseIP("::")
+				// Same as destinationClusterIPv4.
+				ie.SetIPAddressValue(net.ParseIP("::"))
 			}
 		case "destinationServicePort":
 			if conn.DestinationServicePortName != "" {
-				ie.Value = conn.DestinationServicePort
+				ie.SetUnsigned16Value(conn.DestinationServicePort)
 			} else {
-				ie.Value = uint16(0)
+				ie.SetUnsigned16Value(uint16(0))
 			}
 		case "destinationServicePortName":
-			ie.Value = conn.DestinationServicePortName
+			ie.SetStringValue(conn.DestinationServicePortName)
 		case "ingressNetworkPolicyName":
-			ie.Value = conn.IngressNetworkPolicyName
+			ie.SetStringValue(conn.IngressNetworkPolicyName)
 		case "ingressNetworkPolicyNamespace":
-			ie.Value = conn.IngressNetworkPolicyNamespace
+			ie.SetStringValue(conn.IngressNetworkPolicyNamespace)
 		case "ingressNetworkPolicyType":
-			ie.Value = conn.IngressNetworkPolicyType
+			ie.SetUnsigned8Value(conn.IngressNetworkPolicyType)
 		case "ingressNetworkPolicyRuleName":
-			ie.Value = conn.IngressNetworkPolicyRuleName
+			ie.SetStringValue(conn.IngressNetworkPolicyRuleName)
 		case "ingressNetworkPolicyRuleAction":
-			ie.Value = conn.IngressNetworkPolicyRuleAction
+			ie.SetUnsigned8Value(conn.IngressNetworkPolicyRuleAction)
 		case "egressNetworkPolicyName":
-			ie.Value = conn.EgressNetworkPolicyName
+			ie.SetStringValue(conn.EgressNetworkPolicyName)
 		case "egressNetworkPolicyNamespace":
-			ie.Value = conn.EgressNetworkPolicyNamespace
+			ie.SetStringValue(conn.EgressNetworkPolicyNamespace)
 		case "egressNetworkPolicyType":
-			ie.Value = conn.EgressNetworkPolicyType
+			ie.SetUnsigned8Value(conn.EgressNetworkPolicyType)
 		case "egressNetworkPolicyRuleName":
-			ie.Value = conn.EgressNetworkPolicyRuleName
+			ie.SetStringValue(conn.EgressNetworkPolicyRuleName)
 		case "egressNetworkPolicyRuleAction":
-			ie.Value = conn.EgressNetworkPolicyRuleAction
+			ie.SetUnsigned8Value(conn.EgressNetworkPolicyRuleAction)
 		case "tcpState":
-			ie.Value = ""
+			ie.SetStringValue(conn.TCPState)
 		case "flowType":
-			ie.Value = exp.findFlowType(*conn)
+			ie.SetUnsigned8Value(exp.findFlowType(*conn))
 		}
 	}
-
 	err := exp.ipfixSet.AddRecord(eL, templateID)
 	if err != nil {
 		return fmt.Errorf("error in adding record to data set: %v", err)
@@ -684,16 +528,16 @@ func (exp *flowExporter) addDenyConnToSet(conn *flowexporter.Connection, flowEnd
 	return nil
 }
 
-func (exp *flowExporter) sendDataSet() (int, error) {
+func (exp *FlowExporter) sendDataSet() (int, error) {
 	sentBytes, err := exp.process.SendSet(exp.ipfixSet)
 	if err != nil {
 		return 0, fmt.Errorf("error when sending data set: %v", err)
 	}
-	klog.V(4).Infof("Data set sent successfully. Bytes sent: %d", sentBytes)
+	klog.V(4).InfoS("Data set sent successfully", "Bytes sent", sentBytes)
 	return sentBytes, nil
 }
 
-func (exp *flowExporter) findFlowType(conn flowexporter.Connection) uint8 {
+func (exp *FlowExporter) findFlowType(conn flowexporter.Connection) uint8 {
 	// TODO: support Pod-To-External flows in network policy only mode.
 	if exp.isNetworkPolicyOnly {
 		if conn.SourcePodName == "" || conn.DestinationPodName == "" {
@@ -707,7 +551,7 @@ func (exp *flowExporter) findFlowType(conn flowexporter.Connection) uint8 {
 		return 0
 	}
 	if exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.SourceAddress) {
-		if conn.Mark == openflow.ServiceCTMark.GetValue() || exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.DestinationAddress) {
+		if conn.Mark&openflow.ServiceCTMark.GetRange().ToNXRange().ToUint32Mask() == openflow.ServiceCTMark.GetValue() || exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.DestinationAddress) {
 			if conn.SourcePodName == "" || conn.DestinationPodName == "" {
 				return ipfixregistry.FlowTypeInterNode
 			}
@@ -718,4 +562,24 @@ func (exp *flowExporter) findFlowType(conn flowexporter.Connection) uint8 {
 	// We do not support External-To-Pod flows for now.
 	klog.Warningf("Source IP: %s doesn't exist in PodCIDRs", conn.FlowKey.SourceAddress.String())
 	return 0
+}
+
+func (exp *FlowExporter) exportConn(conn *flowexporter.Connection) error {
+	// TODO: more records per data set will be supported when go-ipfix supports size check when adding records
+	if err := exp.addConnToSet(conn); err != nil {
+		return err
+	}
+	if _, err := exp.sendDataSet(); err != nil {
+		return err
+	}
+	exp.numDataSetsSent = exp.numDataSetsSent + 1
+	klog.V(4).InfoS("Record for connection sent successfully", "flowKey", conn.FlowKey, "connection", conn)
+	return nil
+}
+
+func getMinTime(t1, t2 time.Duration) time.Duration {
+	if t1 <= t2 {
+		return t1
+	}
+	return t2
 }

@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Copyright 2022 Antrea Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 set -eo pipefail
 set -xv
@@ -13,17 +27,16 @@ JOB_NAME=job.batch/cyclonus
 
 
 kind create cluster --config "$KIND_CONFIG"
-kind get nodes | xargs "$ROOT_DIR"/hack/kind-fix-networking.sh
 kind load docker-image projects.registry.vmware.com/antrea/antrea-ubuntu:latest
 
 # pre-load cyclonus image
 docker pull mfenwick100/cyclonus:v0.4.7
 kind load docker-image mfenwick100/cyclonus:v0.4.7
 # pre-load agnhost image
-docker pull k8s.gcr.io/e2e-test-images/agnhost:2.21
-kind load docker-image k8s.gcr.io/e2e-test-images/agnhost:2.21
+docker pull k8s.gcr.io/e2e-test-images/agnhost:2.29
+kind load docker-image k8s.gcr.io/e2e-test-images/agnhost:2.29
 
-"$ROOT_DIR"/hack/generate-manifest.sh --kind --tun "vxlan" | kubectl apply -f -
+"$ROOT_DIR"/hack/generate-manifest.sh | kubectl apply -f -
 
 
 kubectl create clusterrolebinding cyclonus --clusterrole=cluster-admin --serviceaccount=kube-system:cyclonus

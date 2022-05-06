@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -35,6 +36,7 @@ import (
 	"antrea.io/antrea/pkg/client/clientset/versioned"
 	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha1"
 	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1alpha1"
+	"antrea.io/antrea/pkg/util/k8s"
 )
 
 const (
@@ -75,6 +77,7 @@ var (
 type Controller struct {
 	client                 versioned.Interface
 	podInformer            coreinformers.PodInformer
+	podLister              corelisters.PodLister
 	traceflowInformer      crdinformers.TraceflowInformer
 	traceflowLister        crdlisters.TraceflowLister
 	traceflowListerSynced  cache.InformerSynced
@@ -88,6 +91,7 @@ func NewTraceflowController(client versioned.Interface, podInformer coreinformer
 	c := &Controller{
 		client:                client,
 		podInformer:           podInformer,
+		podLister:             podInformer.Lister(),
 		traceflowInformer:     traceflowInformer,
 		traceflowLister:       traceflowInformer.Lister(),
 		traceflowListerSynced: traceflowInformer.Informer().HasSynced,
@@ -265,6 +269,10 @@ func (c *Controller) syncTraceflow(traceflowName string) error {
 }
 
 func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
+	if err := c.validateTraceflow(tf); err != nil {
+		klog.ErrorS(err, "Invalid Traceflow request", "request", tf)
+		return c.updateTraceflowStatus(tf, crdv1alpha1.Failed, fmt.Sprintf("Invalid Traceflow request, err: %+v", err), 0)
+	}
 	// Allocate data plane tag.
 	tag, err := c.allocateTag(tf.Name)
 	if err != nil {
@@ -281,6 +289,7 @@ func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
 	return err
 }
 
+// checkTraceflowStatus is only called for Traceflows in the Running phase
 func (c *Controller) checkTraceflowStatus(tf *crdv1alpha1.Traceflow) error {
 	succeeded := false
 	if tf.Spec.LiveTraffic && tf.Spec.DroppedOnly {
@@ -330,12 +339,22 @@ func (c *Controller) checkTraceflowStatus(tf *crdv1alpha1.Traceflow) error {
 		return c.updateTraceflowStatus(tf, crdv1alpha1.Succeeded, "", 0)
 	}
 
-	timeoutSeconds := int64(tf.Spec.Timeout)
-	if timeoutSeconds == 0 {
-		timeoutSeconds = int64(defaultTimeoutDuration.Seconds())
+	var timeout time.Duration
+	if tf.Spec.Timeout != 0 {
+		timeout = time.Duration(tf.Spec.Timeout) * time.Second
+	} else {
+		timeout = defaultTimeoutDuration
 	}
-	// CreationTimestamp is of second accuracy.
-	if time.Now().Unix() > tf.CreationTimestamp.Unix()+timeoutSeconds {
+	var startTime time.Time
+	if tf.Status.StartTime != nil {
+		startTime = tf.Status.StartTime.Time
+	} else {
+		// a fallback that should not be needed in general since we are in the Running phase
+		// when upgrading Antrea from a previous version, the field would be empty
+		klog.V(2).InfoS("StartTime field in Traceflow Status should not be empty", "Traceflow", klog.KObj(tf))
+		startTime = tf.CreationTimestamp.Time
+	}
+	if startTime.Add(timeout).Before(time.Now()) {
 		c.deallocateTagForTF(tf)
 		return c.updateTraceflowStatus(tf, crdv1alpha1.Failed, traceflowTimeout, 0)
 	}
@@ -345,6 +364,10 @@ func (c *Controller) checkTraceflowStatus(tf *crdv1alpha1.Traceflow) error {
 func (c *Controller) updateTraceflowStatus(tf *crdv1alpha1.Traceflow, phase crdv1alpha1.TraceflowPhase, reason string, dataPlaneTag uint8) error {
 	update := tf.DeepCopy()
 	update.Status.Phase = phase
+	if phase == crdv1alpha1.Running && tf.Status.StartTime == nil {
+		t := metav1.Now()
+		update.Status.StartTime = &t
+	}
 	update.Status.DataplaneTag = dataPlaneTag
 	if reason != "" {
 		update.Status.Reason = reason
@@ -409,4 +432,20 @@ func (c *Controller) deallocateTag(name string, tag uint8) {
 			delete(c.runningTraceflows, tag)
 		}
 	}
+}
+
+func (c *Controller) validateTraceflow(tf *crdv1alpha1.Traceflow) error {
+	if !tf.Spec.LiveTraffic {
+		srcPod, err := c.podLister.Pods(tf.Spec.Source.Namespace).Get(tf.Spec.Source.Pod)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				err = fmt.Errorf("requested source Pod %s not found", k8s.NamespacedName(tf.Spec.Source.Namespace, tf.Spec.Source.Pod))
+			}
+			return err
+		}
+		if srcPod.Spec.HostNetwork {
+			return fmt.Errorf("using hostNetwork Pod as source in non-live-traffic Traceflow is not supported")
+		}
+	}
+	return nil
 }

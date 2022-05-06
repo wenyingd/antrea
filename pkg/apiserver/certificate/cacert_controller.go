@@ -34,42 +34,11 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 
-	"antrea.io/antrea/pkg/features"
 	"antrea.io/antrea/pkg/util/env"
 )
 
 const (
-	// Name of the ConfigMap that will hold the CA certificate that signs the TLS
-	// certificate of antrea-controller.
-	CAConfigMapName = "antrea-ca"
-	CAConfigMapKey  = "ca.crt"
-)
-
-var (
-	// apiServiceNames contains all the APIServices backed by antrea-controller.
-	apiServiceNames = []string{
-		"v1alpha1.stats.antrea.tanzu.vmware.com",
-		"v1beta2.controlplane.antrea.tanzu.vmware.com",
-		"v1beta1.system.antrea.tanzu.vmware.com",
-		"v1alpha1.stats.antrea.io",
-		"v1beta1.system.antrea.io",
-		"v1beta2.controlplane.antrea.io",
-	}
-	// validatingWebhooks contains all the ValidatingWebhookConfigurations backed by antrea-controller.
-	validatingWebhooks = []string{
-		"crdvalidator.antrea.tanzu.vmware.com",
-		"crdvalidator.antrea.io",
-	}
-	mutationWebhooks = []string{
-		"crdmutator.antrea.tanzu.vmware.com",
-		"crdmutator.antrea.io",
-	}
-	optionalMutationWebhooks = []string{
-		"labelsmutator.antrea.io",
-	}
-	crdsWithConversionWebhooks = []string{
-		"clustergroups.crd.antrea.io",
-	}
+	CAConfigMapKey = "ca.crt"
 )
 
 // CACertController is responsible for taking the CA certificate from the
@@ -85,6 +54,7 @@ type CACertController struct {
 	client             kubernetes.Interface
 	aggregatorClient   clientset.Interface
 	apiExtensionClient apiextensionclientset.Interface
+	caConfig           *CAConfig
 }
 
 var _ dynamiccertificates.Listener = &CACertController{}
@@ -97,6 +67,7 @@ func newCACertController(caContentProvider dynamiccertificates.CAContentProvider
 	client kubernetes.Interface,
 	aggregatorClient clientset.Interface,
 	apiExtensionClient apiextensionclientset.Interface,
+	caConfig *CAConfig,
 ) *CACertController {
 	c := &CACertController{
 		caContentProvider:  caContentProvider,
@@ -104,6 +75,7 @@ func newCACertController(caContentProvider dynamiccertificates.CAContentProvider
 		client:             client,
 		aggregatorClient:   aggregatorClient,
 		apiExtensionClient: apiExtensionClient,
+		caConfig:           caConfig,
 	}
 	if notifier, ok := caContentProvider.(dynamiccertificates.Notifier); ok {
 		notifier.AddListener(c)
@@ -145,24 +117,23 @@ func (c *CACertController) syncCACert() error {
 		return err
 	}
 
-	if features.DefaultFeatureGate.Enabled(features.AntreaPolicy) {
-		if err := c.syncMutatingWebhooks(caCert); err != nil {
-			return err
-		}
-		if err := c.syncValidatingWebhooks(caCert); err != nil {
-			return err
-		}
-		if err := c.syncConversionWebhooks(caCert); err != nil {
-			return err
-		}
+	if err := c.syncMutatingWebhooks(caCert); err != nil {
+		return err
 	}
+	if err := c.syncValidatingWebhooks(caCert); err != nil {
+		return err
+	}
+	if err := c.syncConversionWebhooks(caCert); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // syncMutatingWebhooks updates the CABundle of the MutatingWebhookConfiguration backed by antrea-controller.
 func (c *CACertController) syncMutatingWebhooks(caCert []byte) error {
 	klog.Info("Syncing CA certificate with MutatingWebhookConfigurations")
-	for _, name := range mutationWebhooks {
+	for _, name := range c.caConfig.MutationWebhooks {
 		mWebhook, err := c.client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("error getting MutatingWebhookConfiguration %s: %v", name, err)
@@ -172,7 +143,7 @@ func (c *CACertController) syncMutatingWebhooks(caCert []byte) error {
 			return fmt.Errorf("error updating antrea CA cert of MutatingWebhookConfiguration %s: %v", name, err)
 		}
 	}
-	for _, name := range optionalMutationWebhooks {
+	for _, name := range c.caConfig.OptionalMutationWebhooks {
 		mWebhook, err := c.client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
@@ -191,7 +162,7 @@ func (c *CACertController) syncMutatingWebhooks(caCert []byte) error {
 
 func (c *CACertController) syncConversionWebhooks(caCert []byte) error {
 	klog.Info("Syncing CA certificate with CRDs that have conversion webhooks")
-	for _, name := range crdsWithConversionWebhooks {
+	for _, name := range c.caConfig.CRDsWithConversionWebhooks {
 		crdDef, err := c.apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("error getting CRD definition for %s: %v", name, err)
@@ -234,7 +205,7 @@ func (c *CACertController) patchWebhookWithCACert(webhookCfg *v1.MutatingWebhook
 // syncValidatingWebhooks updates the CABundle of the ValidatingWebhookConfiguration backed by antrea-controller.
 func (c *CACertController) syncValidatingWebhooks(caCert []byte) error {
 	klog.Info("Syncing CA certificate with ValidatingWebhookConfigurations")
-	for _, name := range validatingWebhooks {
+	for _, name := range c.caConfig.ValidatingWebhooks {
 		updated := false
 		vWebhook, err := c.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
@@ -260,7 +231,7 @@ func (c *CACertController) syncValidatingWebhooks(caCert []byte) error {
 // syncAPIServices updates the CABundle of the APIServices backed by antrea-controller.
 func (c *CACertController) syncAPIServices(caCert []byte) error {
 	klog.Info("Syncing CA certificate with APIServices")
-	for _, name := range apiServiceNames {
+	for _, name := range c.caConfig.APIServiceNames {
 		apiService, err := c.aggregatorClient.ApiregistrationV1().APIServices().Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("error getting APIService %s: %v", name, err)
@@ -281,16 +252,16 @@ func (c *CACertController) syncConfigMap(caCert []byte) error {
 	klog.Info("Syncing CA certificate with ConfigMap")
 	// Use the Antrea Pod Namespace for the CA cert ConfigMap.
 	caConfigMapNamespace := GetCAConfigMapNamespace()
-	caConfigMap, err := c.client.CoreV1().ConfigMaps(caConfigMapNamespace).Get(context.TODO(), CAConfigMapName, metav1.GetOptions{})
+	caConfigMap, err := c.client.CoreV1().ConfigMaps(caConfigMapNamespace).Get(context.TODO(), c.caConfig.CAConfigMapName, metav1.GetOptions{})
 	exists := true
 	if err != nil {
 		if !errors.IsNotFound(err) {
-			return fmt.Errorf("error getting ConfigMap %s: %v", CAConfigMapName, err)
+			return fmt.Errorf("error getting ConfigMap %s: %v", c.caConfig.CAConfigMapName, err)
 		}
 		exists = false
 		caConfigMap = &corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      CAConfigMapName,
+				Name:      c.caConfig.CAConfigMapName,
 				Namespace: caConfigMapNamespace,
 				Labels: map[string]string{
 					"app": "antrea",
@@ -306,11 +277,11 @@ func (c *CACertController) syncConfigMap(caCert []byte) error {
 	}
 	if exists {
 		if _, err := c.client.CoreV1().ConfigMaps(caConfigMapNamespace).Update(context.TODO(), caConfigMap, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("error updating ConfigMap %s: %v", CAConfigMapName, err)
+			return fmt.Errorf("error updating ConfigMap %s: %v", c.caConfig.CAConfigMapName, err)
 		}
 	} else {
 		if _, err := c.client.CoreV1().ConfigMaps(caConfigMapNamespace).Create(context.TODO(), caConfigMap, metav1.CreateOptions{}); err != nil {
-			return fmt.Errorf("error creating ConfigMap %s: %v", CAConfigMapName, err)
+			return fmt.Errorf("error creating ConfigMap %s: %v", c.caConfig.CAConfigMapName, err)
 		}
 	}
 	return nil

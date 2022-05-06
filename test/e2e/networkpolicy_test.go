@@ -84,10 +84,10 @@ func TestNetworkPolicy(t *testing.T) {
 }
 
 func testNetworkPolicyStats(t *testing.T, data *TestData) {
-	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace)
+	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 
 	// When using the userspace OVS datapath and tunneling,
@@ -95,11 +95,11 @@ func testNetworkPolicyStats(t *testing.T, data *TestData) {
 	// So we need to  "warm-up" the tunnel.
 	if clusterInfo.podV4NetworkCIDR != "" {
 		cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv4.String())}
-		data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+		data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 	}
 	if clusterInfo.podV6NetworkCIDR != "" {
 		cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv6.String())}
-		data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+		data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 	}
 
 	np1, err := data.createNetworkPolicy("test-networkpolicy-ingress", &networkingv1.NetworkPolicySpec{
@@ -155,11 +155,11 @@ func testNetworkPolicyStats(t *testing.T, data *TestData) {
 		go func() {
 			if clusterInfo.podV4NetworkCIDR != "" {
 				cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv4.String())}
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 			}
 			if clusterInfo.podV6NetworkCIDR != "" {
 				cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv6.String())}
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 			}
 			wg.Done()
 		}()
@@ -227,21 +227,21 @@ func (data *TestData) setupDifferentNamedPorts(t *testing.T) (checkFn func(), cl
 	}()
 
 	server0Port := int32(80)
-	server0Name, server0IPs, cleanupFunc := createAndWaitForPod(t, data, func(name string, ns string, nodeName string) error {
+	server0Name, server0IPs, cleanupFunc := createAndWaitForPod(t, data, func(name string, ns string, nodeName string, hostNetwork bool) error {
 		return data.createServerPod(name, testNamespace, "http", server0Port, false, false)
-	}, "test-server-", "", testNamespace)
+	}, "test-server-", "", testNamespace, false)
 	cleanupFuncs = append(cleanupFuncs, cleanupFunc)
 
 	server1Port := int32(8080)
-	server1Name, server1IPs, cleanupFunc := createAndWaitForPod(t, data, func(name string, ns string, nodeName string) error {
+	server1Name, server1IPs, cleanupFunc := createAndWaitForPod(t, data, func(name string, ns string, nodeName string, hostNetwork bool) error {
 		return data.createServerPod(name, testNamespace, "http", server1Port, false, false)
-	}, "test-server-", "", testNamespace)
+	}, "test-server-", "", testNamespace, false)
 	cleanupFuncs = append(cleanupFuncs, cleanupFunc)
 
-	client0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	client0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	cleanupFuncs = append(cleanupFuncs, cleanupFunc)
 
-	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	cleanupFuncs = append(cleanupFuncs, cleanupFunc)
 
 	preCheckFunc := func(server0IP, server1IP string) {
@@ -262,14 +262,6 @@ func (data *TestData) setupDifferentNamedPorts(t *testing.T) (checkFn func(), cl
 
 	if clusterInfo.podV6NetworkCIDR != "" {
 		preCheckFunc(server0IPs.ipv6.String(), server1IPs.ipv6.String())
-	}
-
-	if testOptions.providerName == "kind" {
-		// Due to netdev datapath bug, sometimes datapath flows are not flushed after new openflows that change the
-		// actions are installed, causing client1 to still be able to connect to the servers after creating a policy
-		// that disallows it. The test waits for 10 seconds so that the datapath flows will expire.
-		// See https://github.com/antrea-io/antrea/issues/1608 for more details.
-		time.Sleep(10 * time.Second)
 	}
 
 	// Create NetworkPolicy rule.
@@ -341,26 +333,26 @@ func (data *TestData) setupDifferentNamedPorts(t *testing.T) (checkFn func(), cl
 
 // testDefaultDenyIngressPolicy performs additional validation to the upstream test for deny-all policy:
 // 1. The traffic initiated from the host network namespace cannot be dropped.
-// 2. The traffic initiated externally that access the Pod via NodePort service can be dropped (skipped if provider is kind).
+// 2. The traffic initiated externally that access the Pod via NodePort service can be dropped.
 func testDefaultDenyIngressPolicy(t *testing.T, data *TestData) {
 	serverNode := workerNodeName(1)
 	serverNodeIP := workerNodeIP(1)
 	serverPort := int32(80)
-	_, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", serverNode, testNamespace)
+	_, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", serverNode, testNamespace, false)
 	defer cleanupFunc()
 
-	service, err := data.createService("nginx", serverPort, serverPort, map[string]string{"app": "nginx"}, false, corev1.ServiceTypeNodePort, nil)
+	service, err := data.CreateService("nginx", testNamespace, serverPort, serverPort, map[string]string{"app": "nginx"}, false, false, corev1.ServiceTypeNodePort, nil)
 	if err != nil {
 		t.Fatalf("Error when creating nginx NodePort service: %v", err)
 	}
-	defer data.deleteService(service.Name)
+	defer data.deleteService(service.Namespace, service.Name)
 
 	// client1 is a host network Pod and is on the same node as the server Pod, simulating kubelet probe traffic.
-	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createHostNetworkBusyboxPodOnNode, "test-hostnetwork-client-can-connect-", serverNode, testNamespace)
+	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-hostnetwork-client-can-connect-", serverNode, testNamespace, true)
 	defer cleanupFunc()
 
 	// client2 is a host network Pod and is on a different node from the server Pod, accessing the server Pod via the NodePort service.
-	client2Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createHostNetworkBusyboxPodOnNode, "test-hostnetwork-client-cannot-connect-", controlPlaneNodeName(), testNamespace)
+	client2Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-hostnetwork-client-cannot-connect-", controlPlaneNodeName(), testNamespace, true)
 	defer cleanupFunc()
 
 	spec := &networkingv1.NetworkPolicySpec{
@@ -394,25 +386,21 @@ func testDefaultDenyIngressPolicy(t *testing.T, data *TestData) {
 		npCheck(client1Name, serverIPs.ipv6.String(), serverPort, false)
 	}
 
-	if testOptions.providerName == "kind" {
-		t.Logf("Skipped testing NodePort traffic for TestDefaultDenyIngressPolicy because pkt_mark is not properly supported on OVS netdev datapath")
-	} else {
-		if clusterInfo.podV4NetworkCIDR != "" {
-			npCheck(client2Name, serverIPs.ipv4.String(), serverPort, true)
-		}
-		if clusterInfo.podV6NetworkCIDR != "" {
-			npCheck(client2Name, serverIPs.ipv6.String(), serverPort, true)
-		}
-		npCheck(client2Name, serverNodeIP, service.Spec.Ports[0].NodePort, true)
+	if clusterInfo.podV4NetworkCIDR != "" {
+		npCheck(client2Name, serverIPs.ipv4.String(), serverPort, true)
 	}
+	if clusterInfo.podV6NetworkCIDR != "" {
+		npCheck(client2Name, serverIPs.ipv6.String(), serverPort, true)
+	}
+	npCheck(client2Name, serverNodeIP, service.Spec.Ports[0].NodePort, true)
 }
 
 func testDefaultDenyEgressPolicy(t *testing.T, data *TestData) {
 	serverPort := int32(80)
-	_, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace)
+	_, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 
 	preCheckFunc := func(serverIP string) {
@@ -463,12 +451,12 @@ func testDefaultDenyEgressPolicy(t *testing.T, data *TestData) {
 // https://github.com/kubernetes/kubernetes/pull/93583
 func testEgressToServerInCIDRBlock(t *testing.T, data *TestData) {
 	workerNode := workerNodeName(1)
-	serverAName, serverAIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace)
+	serverAName, serverAIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace, false)
 	defer cleanupFunc()
-	serverBName, serverBIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace)
+	serverBName, serverBIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 
-	clientA, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace)
+	clientA, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 	var serverCIDR string
 	var serverAIP, serverBIP string
@@ -530,10 +518,10 @@ func testEgressToServerInCIDRBlock(t *testing.T, data *TestData) {
 // https://github.com/kubernetes/kubernetes/pull/93583
 func testEgressToServerInCIDRBlockWithException(t *testing.T, data *TestData) {
 	workerNode := workerNodeName(1)
-	serverAName, serverAIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace)
+	serverAName, serverAIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 
-	clientA, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace)
+	clientA, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 	var serverAAllowCIDR string
 	var serverAExceptList []string
@@ -595,16 +583,16 @@ func testNetworkPolicyResyncAfterRestart(t *testing.T, data *TestData) {
 		t.Fatalf("Error when getting antrea-agent pod name: %v", err)
 	}
 
-	server0Name, server0IPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace)
+	server0Name, server0IPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 
-	server1Name, server1IPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace)
+	server1Name, server1IPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 
-	client0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace)
+	client0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 
-	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace)
+	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", workerNode, testNamespace, false)
 	defer cleanupFunc()
 
 	netpol0, err := data.createNetworkPolicy("test-isolate-server0", &networkingv1.NetworkPolicySpec{
@@ -703,13 +691,13 @@ func testNetworkPolicyResyncAfterRestart(t *testing.T, data *TestData) {
 
 func testIngressPolicyWithoutPortNumber(t *testing.T, data *TestData) {
 	serverPort := int32(80)
-	_, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace)
+	_, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	client0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	client0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	client1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 
 	preCheckFunc := func(serverIP string) {
@@ -811,7 +799,7 @@ func testIngressPolicyWithEndPort(t *testing.T, data *TestData) {
 	// createAgnhostPodOnNodeWithMultiPort creates a Pod in the test namespace with
 	// multiple agnhost containers listening on multiple ports.
 	// The Pod will be scheduled on the specified Node (if nodeName is not empty).
-	createAgnhostPodOnNodeWithMultiPort := func(name string, ns string, nodeName string) error {
+	createAgnhostPodOnNodeWithMultiPort := func(name string, ns string, nodeName string, hostNetwork bool) error {
 		var containers []corev1.Container
 		for _, port := range serverPorts {
 			containers = append(containers, makeContainerSpec(port))
@@ -819,7 +807,7 @@ func testIngressPolicyWithEndPort(t *testing.T, data *TestData) {
 		podSpec := corev1.PodSpec{
 			Containers:    containers,
 			RestartPolicy: corev1.RestartPolicyNever,
-			HostNetwork:   false,
+			HostNetwork:   hostNetwork,
 		}
 		if nodeName != "" {
 			podSpec.NodeSelector = map[string]string{
@@ -847,10 +835,10 @@ func testIngressPolicyWithEndPort(t *testing.T, data *TestData) {
 		return nil
 	}
 
-	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, createAgnhostPodOnNodeWithMultiPort, "test-server-", "", testNamespace)
+	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, createAgnhostPodOnNodeWithMultiPort, "test-server-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 
 	preCheck := func(serverIP string) {
@@ -932,13 +920,29 @@ func testIngressPolicyWithEndPort(t *testing.T, data *TestData) {
 	}
 }
 
-func createAndWaitForPod(t *testing.T, data *TestData, createFunc func(name string, ns string, nodeName string) error, namePrefix string, nodeName string, ns string) (string, *PodIPs, func()) {
+func createAndWaitForPod(t *testing.T, data *TestData, createFunc func(name string, ns string, nodeName string, hostNetwork bool) error, namePrefix string, nodeName string, ns string, hostNetwork bool) (string, *PodIPs, func()) {
 	name := randName(namePrefix)
-	if err := createFunc(name, ns, nodeName); err != nil {
+	if err := createFunc(name, ns, nodeName, hostNetwork); err != nil {
 		t.Fatalf("Error when creating busybox test Pod: %v", err)
 	}
 	cleanupFunc := func() {
-		deletePodWrapper(t, data, name)
+		deletePodWrapper(t, data, ns, name)
+	}
+	podIP, err := data.podWaitForIPs(defaultTimeout, name, ns)
+	if err != nil {
+		cleanupFunc()
+		t.Fatalf("Error when waiting for IP for Pod '%s': %v", name, err)
+	}
+	return name, podIP, cleanupFunc
+}
+
+func createAndWaitForPodWithServiceAccount(t *testing.T, data *TestData, createFunc func(name string, ns string, nodeName string, hostNetwork bool, serviceAccountName string) error, namePrefix string, nodeName string, ns string, hostNetwork bool, serviceAccountName string) (string, *PodIPs, func()) {
+	name := randName(namePrefix)
+	if err := createFunc(name, ns, nodeName, hostNetwork, serviceAccountName); err != nil {
+		t.Fatalf("Error when creating busybox test Pod: %v", err)
+	}
+	cleanupFunc := func() {
+		deletePodWrapper(t, data, testNamespace, name)
 	}
 	podIP, err := data.podWaitForIPs(defaultTimeout, name, ns)
 	if err != nil {
@@ -953,7 +957,7 @@ func createAndWaitForPodWithLabels(t *testing.T, data *TestData, createFunc func
 		t.Fatalf("Error when creating busybox test Pod: %v", err)
 	}
 	cleanupFunc := func() error {
-		if err := data.deletePod(ns, name); err != nil {
+		if err := data.DeletePod(ns, name); err != nil {
 			return fmt.Errorf("error when deleting Pod: %v", err)
 		}
 		return nil

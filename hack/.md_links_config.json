@@ -23,6 +23,12 @@
         },
         {
             "pattern": "https://nssm.cc/"
+        },
+        {
+            "pattern": "https://www.virtualbox.org/*"
+        },
+        {
+            "pattern": "https://avinetworks.com/*"
         }
     ],
     "retryOn429": false,

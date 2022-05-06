@@ -27,10 +27,20 @@ coverage:
         target: auto
         flags:
           - e2e-tests
+      antrea-kind-e2e-tests:
+        target: auto
+        flags:
+          - kind-e2e-tests
+      antrea-mc-integration-tests:
+        target: auto
+        flags:
+          - mc-integration-tests
 
 ignore:
   - "**/testing/mock_*.go"
+  - "**/mock_*.go"
   - "**/*generate*.go"
   - "pkg/client"
+  - "**/pkg/client"
   - "**/*.pb.go"
   - "third_party"

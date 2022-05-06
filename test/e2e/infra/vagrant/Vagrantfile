@@ -35,9 +35,20 @@ end
 NODE_NETWORK_V4_PREFIX = "192.168.77."
 NODE_NETWORK_V6_PREFIX = "fd3b:fcf5:3e92:d732::"
 
-MEMORY = 2048
 if ENV['K8S_NODE_LARGE'] == "true"
   MEMORY = 4096
+else
+  MEMORY = 2048
+end
+
+KUBE_PROXY_MODE = ENV['KUBE_PROXY_MODE'] || "iptables"
+if KUBE_PROXY_MODE == "iptables" || KUBE_PROXY_MODE == "none"
+  KUBE_PROXY_IPVS_STRICT_ARP = false
+elsif KUBE_PROXY_MODE == "ipvs"
+  # For now, we always enable strict ARP, which is required to use MetalLB
+  KUBE_PROXY_IPVS_STRICT_ARP = true
+else
+  raise "KUBE_PROXY_MODE env variable should be one of 'iptables', 'ipvs' or 'none'"
 end
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
@@ -58,23 +69,17 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     node.vm.hostname = "k8s-node-control-plane"
     node_ipv4 = NODE_NETWORK_V4_PREFIX + "100"
     node_ipv6 = NODE_NETWORK_V6_PREFIX + "100"
-    if MODE != "v6"
-      node.vm.network "private_network", ip: node_ipv4
-    end
-    if MODE != "v4"
-      node.vm.network "private_network", ip: node_ipv6
-    end
+    # The network will be configured using the Ansible playbook
+    # Despite setting auto_config to false, it seems that it is necessary to
+    # provide an IP address, even though it won't be used.
+    # See https://github.com/hashicorp/vagrant/issues/7583
+    node.vm.network "private_network", ip: node_ipv4, auto_config: false
     if MODE == "v4"
       node_ip = node_ipv4
     elsif MODE == "v6"
       node_ip = node_ipv6
     else
       node_ip = node_ipv4 + "," + node_ipv6
-    end
-
-    if MODE != "v4"
-      # add a fake default route for IPv6: required for ClusterIP traffic even though it is DNATed
-      node.vm.provision :shell, privileged: true, inline: "ip -6 route replace default via " + NODE_NETWORK_V6_PREFIX + "200"
     end
 
     node.vm.provision :ansible  do |ansible|
@@ -84,12 +89,16 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         # Ubuntu bionic does not ship with python2
         ansible_python_interpreter:"/usr/bin/python3",
         node_ip: node_ip,
+        node_ipv4: (MODE != "v6") ? node_ipv4 : "",
+        node_ipv6: (MODE != "v4") ? node_ipv6 : "",
         node_name: "k8s-node-control-plane",
         k8s_pod_network_cidr: K8S_POD_NETWORK_CIDR,
         k8s_service_network_cidr: K8S_SERVICE_NETWORK_CIDR,
         k8s_api_server_ip: (MODE == "v6") ? node_ipv6 : node_ipv4,
         k8s_ip_family: MODE,
         k8s_antrea_gw_ip: K8S_NODE_CP_GW_IP,
+        kube_proxy_mode: KUBE_PROXY_MODE,
+        kube_proxy_ipvs_strict_arp: KUBE_PROXY_IPVS_STRICT_ARP,
       }
     end
   end
@@ -99,12 +108,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
       node.vm.hostname = "k8s-node-worker-#{node_id}"
       node_ipv4 = NODE_NETWORK_V4_PREFIX + "#{100 + node_id}"
       node_ipv6 = NODE_NETWORK_V6_PREFIX + "#{100 + node_id}"
-      if MODE != "v6"
-        node.vm.network "private_network", ip: node_ipv4
-      end
-      if MODE != "v4"
-        node.vm.network "private_network", ip: node_ipv6
-      end
+      node.vm.network "private_network", ip: node_ipv4, auto_config: false
       if MODE == "v4"
         node_ip = node_ipv4
       elsif MODE == "v6"
@@ -113,17 +117,14 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
         node_ip = node_ipv4 + "," + node_ipv6
       end
 
-      if MODE != "v4"
-        # add a fake default route for IPv6: required for ClusterIP traffic even though it is DNATed
-        node.vm.provision :shell, privileged: true, inline: "ip -6 route replace default via " + NODE_NETWORK_V6_PREFIX + "200"
-      end
-
       node.vm.provision :ansible do |ansible|
         ansible.playbook = "playbook/k8s.yml"
         ansible.groups = groups
         ansible.extra_vars = {
           ansible_python_interpreter:"/usr/bin/python3",
           node_ip: node_ip,
+          node_ipv4: (MODE != "v6") ? node_ipv4 : "",
+          node_ipv6: (MODE != "v4") ? node_ipv6 : "",
           node_name: "k8s-node-worker-#{node_id}",
         }
       end

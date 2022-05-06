@@ -14,6 +14,7 @@
 package ovsctl
 
 import (
+	"fmt"
 	"net"
 	"os/exec"
 )
@@ -35,6 +36,9 @@ type TracingRequest struct {
 type OVSCtlClient interface {
 	// DumpFlows returns flows of the bridge.
 	DumpFlows(args ...string) ([]string, error)
+	// DumpFlowsWithoutTableNames returns flows of the bridge, and the table is shown as uint8 value in the result.
+	// This function is only used in test.
+	DumpFlowsWithoutTableNames(args ...string) ([]string, error)
 	// DumpMatchedFlows returns the flow which exactly matches the matchStr.
 	DumpMatchedFlow(matchStr string) (string, error)
 	// DumpTableFlows returns all flows in the table.
@@ -56,6 +60,8 @@ type OVSCtlClient interface {
 	RunAppctlCmd(cmd string, needsBridge bool, args ...string) ([]byte, *ExecError)
 	// GetDPFeatures executes "ovs-appctl dpif/show-dp-features" to check supported DP features.
 	GetDPFeatures() (map[DPFeature]bool, error)
+	// DeleteDPInterface executes "vs-appctl dpctl/del-if ovs-system $name" to delete DP interface.
+	DeleteDPInterface(name string) error
 }
 
 type BadRequestError string
@@ -84,4 +90,8 @@ func (e *ExecError) GetErrorOutput() string {
 		return ""
 	}
 	return e.errorOutput
+}
+
+func (e *ExecError) Error() string {
+	return fmt.Sprintf("ExecError: %v, output: %s", e.error, e.errorOutput)
 }

@@ -33,6 +33,7 @@ import (
 	"antrea.io/antrea/pkg/apis"
 	"antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/pkg/apiserver/certificate"
+	controllerconfig "antrea.io/antrea/pkg/config/controller"
 )
 
 const (
@@ -63,15 +64,16 @@ func TestSecurity(t *testing.T) {
 func testUserProvidedCert(t *testing.T, data *TestData) {
 	// Re-configure antrea-controller to use user-provided cert.
 	// Note antrea-controller must be restarted to take effect.
-	cc := []configChange{
-		{"selfSignedCert", "false", false},
+	cc := func(config *controllerconfig.ControllerConfig) {
+		config.SelfSignedCert = new(bool)
+		*config.SelfSignedCert = false
 	}
 	if err := data.mutateAntreaConfigMap(cc, nil, false, false); err != nil {
 		t.Fatalf("Failed to update ConfigMap: %v", err)
 	}
 
 	genCertKeyAndUpdateSecret := func() ([]byte, []byte) {
-		certPem, keyPem, _ := certutil.GenerateSelfSignedCertKey("antrea", nil, certificate.GetAntreaServerNames())
+		certPem, keyPem, _ := certutil.GenerateSelfSignedCertKey("antrea", nil, certificate.GetAntreaServerNames(certificate.AntreaServiceName))
 		secret, err := data.clientset.CoreV1().Secrets(tlsSecretNamespace).Get(context.TODO(), tlsSecretName, metav1.GetOptions{})
 		exists := true
 		if err != nil {
@@ -152,7 +154,7 @@ func testCert(t *testing.T, data *TestData, expectedCABundle string, restartPod 
 
 	var caBundle string
 	if err := wait.Poll(2*time.Second, timeout, func() (bool, error) {
-		configMap, err := data.clientset.CoreV1().ConfigMaps(caConfigMapNamespace).Get(context.TODO(), certificate.CAConfigMapName, metav1.GetOptions{})
+		configMap, err := data.clientset.CoreV1().ConfigMaps(caConfigMapNamespace).Get(context.TODO(), certificate.AntreaCAConfigMapName, metav1.GetOptions{})
 		if err != nil {
 			return false, fmt.Errorf("cannot get ConfigMap antrea-ca")
 		}
@@ -170,14 +172,13 @@ func testCert(t *testing.T, data *TestData, expectedCABundle string, restartPod 
 		clientConfig := restclient.Config{
 			TLSClientConfig: restclient.TLSClientConfig{
 				Insecure:   false,
-				ServerName: certificate.GetAntreaServerNames()[0],
+				ServerName: certificate.GetAntreaServerNames(certificate.AntreaServiceName)[0],
 				CAData:     []byte(caBundle),
 			},
 		}
 		trans, _ := restclient.TransportFor(&clientConfig)
 		hc := &http.Client{Transport: trans, Timeout: 5 * time.Second}
-		var reqURL string
-		reqURL = fmt.Sprintf("https://%s/readyz", net.JoinHostPort(antreaController.Status.PodIP, fmt.Sprint(apis.AntreaControllerAPIPort)))
+		reqURL := fmt.Sprintf("https://%s/readyz", net.JoinHostPort(antreaController.Status.PodIP, fmt.Sprint(apis.AntreaControllerAPIPort)))
 		req, err := http.NewRequest("GET", reqURL, nil)
 		if err != nil {
 			return false, err

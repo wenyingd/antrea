@@ -35,10 +35,11 @@ var (
 	}
 )
 
-// toAntreaServicesForCRD converts a slice of v1alpha1.NetworkPolicyPort
-// objects to a slice of Antrea Service objects. A bool is returned along with
-// the Service objects to indicate whether any named port exists.
-func toAntreaServicesForCRD(npPorts []v1alpha1.NetworkPolicyPort) ([]controlplane.Service, bool) {
+// toAntreaServicesForCRD converts a slice of v1alpha1.NetworkPolicyPort objects
+// and a slice of v1alpha1.NetworkPolicyProtocol objects to a slice of Antrea
+// Service objects. A bool is returned along with the Service objects to indicate
+// whether any named port exists.
+func toAntreaServicesForCRD(npPorts []v1alpha1.NetworkPolicyPort, npProtocols []v1alpha1.NetworkPolicyProtocol) ([]controlplane.Service, bool) {
 	var antreaServices []controlplane.Service
 	var namedPortExists bool
 	for _, npPort := range npPorts {
@@ -50,6 +51,16 @@ func toAntreaServicesForCRD(npPorts []v1alpha1.NetworkPolicyPort) ([]controlplan
 			Port:     npPort.Port,
 			EndPort:  npPort.EndPort,
 		})
+	}
+	for _, npProtocol := range npProtocols {
+		if npProtocol.ICMP != nil {
+			curProtocol := controlplane.ProtocolICMP
+			antreaServices = append(antreaServices, controlplane.Service{
+				Protocol: &curProtocol,
+				ICMPType: npProtocol.ICMP.ICMPType,
+				ICMPCode: npProtocol.ICMP.ICMPCode,
+			})
+		}
 	}
 	return antreaServices, namedPortExists
 }
@@ -87,7 +98,7 @@ func (n *NetworkPolicyController) toAntreaPeerForCRD(peers []v1alpha1.NetworkPol
 		if dir == controlplane.DirectionIn || !namedPortExists {
 			return &matchAllPeer
 		}
-		allPodsGroupUID := n.createAddressGroup("", matchAllPodsPeerCrd.PodSelector, matchAllPodsPeerCrd.NamespaceSelector, nil)
+		allPodsGroupUID := n.createAddressGroup("", matchAllPodsPeerCrd.PodSelector, matchAllPodsPeerCrd.NamespaceSelector, nil, nil)
 		podsPeer := matchAllPeer
 		podsPeer.AddressGroups = append(addressGroups, allPodsGroupUID)
 		return &podsPeer
@@ -95,7 +106,7 @@ func (n *NetworkPolicyController) toAntreaPeerForCRD(peers []v1alpha1.NetworkPol
 	var ipBlocks []controlplane.IPBlock
 	var fqdns []string
 	for _, peer := range peers {
-		// A v1alpha1.NetworkPolicyPeer will either have an IPBlock or a
+		// A v1alpha1.NetworkPolicyPeer will either have an IPBlock or FQDNs or a
 		// podSelector and/or namespaceSelector set or a reference to the
 		// ClusterGroup.
 		if peer.IPBlock != nil {
@@ -109,13 +120,18 @@ func (n *NetworkPolicyController) toAntreaPeerForCRD(peers []v1alpha1.NetworkPol
 			normalizedUID, groupIPBlocks := n.processRefCG(peer.Group)
 			if normalizedUID != "" {
 				addressGroups = append(addressGroups, normalizedUID)
-			} else if len(groupIPBlocks) > 0 {
-				ipBlocks = append(ipBlocks, groupIPBlocks...)
 			}
+			ipBlocks = append(ipBlocks, groupIPBlocks...)
 		} else if peer.FQDN != "" {
 			fqdns = append(fqdns, peer.FQDN)
+		} else if peer.ServiceAccount != nil {
+			normalizedUID := n.createAddressGroup(peer.ServiceAccount.Namespace, serviceAccountNameToPodSelector(peer.ServiceAccount.Name), nil, nil, nil)
+			addressGroups = append(addressGroups, normalizedUID)
+		} else if peer.NodeSelector != nil {
+			normalizedUID := n.createAddressGroup("", nil, nil, nil, peer.NodeSelector)
+			addressGroups = append(addressGroups, normalizedUID)
 		} else {
-			normalizedUID := n.createAddressGroup(np.GetNamespace(), peer.PodSelector, peer.NamespaceSelector, peer.ExternalEntitySelector)
+			normalizedUID := n.createAddressGroup(np.GetNamespace(), peer.PodSelector, peer.NamespaceSelector, peer.ExternalEntitySelector, nil)
 			addressGroups = append(addressGroups, normalizedUID)
 		}
 	}
@@ -128,10 +144,29 @@ func (n *NetworkPolicyController) toAntreaPeerForCRD(peers []v1alpha1.NetworkPol
 func (n *NetworkPolicyController) toNamespacedPeerForCRD(peers []v1alpha1.NetworkPolicyPeer, namespace string) *controlplane.NetworkPolicyPeer {
 	var addressGroups []string
 	for _, peer := range peers {
-		normalizedUID := n.createAddressGroup(namespace, peer.PodSelector, nil, peer.ExternalEntitySelector)
+		normalizedUID := n.createAddressGroup(namespace, peer.PodSelector, nil, peer.ExternalEntitySelector, nil)
 		addressGroups = append(addressGroups, normalizedUID)
 	}
 	return &controlplane.NetworkPolicyPeer{AddressGroups: addressGroups}
+}
+
+// svcRefToPeerForCRD creates an Antrea controlplane NetworkPolicyPeer from
+// ServiceReference in ToServices field. For ANP, we will use the
+// defaultNamespace(policy Namespace) as the Namespace of ServiceReference that
+// doesn't set Namespace.
+func (n *NetworkPolicyController) svcRefToPeerForCRD(svcRefs []v1alpha1.NamespacedName, defaultNamespace string) *controlplane.NetworkPolicyPeer {
+	var controlplaneSvcRefs []controlplane.ServiceReference
+	for _, svcRef := range svcRefs {
+		curNS := defaultNamespace
+		if svcRef.Namespace != "" {
+			curNS = svcRef.Namespace
+		}
+		controlplaneSvcRefs = append(controlplaneSvcRefs, controlplane.ServiceReference{
+			Namespace: curNS,
+			Name:      svcRef.Name,
+		})
+	}
+	return &controlplane.NetworkPolicyPeer{ToServices: controlplaneSvcRefs}
 }
 
 // createAppliedToGroupForClusterGroupCRD creates an AppliedToGroup object corresponding to a

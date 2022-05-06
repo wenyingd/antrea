@@ -15,66 +15,115 @@
 package types
 
 import (
+	"fmt"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/util/sets"
+
+	"antrea.io/antrea/pkg/agent/openflow"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 	k8sproxy "antrea.io/antrea/third_party/proxy"
 )
 
 // GroupCounter generates and manages global unique group ID.
 type GroupCounter interface {
-	// Get generates a global unique group ID for a specific service.
-	// If the group ID of the service has been generated, then return the
-	// prior one. The bool return value indicates whether the groupID is newly
-	// generated.
-	Get(svcPortName k8sproxy.ServicePortName) (binding.GroupIDType, bool)
-	// Recycle removes a Service Group ID mapping. The recycled groupID can be
-	// reused.
-	Recycle(svcPortName k8sproxy.ServicePortName) bool
+	// AllocateIfNotExist generates a global unique group ID for a Service if the group ID has not been generated, then
+	// return the group ID (newly allocated or already allocated).
+	AllocateIfNotExist(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) binding.GroupIDType
+	// Get gets the group ID for the Service.
+	Get(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) (binding.GroupIDType, bool)
+	// Recycle removes the Service group ID mapping. The recycled group ID can be reused.
+	Recycle(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) bool
+	// GetAllGroupIDs gets all group IDs related to the Service.
+	GetAllGroupIDs(svcNamespacedName string) []binding.GroupIDType
 }
 
 type groupCounter struct {
 	mu             sync.Mutex
-	groupIDCounter binding.GroupIDType
-	recycled       []binding.GroupIDType
+	groupAllocator openflow.GroupAllocator
+	groupIDUpdates chan<- string
 
-	groupMap map[k8sproxy.ServicePortName]binding.GroupIDType
+	servicePortNamesMap map[string]sets.String
+	groupMap            map[string]binding.GroupIDType
 }
 
-func NewGroupCounter(isIPv6 bool) *groupCounter {
-	var groupIDCounter binding.GroupIDType
-	if isIPv6 {
-		groupIDCounter = 0x10000000
+func NewGroupCounter(groupAllocator openflow.GroupAllocator, groupIDUpdates chan<- string) *groupCounter {
+	return &groupCounter{groupMap: map[string]binding.GroupIDType{}, groupAllocator: groupAllocator, groupIDUpdates: groupIDUpdates, servicePortNamesMap: map[string]sets.String{}}
+}
+
+func keyString(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) string {
+	key := svcPortName.String()
+	if isEndpointsLocal {
+		key = fmt.Sprintf("%s/local", key)
 	}
-	return &groupCounter{groupMap: map[k8sproxy.ServicePortName]binding.GroupIDType{}, groupIDCounter: groupIDCounter}
+	return key
 }
 
-func (c *groupCounter) Get(svcPortName k8sproxy.ServicePortName) (binding.GroupIDType, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if id, ok := c.groupMap[svcPortName]; ok {
-		return id, false
-	} else if len(c.recycled) != 0 {
-		id = c.recycled[len(c.recycled)-1]
-		c.recycled = c.recycled[:len(c.recycled)-1]
-		c.groupMap[svcPortName] = id
-		return id, true
+func (c *groupCounter) updateServicePortNameMap(svcNamespacedName string, svcKeyString string) {
+	if _, ok := c.servicePortNamesMap[svcNamespacedName]; ok {
+		c.servicePortNamesMap[svcNamespacedName].Insert(svcKeyString)
 	} else {
-		c.groupIDCounter += 1
-		c.groupMap[svcPortName] = c.groupIDCounter
-		return c.groupIDCounter, true
+		keyStringSet := sets.NewString(svcKeyString)
+		c.servicePortNamesMap[svcNamespacedName] = keyStringSet
 	}
 }
 
-func (c *groupCounter) Recycle(svcPortName k8sproxy.ServicePortName) bool {
+func (c *groupCounter) deleteServicePortNameMap(svcNamespacedName string, svcKeyString string) {
+	keyStringSet, ok := c.servicePortNamesMap[svcNamespacedName]
+	if !ok {
+		return
+	}
+	keyStringSet.Delete(svcKeyString)
+	if keyStringSet.Len() == 0 {
+		delete(c.servicePortNamesMap, svcNamespacedName)
+	}
+}
+
+func (c *groupCounter) AllocateIfNotExist(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) binding.GroupIDType {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := keyString(svcPortName, isEndpointsLocal)
+	if id, ok := c.groupMap[key]; ok {
+		return id
+	}
+	id := c.groupAllocator.Allocate()
+	c.groupMap[key] = id
+	c.updateServicePortNameMap(svcPortName.NamespacedName.String(), key)
+	c.groupIDUpdates <- svcPortName.NamespacedName.String()
+	return id
+}
+
+func (c *groupCounter) Get(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) (binding.GroupIDType, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := keyString(svcPortName, isEndpointsLocal)
+	id, exist := c.groupMap[key]
+	return id, exist
+}
+
+func (c *groupCounter) Recycle(svcPortName k8sproxy.ServicePortName, isEndpointsLocal bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if id, ok := c.groupMap[svcPortName]; ok {
-		delete(c.groupMap, svcPortName)
-		c.recycled = append(c.recycled, id)
+	key := keyString(svcPortName, isEndpointsLocal)
+	if id, ok := c.groupMap[key]; ok {
+		delete(c.groupMap, key)
+		c.groupAllocator.Release(id)
+		c.deleteServicePortNameMap(svcPortName.NamespacedName.String(), key)
+		c.groupIDUpdates <- svcPortName.NamespacedName.String()
 		return true
 	}
 	return false
+}
+
+func (c *groupCounter) GetAllGroupIDs(svcNamespacedName string) []binding.GroupIDType {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var ids []binding.GroupIDType
+	for _, key := range c.servicePortNamesMap[svcNamespacedName].UnsortedList() {
+		if id, ok := c.groupMap[key]; ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }

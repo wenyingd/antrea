@@ -24,6 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"antrea.io/antrea/pkg/apis"
+	agentconfig "antrea.io/antrea/pkg/config/agent"
+	controllerconfig "antrea.io/antrea/pkg/config/controller"
 )
 
 const (
@@ -84,13 +86,13 @@ func (data *TestData) configureTLS(t *testing.T, cipherSuites []uint16, tlsMinVe
 		}
 	}
 
-	cc := []configChange{
-		{"tlsCipherSuites", cipherSuitesStr, false},
-		{"tlsMinVersion", tlsMinVersion, false},
+	cc := func(config *controllerconfig.ControllerConfig) {
+		config.TLSCipherSuites = cipherSuitesStr
+		config.TLSMinVersion = tlsMinVersion
 	}
-	ac := []configChange{
-		{"tlsCipherSuites", cipherSuitesStr, false},
-		{"tlsMinVersion", tlsMinVersion, false},
+	ac := func(config *agentconfig.AgentConfig) {
+		config.TLSCipherSuites = cipherSuitesStr
+		config.TLSMinVersion = tlsMinVersion
 	}
 	if err := data.mutateAntreaConfigMap(cc, ac, true, true); err != nil {
 		t.Fatalf("Failed to configure Cipher Suites and TLSMinVersion: %v", err)
@@ -146,7 +148,7 @@ func (data *TestData) opensslConnect(t *testing.T, pod string, container string,
 		if tls12 {
 			cmd = append(cmd, "-tls1_2")
 		}
-		stdout, stderr, err := data.runCommandFromPod(antreaNamespace, pod, container, cmd)
+		stdout, stderr, err := data.RunCommandFromPod(antreaNamespace, pod, container, cmd)
 		assert.NoError(t, err, "failed to run openssl command on Pod '%s'\nstderr: %s", pod, stderr)
 		t.Logf("Ran '%s' on Pod %s", strings.Join(cmd, " "), pod)
 		stdouts = append(stdouts, stdout)

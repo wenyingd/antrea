@@ -28,11 +28,30 @@ import (
 	"k8s.io/component-base/featuregate"
 
 	"antrea.io/antrea/pkg/agent/config"
+	"antrea.io/antrea/pkg/features"
 )
 
 func skipIfNotBenchmarkTest(tb testing.TB) {
 	if !testOptions.withBench {
 		tb.Skipf("Skipping benchmark test: %s", tb.Name())
+	}
+}
+
+func skipIfNotAntreaIPAMTest(tb testing.TB) {
+	if !testOptions.enableAntreaIPAM {
+		tb.Skipf("Skipping AntreaIPAM test: %s", tb.Name())
+	}
+}
+
+func skipIfAntreaIPAMTest(tb testing.TB) {
+	if testOptions.enableAntreaIPAM {
+		tb.Skipf("Skipping test when running AntreaIPAM: %s", tb.Name())
+	}
+}
+
+func skipIfNamespaceIsNotEqual(tb testing.TB, actualNamespace, expectNamespace string) {
+	if actualNamespace != expectNamespace {
+		tb.Skipf("Skipping test when namespace is not: %s", expectNamespace)
 	}
 }
 
@@ -76,15 +95,15 @@ func skipIfIPv6Cluster(tb testing.TB) {
 
 func skipIfNotIPv6Cluster(tb testing.TB) {
 	if clusterInfo.podV6NetworkCIDR == "" {
-		tb.Skipf("Skipping test as it is not needed in IPv4 cluster")
+		tb.Skipf("Skipping test as it requires IPv6 addresses but the IPv6 network CIDR is not set")
 	}
 }
 
-func skipIfMissingKernelModule(tb testing.TB, nodeName string, requiredModules []string) {
+func skipIfMissingKernelModule(tb testing.TB, data *TestData, nodeName string, requiredModules []string) {
 	for _, module := range requiredModules {
 		// modprobe with "--dry-run" does not require root privileges
 		cmd := fmt.Sprintf("modprobe --dry-run %s", module)
-		rc, stdout, stderr, err := RunCommandOnNode(nodeName, cmd)
+		rc, stdout, stderr, err := data.RunCommandOnNode(nodeName, cmd)
 		if err != nil {
 			tb.Skipf("Skipping test as modprobe could not be run to confirm the presence of module '%s': %v", module, err)
 		}
@@ -132,6 +151,10 @@ func skipIfFeatureDisabled(tb testing.TB, feature featuregate.Feature, checkAgen
 			tb.Skipf("Skipping test because %s is not enabled in the Controller", feature)
 		}
 	}
+}
+
+func skipIfProxyDisabled(t *testing.T) {
+	skipIfFeatureDisabled(t, features.AntreaProxy, true /* checkAgent */, false /* checkController */)
 }
 
 func ensureAntreaRunning(data *TestData) error {
@@ -214,19 +237,12 @@ func setupTestWithIPFIXCollector(tb testing.TB) (*TestData, bool, bool, error) {
 	}
 	ipfixCollectorAddr := fmt.Sprintf("%s:tcp", net.JoinHostPort(ipStr, ipfixCollectorPort))
 
-	faClusterIPAddr := ""
 	tb.Logf("Applying flow aggregator YAML with ipfix collector address: %s", ipfixCollectorAddr)
-	faClusterIP, err := testData.deployFlowAggregator(ipfixCollectorAddr)
-	if err != nil {
+	if err := testData.deployFlowAggregator(ipfixCollectorAddr); err != nil {
 		return testData, v4Enabled, v6Enabled, err
 	}
-	if testOptions.providerName == "kind" {
-		// In Kind cluster, there are issues with DNS name resolution on worker nodes.
-		// Please note that CoreDNS services are forced on to control-plane Node.
-		faClusterIPAddr = fmt.Sprintf("%s:%s:tls", faClusterIP, ipfixCollectorPort)
-	}
-	tb.Logf("Deploying flow exporter with collector address: %s", faClusterIPAddr)
-	if err = testData.deployAntreaFlowExporter(faClusterIPAddr); err != nil {
+	tb.Logf("Enabling flow exporter in Antrea Agent")
+	if err = testData.enableAntreaFlowExporter(""); err != nil {
 		return testData, v4Enabled, v6Enabled, err
 	}
 
@@ -274,7 +290,7 @@ func exportLogs(tb testing.TB, data *TestData, logsSubDir string, writeNodeLogs 
 	// runKubectl runs the provided kubectl command on the control-plane Node and returns the
 	// output. It returns an empty string in case of error.
 	runKubectl := func(cmd string) string {
-		rc, stdout, _, err := RunCommandOnNode(controlPlaneNodeName(), cmd)
+		rc, stdout, _, err := data.RunCommandOnNode(controlPlaneNodeName(), cmd)
 		if err != nil || rc != 0 {
 			tb.Errorf("Error when running this kubectl command on control-plane Node: %s", cmd)
 			return ""
@@ -346,7 +362,7 @@ func exportLogs(tb testing.TB, data *TestData, logsSubDir string, writeNodeLogs 
 		if clusterInfo.nodesOS[nodeName] == "windows" {
 			cmd = "Get-EventLog -LogName \"System\" -Source \"Service Control Manager\" | grep kubelet ; Get-EventLog -LogName \"Application\" -Source \"nssm\" | grep kubelet"
 		}
-		rc, stdout, _, err := RunCommandOnNode(nodeName, cmd)
+		rc, stdout, _, err := data.RunCommandOnNode(nodeName, cmd)
 		if err != nil || rc != 0 {
 			// return an error and skip subsequent Nodes
 			return fmt.Errorf("error when running journalctl on Node '%s', is it available? Error: %v", nodeName, err)
@@ -371,7 +387,7 @@ func teardownFlowAggregator(tb testing.TB, data *TestData) {
 		}
 	}
 	tb.Logf("Deleting '%s' K8s Namespace", flowAggregatorNamespace)
-	if err := data.deleteNamespace(flowAggregatorNamespace, defaultTimeout); err != nil {
+	if err := data.DeleteNamespace(flowAggregatorNamespace, defaultTimeout); err != nil {
 		tb.Logf("Error when tearing down flow aggregator: %v", err)
 	}
 }
@@ -387,9 +403,9 @@ func teardownTest(tb testing.TB, data *TestData) {
 	}
 }
 
-func deletePodWrapper(tb testing.TB, data *TestData, name string) {
+func deletePodWrapper(tb testing.TB, data *TestData, namespace, name string) {
 	tb.Logf("Deleting Pod '%s'", name)
-	if err := data.deletePod(testNamespace, name); err != nil {
+	if err := data.DeletePod(namespace, name); err != nil {
 		tb.Logf("Error when deleting Pod: %v", err)
 	}
 }
@@ -409,7 +425,7 @@ func createTestBusyboxPods(tb testing.TB, data *TestData, num int, ns string, no
 		for _, podName := range podNames {
 			wg.Add(1)
 			go func(name string) {
-				deletePodWrapper(tb, data, name)
+				deletePodWrapper(tb, data, ns, name)
 				wg.Done()
 			}(podName)
 		}
@@ -425,7 +441,7 @@ func createTestBusyboxPods(tb testing.TB, data *TestData, num int, ns string, no
 	createPodAndGetIP := func() (string, *PodIPs, error) {
 		podName := randName("test-pod-")
 		tb.Logf("Creating a busybox test Pod '%s' and waiting for IP", podName)
-		if err := data.createBusyboxPodOnNode(podName, ns, nodeName); err != nil {
+		if err := data.createBusyboxPodOnNode(podName, ns, nodeName, false); err != nil {
 			tb.Errorf("Error when creating busybox test Pod '%s': %v", podName, err)
 			return "", nil, err
 		}

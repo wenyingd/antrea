@@ -162,7 +162,7 @@ DOCKER_IMAGES+=("projects.registry.vmware.com/antrea/antrea-ubuntu:latest")
 
 echo "Creating Kind cluster"
 IMAGES="${DOCKER_IMAGES[@]}"
-$THIS_DIR/kind-setup.sh create kind --antrea-cni false --images "$IMAGES"
+$THIS_DIR/kind-setup.sh create kind --images "$IMAGES"
 
 # When running this script as part of a Github Action, we do *not* want to use
 # the pre-installed version of kustomize, as it is a snap and cannot access
@@ -173,15 +173,15 @@ $THIS_DIR/kind-setup.sh create kind --antrea-cni false --images "$IMAGES"
 # fashion, e.g. upgrading controller only and specific antrea-agents for
 # compatibility test.
 unset KUSTOMIZE
-$ROOT_DIR/hack/generate-manifest.sh --kind --on-delete | docker exec -i kind-control-plane dd of=/root/antrea-new.yml
+$ROOT_DIR/hack/generate-manifest.sh --on-delete | docker exec -i kind-control-plane dd of=/root/antrea-new.yml
 
 TMP_ANTREA_DIR=$(mktemp -d)
 git clone --branch $FROM_TAG --depth 1 https://github.com/antrea-io/antrea.git $TMP_ANTREA_DIR
 pushd $TMP_ANTREA_DIR > /dev/null
 export IMG_NAME=projects.registry.vmware.com/antrea/antrea-ubuntu
 export IMG_TAG=$FROM_TAG
-./hack/generate-manifest.sh --mode release --kind | kubectl apply -f -
-./hack/generate-manifest.sh --mode release --kind | docker exec -i kind-control-plane dd of=/root/antrea.yml
+./hack/generate-manifest.sh --mode release | kubectl apply -f -
+./hack/generate-manifest.sh --mode release | docker exec -i kind-control-plane dd of=/root/antrea.yml
 popd
 rm -rf $TMP_DIR
 

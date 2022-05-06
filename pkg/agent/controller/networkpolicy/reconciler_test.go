@@ -29,6 +29,7 @@ import (
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/openflow"
 	openflowtest "antrea.io/antrea/pkg/agent/openflow/testing"
+	proxytypes "antrea.io/antrea/pkg/agent/proxy/types"
 	"antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
@@ -97,13 +98,17 @@ func newCIDR(cidrStr string) *net.IPNet {
 	return tmpIPNet
 }
 
-func newTestReconciler(t *testing.T, controller *gomock.Controller, ifaceStore interfacestore.InterfaceStore, ofClient *openflowtest.MockClient) *reconciler {
+func newTestReconciler(t *testing.T, controller *gomock.Controller, ifaceStore interfacestore.InterfaceStore, ofClient *openflowtest.MockClient, v4Enabled, v6Enabled bool) *reconciler {
 	f, _ := newMockFQDNController(t, controller, nil)
-	r := newReconciler(ofClient, ifaceStore, newIDAllocator(testAsyncDeleteInterval), f)
+	ch := make(chan string, 100)
+	groupIDAllocator := openflow.NewGroupAllocator(v6Enabled)
+	groupCounters := []proxytypes.GroupCounter{proxytypes.NewGroupCounter(groupIDAllocator, ch)}
+	r := newReconciler(ofClient, ifaceStore, newIDAllocator(testAsyncDeleteInterval), f, groupCounters, v4Enabled, v6Enabled, true)
 	return r
 }
 
 func TestReconcilerForget(t *testing.T) {
+	prepareMockTables()
 	tests := []struct {
 		name              string
 		lastRealizeds     map[string]*lastRealized
@@ -174,8 +179,6 @@ func TestReconcilerForget(t *testing.T) {
 			defer controller.Finish()
 			ifaceStore := interfacestore.NewInterfaceStore()
 			mockOFClient := openflowtest.NewMockClient(controller)
-			mockOFClient.EXPECT().IsIPv4Enabled().Return(true).AnyTimes()
-			mockOFClient.EXPECT().IsIPv6Enabled().Return(false).AnyTimes()
 			if len(tt.expectedOFRuleIDs) == 0 {
 				mockOFClient.EXPECT().UninstallPolicyRuleFlows(gomock.Any()).Times(0)
 			} else {
@@ -183,7 +186,7 @@ func TestReconcilerForget(t *testing.T) {
 					mockOFClient.EXPECT().UninstallPolicyRuleFlows(ofID)
 				}
 			}
-			r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+			r := newTestReconciler(t, controller, ifaceStore, mockOFClient, true, false)
 			for key, value := range tt.lastRealizeds {
 				r.lastRealizeds.Store(key, value)
 			}
@@ -521,13 +524,11 @@ func TestReconcilerReconcile(t *testing.T) {
 			controller := gomock.NewController(t)
 			defer controller.Finish()
 			mockOFClient := openflowtest.NewMockClient(controller)
-			mockOFClient.EXPECT().IsIPv4Enabled().Return(true).AnyTimes()
-			mockOFClient.EXPECT().IsIPv6Enabled().Return(false).AnyTimes()
 			// TODO: mock idAllocator and priorityAssigner
 			for i := 0; i < len(tt.expectedOFRules); i++ {
 				mockOFClient.EXPECT().InstallPolicyRuleFlows(gomock.Any())
 			}
-			r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+			r := newTestReconciler(t, controller, ifaceStore, mockOFClient, true, false)
 			if err := r.Reconcile(tt.args); (err != nil) != tt.wantErr {
 				t.Fatalf("Reconcile() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -586,9 +587,7 @@ func TestReconcileWithTransientError(t *testing.T) {
 	controller := gomock.NewController(t)
 	defer controller.Finish()
 	mockOFClient := openflowtest.NewMockClient(controller)
-	mockOFClient.EXPECT().IsIPv4Enabled().Return(true).AnyTimes()
-	mockOFClient.EXPECT().IsIPv6Enabled().Return(true).AnyTimes()
-	r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+	r := newTestReconciler(t, controller, ifaceStore, mockOFClient, true, true)
 	// Set deleteInterval to verify openflow ID is released immediately.
 	r.idAllocator.deleteInterval = 0
 
@@ -611,7 +610,7 @@ func TestReconcileWithTransientError(t *testing.T) {
 			To:        ipsToOFAddresses(sets.NewString("1.1.1.1")),
 			Service:   []v1beta2.Service{serviceTCP80, serviceTCP8080},
 			PolicyRef: &np1,
-			TableID:   openflow.EgressRuleTable,
+			TableID:   openflow.EgressRuleTable.GetID(),
 		},
 		{
 			Direction: v1beta2.DirectionOut,
@@ -619,7 +618,7 @@ func TestReconcileWithTransientError(t *testing.T) {
 			To:        ipsToOFAddresses(sets.NewString("1.1.1.2")),
 			Service:   []v1beta2.Service{serviceTCP443, serviceTCP8080},
 			PolicyRef: &np1,
-			TableID:   openflow.EgressRuleTable,
+			TableID:   openflow.EgressRuleTable.GetID(),
 		},
 		{
 			Direction: v1beta2.DirectionOut,
@@ -627,7 +626,7 @@ func TestReconcileWithTransientError(t *testing.T) {
 			To:        append(ipsToOFAddresses(sets.NewString("1.1.1.3")), openflow.NewIPNetAddress(ipNet)),
 			Service:   []v1beta2.Service{serviceTCP8080},
 			PolicyRef: &np1,
-			TableID:   openflow.EgressRuleTable,
+			TableID:   openflow.EgressRuleTable.GetID(),
 		},
 	}
 	for _, policyRule := range policyRules {
@@ -747,9 +746,7 @@ func TestReconcilerBatchReconcile(t *testing.T) {
 			controller := gomock.NewController(t)
 			defer controller.Finish()
 			mockOFClient := openflowtest.NewMockClient(controller)
-			mockOFClient.EXPECT().IsIPv4Enabled().Return(true).AnyTimes()
-			mockOFClient.EXPECT().IsIPv6Enabled().Return(false).AnyTimes()
-			r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+			r := newTestReconciler(t, controller, ifaceStore, mockOFClient, true, true)
 			if tt.numInstalledRules > 0 {
 				// BatchInstall should skip rules already installed
 				r.lastRealizeds.Store(tt.args[0].ID, newLastRealized(tt.args[0]))
@@ -881,6 +878,37 @@ func TestReconcilerUpdate(t *testing.T) {
 			false,
 		},
 		{
+			"updating-egress-rule-with-duplicate-ip",
+			&CompletedRule{
+				rule: &rule{ID: "egress-rule", Direction: v1beta2.DirectionOut, SourceRef: &np1},
+				ToAddresses: v1beta2.NewGroupMemberSet(
+					newAddressGroupPodMember("pod1", "ns1", "1.1.1.1"),
+					newAddressGroupPodMember("pod2", "ns1", "1.1.1.1"),
+					newAddressGroupPodMember("pod3", "ns1", "1.1.1.2"),
+					newAddressGroupPodMember("pod4", "ns1", "1.1.1.2"),
+					newAddressGroupPodMember("pod5", "ns1", "1.1.1.3"),
+					newAddressGroupPodMember("pod6", "ns1", "1.1.1.3"),
+					newAddressGroupPodMember("pod7", "ns1", "1.1.1.4"),
+				),
+				TargetMembers: appliedToGroup1,
+			},
+			&CompletedRule{
+				rule: &rule{ID: "egress-rule", Direction: v1beta2.DirectionOut, SourceRef: &np1},
+				ToAddresses: v1beta2.NewGroupMemberSet(
+					newAddressGroupPodMember("pod1", "ns1", "1.1.1.1"),
+					newAddressGroupPodMember("pod5", "ns1", "1.1.1.5"),
+					newAddressGroupPodMember("pod8", "ns1", "1.1.1.4"),
+				),
+				TargetMembers: appliedToGroup2,
+			},
+			ipsToOFAddresses(sets.NewString("3.3.3.3")),
+			ipsToOFAddresses(sets.NewString("1.1.1.5")),
+			ipsToOFAddresses(sets.NewString("2.2.2.2")),
+			ipsToOFAddresses(sets.NewString("1.1.1.2", "1.1.1.3")),
+			false,
+			false,
+		},
+		{
 			"updating-egress-rule-deny-all",
 			&CompletedRule{
 				rule:          &rule{ID: "egress-rule", Direction: v1beta2.DirectionOut, SourceRef: &np1},
@@ -944,8 +972,6 @@ func TestReconcilerUpdate(t *testing.T) {
 			defer controller.Finish()
 			mockOFClient := openflowtest.NewMockClient(controller)
 			mockOFClient.EXPECT().InstallPolicyRuleFlows(gomock.Any()).MaxTimes(2)
-			mockOFClient.EXPECT().IsIPv4Enabled().Return(true).AnyTimes()
-			mockOFClient.EXPECT().IsIPv6Enabled().Return(true).AnyTimes()
 			priority := gomock.Any()
 			if !tt.originalRule.isAntreaNetworkPolicyRule() {
 				priority = nil
@@ -954,18 +980,18 @@ func TestReconcilerUpdate(t *testing.T) {
 				mockOFClient.EXPECT().UninstallPolicyRuleFlows(gomock.Any())
 			}
 			if len(tt.expectedAddedFrom) > 0 {
-				mockOFClient.EXPECT().AddPolicyRuleAddress(gomock.Any(), types.SrcAddress, gomock.Eq(tt.expectedAddedFrom), priority)
+				mockOFClient.EXPECT().AddPolicyRuleAddress(gomock.Any(), types.SrcAddress, gomock.InAnyOrder(tt.expectedAddedFrom), priority)
 			}
 			if len(tt.expectedAddedTo) > 0 {
-				mockOFClient.EXPECT().AddPolicyRuleAddress(gomock.Any(), types.DstAddress, gomock.Eq(tt.expectedAddedTo), priority)
+				mockOFClient.EXPECT().AddPolicyRuleAddress(gomock.Any(), types.DstAddress, gomock.InAnyOrder(tt.expectedAddedTo), priority)
 			}
 			if len(tt.expectedDeletedFrom) > 0 {
-				mockOFClient.EXPECT().DeletePolicyRuleAddress(gomock.Any(), types.SrcAddress, gomock.Eq(tt.expectedDeletedFrom), priority)
+				mockOFClient.EXPECT().DeletePolicyRuleAddress(gomock.Any(), types.SrcAddress, gomock.InAnyOrder(tt.expectedDeletedFrom), priority)
 			}
 			if len(tt.expectedDeletedTo) > 0 {
-				mockOFClient.EXPECT().DeletePolicyRuleAddress(gomock.Any(), types.DstAddress, gomock.Eq(tt.expectedDeletedTo), priority)
+				mockOFClient.EXPECT().DeletePolicyRuleAddress(gomock.Any(), types.DstAddress, gomock.InAnyOrder(tt.expectedDeletedTo), priority)
 			}
-			r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+			r := newTestReconciler(t, controller, ifaceStore, mockOFClient, true, true)
 			if err := r.Reconcile(tt.originalRule); (err != nil) != tt.wantErr {
 				t.Fatalf("Reconcile() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1465,13 +1491,11 @@ func TestReconcilerReconcileIPv6Only(t *testing.T) {
 			controller := gomock.NewController(t)
 			defer controller.Finish()
 			mockOFClient := openflowtest.NewMockClient(controller)
-			mockOFClient.EXPECT().IsIPv4Enabled().Return(false).AnyTimes()
-			mockOFClient.EXPECT().IsIPv6Enabled().Return(true).AnyTimes()
 			// TODO: mock idAllocator and priorityAssigner
 			for i := 0; i < len(tt.expectedOFRules); i++ {
 				mockOFClient.EXPECT().InstallPolicyRuleFlows(gomock.Any())
 			}
-			r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+			r := newTestReconciler(t, controller, ifaceStore, mockOFClient, false, true)
 			if err := r.Reconcile(tt.args); (err != nil) != tt.wantErr {
 				t.Fatalf("Reconcile() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -1868,13 +1892,11 @@ func TestReconcilerReconcileDualStack(t *testing.T) {
 			controller := gomock.NewController(t)
 			defer controller.Finish()
 			mockOFClient := openflowtest.NewMockClient(controller)
-			mockOFClient.EXPECT().IsIPv4Enabled().Return(true).AnyTimes()
-			mockOFClient.EXPECT().IsIPv6Enabled().Return(true).AnyTimes()
 			// TODO: mock idAllocator and priorityAssigner
 			for i := 0; i < len(tt.expectedOFRules); i++ {
 				mockOFClient.EXPECT().InstallPolicyRuleFlows(gomock.Any())
 			}
-			r := newTestReconciler(t, controller, ifaceStore, mockOFClient)
+			r := newTestReconciler(t, controller, ifaceStore, mockOFClient, true, true)
 			if err := r.Reconcile(tt.args); (err != nil) != tt.wantErr {
 				t.Fatalf("Reconcile() error = %v, wantErr %v", err, tt.wantErr)
 			}

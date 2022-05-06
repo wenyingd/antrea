@@ -18,11 +18,11 @@ import (
 	"net"
 	"time"
 
+	"antrea.io/libOpenflow/util"
 	"antrea.io/ofnet/ofctrl"
 )
 
 type Protocol string
-type TableIDType uint8
 type GroupIDType uint32
 type MeterIDType uint32
 
@@ -31,8 +31,8 @@ type Range [2]uint32
 type OFOperation int
 
 const (
-	LastTableID TableIDType = 0xff
-	TableIDAll              = LastTableID
+	LastTableID uint8 = 0xff
+	TableIDAll        = LastTableID
 )
 
 const (
@@ -47,13 +47,14 @@ const (
 	ProtocolSCTPv6 Protocol = "sctpv6"
 	ProtocolICMP   Protocol = "icmp"
 	ProtocolICMPv6 Protocol = "icmpv6"
+	ProtocolIGMP   Protocol = "igmp"
 )
 
 const (
-	TableMissActionDrop MissActionType = iota
+	TableMissActionNone MissActionType = iota
+	TableMissActionDrop
 	TableMissActionNormal
 	TableMissActionNext
-	TableMissActionNone
 )
 
 const (
@@ -71,6 +72,12 @@ const (
 	NxmFieldIPToS       = "NXM_OF_IP_TOS"
 	NxmFieldXXReg       = "NXM_NX_XXREG"
 	NxmFieldPktMark     = "NXM_NX_PKT_MARK"
+	NxmFieldSrcIPv4     = "NXM_OF_IP_SRC"
+	NxmFieldDstIPv4     = "NXM_OF_IP_DST"
+	NxmFieldSrcIPv6     = "NXM_NX_IPV6_SRC"
+	NxmFieldDstIPv6     = "NXM_NX_IPV6_DST"
+
+	OxmFieldVLANVID = "OXM_OF_VLAN_VID"
 )
 
 const (
@@ -84,8 +91,9 @@ var IPDSCPToSRange = &Range{2, 7}
 
 // Bridge defines operations on an openflow bridge.
 type Bridge interface {
-	CreateTable(id, next TableIDType, missAction MissActionType) Table
-	DeleteTable(id TableIDType) bool
+	CreateTable(table Table, next uint8, missAction MissActionType) Table
+	// AddTable adds table on the Bridge. Return true if the operation succeeds, otherwise return false.
+	DeleteTable(id uint8) bool
 	CreateGroup(id GroupIDType) Group
 	DeleteGroup(id GroupIDType) bool
 	CreateMeter(id MeterIDType, flags ofctrl.MeterFlag) Meter
@@ -128,16 +136,32 @@ type Bridge interface {
 // TableStatus represents the status of a specific flow table. The status is useful for debugging.
 type TableStatus struct {
 	ID         uint      `json:"id"`
+	Name       string    `json:"name"`
 	FlowCount  uint      `json:"flowCount"`
 	UpdateTime time.Time `json:"updateTime"`
 }
 
 type Table interface {
-	GetID() TableIDType
+	GetID() uint8
+	GetName() string
 	BuildFlow(priority uint16) FlowBuilder
 	GetMissAction() MissActionType
 	Status() TableStatus
-	GetNext() TableIDType
+	GetNext() uint8
+	SetNext(next uint8)
+	SetMissAction(action MissActionType)
+	GetStageID() StageID
+}
+
+type PipelineID uint8
+
+type StageID uint8
+
+type Pipeline interface {
+	GetFirstTableInStage(id StageID) Table
+	GetFirstTable() Table
+	ListAllTables() []Table
+	IsLastTable(t Table) bool
 }
 
 type EntryType string
@@ -179,17 +203,17 @@ type Flow interface {
 type Action interface {
 	LoadARPOperation(value uint16) FlowBuilder
 	LoadToRegField(field *RegField, value uint32) FlowBuilder
-	LoadRegMark(mark *RegMark) FlowBuilder
+	LoadRegMark(marks ...*RegMark) FlowBuilder
 	LoadPktMarkRange(value uint32, to *Range) FlowBuilder
 	LoadIPDSCP(value uint8) FlowBuilder
 	LoadRange(name string, addr uint64, to *Range) FlowBuilder
 	Move(from, to string) FlowBuilder
 	MoveRange(fromName, toName string, from, to Range) FlowBuilder
-	Resubmit(port uint16, table TableIDType) FlowBuilder
-	ResubmitToTable(table TableIDType) FlowBuilder
-	CT(commit bool, tableID TableIDType, zone int) CTAction
+	Resubmit(port uint16, table uint8) FlowBuilder
+	ResubmitToTables(tables ...uint8) FlowBuilder
+	CT(commit bool, tableID uint8, zone int, zoneSrcField *RegField) CTAction
 	Drop() FlowBuilder
-	Output(port int) FlowBuilder
+	Output(port uint32) FlowBuilder
 	OutputFieldRange(from string, rng *Range) FlowBuilder
 	OutputToRegField(field *RegField) FlowBuilder
 	OutputInPort() FlowBuilder
@@ -202,12 +226,17 @@ type Action interface {
 	SetSrcIP(addr net.IP) FlowBuilder
 	SetDstIP(addr net.IP) FlowBuilder
 	SetTunnelDst(addr net.IP) FlowBuilder
+	PopVLAN() FlowBuilder
+	PushVLAN(etherType uint16) FlowBuilder
+	SetVLAN(vlanID uint16) FlowBuilder
 	DecTTL() FlowBuilder
 	Normal() FlowBuilder
 	Conjunction(conjID uint32, clauseID uint8, nClause uint8) FlowBuilder
 	Group(id GroupIDType) FlowBuilder
-	Learn(id TableIDType, priority uint16, idleTimeout, hardTimeout uint16, cookieID uint64) LearnAction
-	GotoTable(table TableIDType) FlowBuilder
+	Learn(id uint8, priority uint16, idleTimeout, hardTimeout uint16, cookieID uint64) LearnAction
+	GotoTable(table uint8) FlowBuilder
+	NextTable() FlowBuilder
+	GotoStage(stage StageID) FlowBuilder
 	SendToController(reason uint8) FlowBuilder
 	Note(notes string) FlowBuilder
 	Meter(meterID uint32) FlowBuilder
@@ -218,7 +247,7 @@ type FlowBuilder interface {
 	MatchProtocol(name Protocol) FlowBuilder
 	MatchIPProtocolValue(isIPv6 bool, protoValue uint8) FlowBuilder
 	MatchXXReg(regID int, data []byte) FlowBuilder
-	MatchRegMark(mark *RegMark) FlowBuilder
+	MatchRegMark(marks ...*RegMark) FlowBuilder
 	MatchRegFieldWithValue(field *RegField, data uint32) FlowBuilder
 	MatchInPort(inPort uint32) FlowBuilder
 	MatchDstIP(ip net.IP) FlowBuilder
@@ -241,16 +270,19 @@ type FlowBuilder interface {
 	MatchCTStateInv(isSet bool) FlowBuilder
 	MatchCTStateDNAT(isSet bool) FlowBuilder
 	MatchCTStateSNAT(isSet bool) FlowBuilder
-	MatchCTMark(mark *CtMark) FlowBuilder
+	MatchCTMark(marks ...*CtMark) FlowBuilder
 	MatchCTLabelField(high, low uint64, field *CtLabel) FlowBuilder
 	MatchPktMark(value uint32, mask *uint32) FlowBuilder
 	MatchConjID(value uint32) FlowBuilder
 	MatchDstPort(port uint16, portMask *uint16) FlowBuilder
 	MatchSrcPort(port uint16, portMask *uint16) FlowBuilder
+	MatchICMPType(icmpType byte) FlowBuilder
+	MatchICMPCode(icmpCode byte) FlowBuilder
 	MatchICMPv6Type(icmp6Type byte) FlowBuilder
 	MatchICMPv6Code(icmp6Code byte) FlowBuilder
 	MatchTunnelDst(dstIP net.IP) FlowBuilder
 	MatchTunMetadata(index int, data uint32) FlowBuilder
+	MatchVLAN(nonVLAN bool, vlanId uint16, vlanMask *uint16) FlowBuilder
 	// MatchCTSrcIP matches the source IPv4 address of the connection tracker original direction tuple.
 	MatchCTSrcIP(ip net.IP) FlowBuilder
 	// MatchCTSrcIPNet matches the source IPv4 address of the connection tracker original direction tuple with IP masking.
@@ -308,7 +340,7 @@ type BucketBuilder interface {
 	// Deprecated.
 	LoadRegRange(regID int, data uint32, rng *Range) BucketBuilder
 	LoadToRegField(field *RegField, data uint32) BucketBuilder
-	ResubmitToTable(tableID TableIDType) BucketBuilder
+	ResubmitToTable(tableID uint8) BucketBuilder
 	Done() Group
 }
 
@@ -329,9 +361,10 @@ type MeterBandBuilder interface {
 
 type CTAction interface {
 	LoadToMark(value uint32) CTAction
-	LoadToCtMark(mark *CtMark) CTAction
+	LoadToCtMark(marks ...*CtMark) CTAction
 	LoadToLabelField(value uint64, labelField *CtLabel) CTAction
 	MoveToLabel(fromName string, fromRng, labelRng *Range) CTAction
+	MoveToCtMarkField(fromRegField *RegField, ctMark *CtMarkField) CTAction
 	// NAT action translates the packet in the way that the connection was committed into the conntrack zone, e.g., if
 	// a connection was committed with SNAT, the later packets would be translated with the earlier SNAT configurations.
 	NAT() CTAction
@@ -373,14 +406,17 @@ type PacketOutBuilder interface {
 	SetOutport(outport uint32) PacketOutBuilder
 	AddLoadAction(name string, data uint64, rng *Range) PacketOutBuilder
 	AddLoadRegMark(mark *RegMark) PacketOutBuilder
+	AddResubmitAction(inPort *uint16, table *uint8) PacketOutBuilder
+	SetL4Packet(packet util.Message) PacketOutBuilder
 	Done() *ofctrl.PacketOut
 }
 
 type ctBase struct {
-	commit  bool
-	force   bool
-	ctTable uint8
-	ctZone  uint16
+	commit         bool
+	force          bool
+	ctTable        uint8
+	ctZoneImm      uint16
+	ctZoneSrcField *RegField
 }
 
 type IPRange struct {
@@ -430,9 +466,15 @@ type RegMark struct {
 // XXRegField specifies a xxreg with a required bit range.
 type XXRegField RegField
 
+// CtMarkField specifies a bit range of a CT mark. rng is the range of bits taken by the field. The OF client could use a
+// CtMarkField to cache or match varied value.
+type CtMarkField struct {
+	rng *Range
+}
+
 // CtMark is used to indicate the connection characteristics.
 type CtMark struct {
-	rng   *Range
+	field *CtMarkField
 	value uint32
 }
 

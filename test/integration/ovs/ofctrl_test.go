@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
@@ -48,7 +49,7 @@ var (
 	fromGatewayMark = binding.NewRegMark(sourceField, 1)
 
 	marksReg      = 0
-	gatewayCTMark = binding.NewCTMark(0x20, 0, 7)
+	gatewayCTMark = binding.NewOneBitCTMark(1)
 	ctZone        = 0xfff0
 
 	count uint64
@@ -67,6 +68,11 @@ var (
 	vMAC, _          = net.ParseMAC("aa:bb:cc:dd:ee:ff")
 
 	ipDSCP = uint8(10)
+	t0     = binding.NewOFTable(0, "t0", 0, 0, 0)
+	t1     = binding.NewOFTable(1, "t1", 0, 0, 0)
+	t2     = binding.NewOFTable(2, "t2", 0, 0, 0)
+	t3     = binding.NewOFTable(3, "t3", 0, 0, 0)
+	t4     = binding.NewOFTable(4, "t4", 0, 0, 0)
 )
 
 func newOFBridge(brName string) binding.Bridge {
@@ -88,7 +94,7 @@ func TestDeleteFlowStrict(t *testing.T) {
 	}()
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(3, 4, binding.TableMissActionNext)
+	table = bridge.CreateTable(t3, t4.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	if err != nil {
@@ -122,7 +128,7 @@ func prepareOverlapFlows(table binding.Table, ipStr string, sameCookie bool) ([]
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(cookie2).
 			MatchSrcIP(srcIP).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 	}
 	expectFlows := []*ExpectFlow{
@@ -139,15 +145,15 @@ func testDeleteSingleFlow(t *testing.T, ovsCtlClient ovsctl.OVSCtlClient, table 
 			t.Fatalf("Failed to install flow%d: %v", id, err)
 		}
 	}
-	dumpTable := uint8(table.GetID())
-	CheckFlowExists(t, ovsCtlClient, dumpTable, true, expectFlows)
+	dumpTable := table.GetID()
+	CheckFlowExists(t, ovsCtlClient, "", dumpTable, true, expectFlows)
 
 	err := flows[0].Delete()
 	if err != nil {
 		t.Fatalf("Failed to delete 'match-all' flow")
 	}
-	CheckFlowExists(t, ovsCtlClient, dumpTable, false, []*ExpectFlow{expectFlows[0]})
-	flowList := CheckFlowExists(t, ovsCtlClient, dumpTable, true, []*ExpectFlow{expectFlows[1]})
+	CheckFlowExists(t, ovsCtlClient, "", dumpTable, false, []*ExpectFlow{expectFlows[0]})
+	flowList := CheckFlowExists(t, ovsCtlClient, "", dumpTable, true, []*ExpectFlow{expectFlows[1]})
 	if len(flowList) != 1 {
 		t.Errorf("Failed to delete flow with strict mode")
 	}
@@ -155,7 +161,7 @@ func testDeleteSingleFlow(t *testing.T, ovsCtlClient ovsctl.OVSCtlClient, table 
 	if err != nil {
 		t.Fatalf("Failed to delete 'match-all' flow")
 	}
-	CheckFlowExists(t, ovsCtlClient, dumpTable, false, []*ExpectFlow{expectFlows[1]})
+	CheckFlowExists(t, ovsCtlClient, "", dumpTable, false, []*ExpectFlow{expectFlows[1]})
 }
 
 type tableFlows struct {
@@ -177,8 +183,8 @@ func TestOFctrlFlow(t *testing.T) {
 	}()
 
 	bridge := newOFBridge(br)
-	table1 := bridge.CreateTable(1, 2, binding.TableMissActionNext)
-	table2 := bridge.CreateTable(2, 3, binding.TableMissActionNext)
+	table1 := bridge.CreateTable(t1, t2.GetID(), binding.TableMissActionNext)
+	table2 := bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	if err != nil {
@@ -201,12 +207,12 @@ func TestOFctrlFlow(t *testing.T) {
 			}
 		}
 
-		dumpTable := uint8(myTable.GetID())
-		flowList := CheckFlowExists(t, ovsCtlClient, dumpTable, true, expectflows)
+		dumpTable := myTable.GetID()
+		flowList := CheckFlowExists(t, ovsCtlClient, "", dumpTable, true, expectflows)
 
 		// Test: DumpTableStatus
 		for _, tableStates := range bridge.DumpTableStatus() {
-			if tableStates.ID == uint(dumpTable) {
+			if tableStates.ID == uint(myTable.GetID()) {
 				if int(tableStates.FlowCount) != len(flowList) {
 					t.Errorf("Flow count of table %d in the cache is incorrect, expect: %d, actual %d", dumpTable, len(flowList), tableStates.FlowCount)
 				}
@@ -227,14 +233,14 @@ func TestOFctrlFlow(t *testing.T) {
 				t.Errorf("Failed to uninstall flow1 %v", err)
 			}
 		}
-		CheckFlowExists(t, ovsCtlClient, dumpTable, false, expectflows[0:2])
+		CheckFlowExists(t, ovsCtlClient, "", dumpTable, false, expectflows[0:2])
 
 		// Test: DeleteFlowsByCookie
 		err = bridge.DeleteFlowsByCookie(dumpCookieID, dumpCookieMask)
 		if err != nil {
 			t.Errorf("Failed to DeleteFlowsByCookie: %v", err)
 		}
-		flowList, _ = OfctlDumpTableFlows(ovsCtlClient, uint8(myTable.GetID()))
+		flowList, _ = OfctlDumpTableFlowsWithoutName(ovsCtlClient, myTable.GetID())
 		if len(flowList) > 0 {
 			t.Errorf("Failed to delete flows by CookieID")
 		}
@@ -266,7 +272,7 @@ func TestOFctrlGroup(t *testing.T) {
 	for name, buckets := range map[string][]struct {
 		weight        uint16      // Must have non-zero value.
 		reg2reg       [][4]uint32 // regNum, data, startIndex, endIndex
-		resubmitTable binding.TableIDType
+		resubmitTable uint8
 	}{
 		"Normal": {
 			{weight: 100, reg2reg: [][4]uint32{{0, 1, 0, 31}, {1, 2, 15, 31}}, resubmitTable: 31},
@@ -289,9 +295,12 @@ func TestOFctrlGroup(t *testing.T) {
 			}
 			// Check if the group could be added.
 			require.Nil(t, group.Add())
-			groups, err := OfCtlDumpGroups(ovsCtlClient)
-			require.Nil(t, err)
-			require.Len(t, groups, 1)
+			var groups [][]string
+			require.NoError(t, wait.PollImmediate(openFlowCheckInterval, openFlowCheckTimeout, func() (done bool, err error) {
+				groups, err = OfCtlDumpGroups(ovsCtlClient)
+				require.Nil(t, err)
+				return len(groups) == 1, nil
+			}), "Failed to install group")
 			dumpedGroup := groups[0]
 			for i, bucket := range buckets {
 				// Must have weight
@@ -311,9 +320,11 @@ func TestOFctrlGroup(t *testing.T) {
 			}
 			// Check if the group could be deleted.
 			require.Nil(t, group.Delete())
-			groups, err = OfCtlDumpGroups(ovsCtlClient)
-			require.Nil(t, err)
-			require.Len(t, groups, 0)
+			require.NoError(t, wait.PollImmediate(openFlowCheckInterval, openFlowCheckTimeout, func() (done bool, err error) {
+				groups, err = OfCtlDumpGroups(ovsCtlClient)
+				require.Nil(t, err)
+				return len(groups) == 0, nil
+			}), "Failed to delete group")
 		})
 	}
 }
@@ -328,7 +339,7 @@ func TestTransactions(t *testing.T) {
 	}()
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(2, 3, binding.TableMissActionNext)
+	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -339,8 +350,8 @@ func TestTransactions(t *testing.T) {
 	flows, expectflows := prepareFlows(table)
 	err = bridge.AddFlowsInBundle(flows, nil, nil)
 	require.Nil(t, err, fmt.Sprintf("Failed to add flows in a transaction: %v", err))
-	dumpTable := uint8(table.GetID())
-	flowList := CheckFlowExists(t, ovsCtlClient, dumpTable, true, expectflows)
+	dumpTable := table.GetID()
+	flowList := CheckFlowExists(t, ovsCtlClient, "", dumpTable, true, expectflows)
 
 	// Test: DumpTableStatus
 	for _, tableStates := range bridge.DumpTableStatus() {
@@ -354,8 +365,8 @@ func TestTransactions(t *testing.T) {
 	// Delete flows in a bundle
 	err = bridge.AddFlowsInBundle(nil, nil, flows)
 	require.Nil(t, err, fmt.Sprintf("Failed to delete flows in a transaction: %v", err))
-	dumpTable = uint8(table.GetID())
-	flowList = CheckFlowExists(t, ovsCtlClient, dumpTable, false, expectflows)
+	dumpTable = table.GetID()
+	flowList = CheckFlowExists(t, ovsCtlClient, "", dumpTable, false, expectflows)
 
 	for _, tableStates := range bridge.DumpTableStatus() {
 		if tableStates.ID == uint(dumpTable) {
@@ -387,7 +398,7 @@ func TestBundleErrorWhenOVSRestart(t *testing.T) {
 	}()
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(2, 3, binding.TableMissActionNext)
+	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -435,7 +446,7 @@ func TestBundleErrorWhenOVSRestart(t *testing.T) {
 				flows := []binding.Flow{table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 					Cookie(getCookieID()).
 					MatchInPort(uint32(count + 1)).
-					Action().GotoTable(table.GetNext()).
+					Action().NextTable().
 					Done()}
 				err = bridge.AddFlowsInBundle(flows, nil, nil)
 				if err != nil {
@@ -506,7 +517,7 @@ func TestBundleWithGroupAndFlow(t *testing.T) {
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(2, 3, binding.TableMissActionNext)
+	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -550,12 +561,12 @@ func TestBundleWithGroupAndFlow(t *testing.T) {
 	expectedGroupBuckets := []string{bucket0, bucket1}
 	err = bridge.AddOFEntriesInBundle([]binding.OFEntry{flow, group}, nil, nil)
 	require.Nil(t, err)
-	CheckFlowExists(t, ovsCtlClient, uint8(table.GetID()), true, expectedFlows)
+	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectedFlows)
 	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, true)
 
 	err = bridge.AddOFEntriesInBundle(nil, nil, []binding.OFEntry{flow, group})
 	require.Nil(t, err)
-	CheckFlowExists(t, ovsCtlClient, uint8(table.GetID()), false, expectedFlows)
+	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), false, expectedFlows)
 	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, false)
 }
 
@@ -566,8 +577,8 @@ func TestPacketOutIn(t *testing.T) {
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table0 := bridge.CreateTable(0, 1, binding.TableMissActionNext)
-	table1 := bridge.CreateTable(1, 2, binding.TableMissActionNext)
+	table0 := bridge.CreateTable(t0, t1.GetID(), binding.TableMissActionNext)
+	table1 := bridge.CreateTable(t1, t2.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -637,7 +648,7 @@ func TestPacketOutIn(t *testing.T) {
 		Action().LoadToRegField(reg2Field, reg2Data).
 		Action().LoadToRegField(reg3Field, reg3Data).
 		Action().SetTunnelDst(tunDst).
-		Action().ResubmitToTable(table0.GetNext()).
+		Action().ResubmitToTables(table0.GetNext()).
 		Done()
 	flow1 := table1.BuildFlow(100).
 		MatchSrcMAC(srcMAC).MatchDstMAC(dstcMAC).
@@ -659,7 +670,7 @@ func TestTLVMap(t *testing.T) {
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table := bridge.CreateTable(0, 1, binding.TableMissActionNext)
+	table := bridge.CreateTable(t0, t1.GetID(), binding.TableMissActionNext)
 
 	ch := make(chan struct{})
 	err = bridge.Connect(maxRetry, ch)
@@ -674,18 +685,18 @@ func TestTLVMap(t *testing.T) {
 	time.Sleep(1 * time.Second)
 	flow1 := table.BuildFlow(100).
 		MatchProtocol(binding.ProtocolIP).MatchTunMetadata(0, 0x1234).
-		Action().ResubmitToTable(table.GetNext()).
+		Action().NextTable().
 		Done()
 	err = bridge.AddFlowsInBundle([]binding.Flow{flow1}, nil, nil)
 	require.Nil(t, err)
 	expectedFlows := []*ExpectFlow{
 		{
 			MatchStr: "priority=100,ip,tun_metadata0=0x1234",
-			ActStr:   fmt.Sprintf("resubmit(,%d)", table.GetNext()),
+			ActStr:   fmt.Sprintf("goto_table:%d", table.GetNext()),
 		},
 	}
 	ovsCtlClient := ovsctl.NewClient(br)
-	CheckFlowExists(t, ovsCtlClient, uint8(table.GetID()), true, expectedFlows)
+	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectedFlows)
 }
 
 func TestMoveTunMetadata(t *testing.T) {
@@ -695,7 +706,7 @@ func TestMoveTunMetadata(t *testing.T) {
 	//defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table := bridge.CreateTable(0, 1, binding.TableMissActionNext)
+	table := bridge.CreateTable(t0, t1.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -707,18 +718,18 @@ func TestMoveTunMetadata(t *testing.T) {
 	flow1 := table.BuildFlow(100).
 		MatchProtocol(binding.ProtocolIP).MatchTunMetadata(0, 0x1234).
 		Action().MoveRange("NXM_NX_TUN_METADATA0", "NXM_NX_REG0", binding.Range{28, 31}, binding.Range{28, 31}).
-		Action().ResubmitToTable(table.GetNext()).
+		Action().NextTable().
 		Done()
 	err = bridge.AddFlowsInBundle([]binding.Flow{flow1}, nil, nil)
 	require.Nil(t, err)
 	expectedFlows := []*ExpectFlow{
 		{
 			MatchStr: "priority=100,ip,tun_metadata0=0x1234",
-			ActStr:   fmt.Sprintf("move:NXM_NX_TUN_METADATA0[28..31]->NXM_NX_REG0[28..31],resubmit(,%d)", table.GetNext()),
+			ActStr:   fmt.Sprintf("move:NXM_NX_TUN_METADATA0[28..31]->NXM_NX_REG0[28..31],goto_table:%d", table.GetNext()),
 		},
 	}
 	ovsCtlClient := ovsctl.NewClient(br)
-	CheckFlowExists(t, ovsCtlClient, uint8(table.GetID()), true, expectedFlows)
+	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectedFlows)
 }
 
 func TestFlowWithCTMatchers(t *testing.T) {
@@ -728,7 +739,7 @@ func TestFlowWithCTMatchers(t *testing.T) {
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(2, 3, binding.TableMissActionNext)
+	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -748,7 +759,7 @@ func TestFlowWithCTMatchers(t *testing.T) {
 		MatchCTSrcPort(ctPortSrc).
 		MatchCTDstPort(ctPortDst).
 		MatchCTProtocol(binding.ProtocolTCP).
-		Action().ResubmitToTable(table.GetNext()).
+		Action().NextTable().
 		Done()
 	flow2 := table.BuildFlow(priority).
 		MatchProtocol(binding.ProtocolIP).
@@ -756,29 +767,29 @@ func TestFlowWithCTMatchers(t *testing.T) {
 		MatchCTSrcIPNet(*ctIPSrcNet).
 		MatchCTDstIPNet(*ctIPDstNet).
 		MatchCTProtocol(binding.ProtocolTCP).
-		Action().ResubmitToTable(table.GetNext()).
+		Action().NextTable().
 		Done()
 	expectFlows := []*ExpectFlow{
 		{fmt.Sprintf("priority=%d,ct_state=+new,ct_nw_src=%s,ct_nw_dst=%s,ct_nw_proto=6,ct_tp_src=%d,ct_tp_dst=%d,ip",
 			priority, ctIPSrc.String(), ctIPDst.String(), ctPortSrc, ctPortDst),
-			fmt.Sprintf("resubmit(,%d)", table.GetNext()),
+			fmt.Sprintf("goto_table:%d", table.GetNext()),
 		},
 		{
 			fmt.Sprintf("priority=%d,ct_state=+est,ct_nw_src=%s,ct_nw_dst=%s,ct_nw_proto=6,ip",
 				priority, ctIPSrcNet.String(), ctIPDstNet.String()),
-			fmt.Sprintf("resubmit(,%d)", table.GetNext()),
+			fmt.Sprintf("goto_table:%d", table.GetNext()),
 		},
 	}
 	for _, f := range []binding.Flow{flow1, flow2} {
 		err = f.Add()
 		assert.Nil(t, err, "no error returned when adding flow")
 	}
-	CheckFlowExists(t, ofctlClient, uint8(table.GetID()), true, expectFlows)
+	CheckFlowExists(t, ofctlClient, "", table.GetID(), true, expectFlows)
 	for _, f := range []binding.Flow{flow1, flow2} {
 		err = f.Delete()
 		assert.Nil(t, err, "no error returned when deleting flow")
 	}
-	CheckFlowExists(t, ofctlClient, uint8(table.GetID()), false, expectFlows)
+	CheckFlowExists(t, ofctlClient, "", table.GetID(), false, expectFlows)
 }
 
 func TestNoteAction(t *testing.T) {
@@ -788,7 +799,7 @@ func TestNoteAction(t *testing.T) {
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(2, 3, binding.TableMissActionNext)
+	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	require.Nil(t, err, "Failed to start OFService")
@@ -802,7 +813,7 @@ func TestNoteAction(t *testing.T) {
 		MatchProtocol(binding.ProtocolIP).
 		MatchSrcIP(srcIP).
 		Action().Note(testNotes).
-		Action().GotoTable(table.GetNext()).
+		Action().NextTable().
 		Done()
 
 	convertNoteToHex := func(note string) string {
@@ -826,10 +837,10 @@ func TestNoteAction(t *testing.T) {
 
 	err = flow1.Add()
 	assert.Nil(t, err, "expected no error when adding flow")
-	CheckFlowExists(t, ofctlClient, uint8(table.GetID()), true, expectFlows)
+	CheckFlowExists(t, ofctlClient, "", table.GetID(), true, expectFlows)
 	err = flow1.Delete()
 	assert.Nil(t, err, "expected no error when deleting flow")
-	CheckFlowExists(t, ofctlClient, uint8(table.GetID()), false, expectFlows)
+	CheckFlowExists(t, ofctlClient, "", table.GetID(), false, expectFlows)
 }
 
 func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
@@ -849,21 +860,21 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			Cookie(getCookieID()).
 			MatchInPort(podOFport).
 			Action().LoadRegMark(fromLocalMark).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolARP).
 			Cookie(getCookieID()).
 			MatchInPort(podOFport).
 			MatchARPSha(podMAC).
 			MatchARPSpa(podIP).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
 			MatchInPort(podOFport).
 			MatchSrcMAC(podMAC).
 			MatchSrcIP(podIP).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolARP).
 			Cookie(getCookieID()).
@@ -890,27 +901,24 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			LoadFieldToField(regField0, regField0).
 			LoadRegMark(mark1).
 			Done(). // Finish learn action.
-			Action().ResubmitToTable(table.GetID()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
-			Action().CT(false, table.GetNext(), ctZone).CTDone().
+			Action().CT(false, table.GetNext(), ctZone, nil).CTDone().
 			Done(),
 		table.BuildFlow(priorityNormal+10).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
 			MatchRegMark(fromGatewayMark).
 			MatchCTMark(gatewayCTMark).
 			MatchCTStateNew(false).MatchCTStateTrk(true).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
 			MatchRegMark(fromGatewayMark).
 			MatchCTStateNew(true).MatchCTStateTrk(true).
-			Action().CT(
-			true,
-			table.GetNext(),
-			ctZone).
+			Action().CT(true, table.GetNext(), ctZone, nil).
 			LoadToCtMark(gatewayCTMark).CTDone().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
@@ -918,7 +926,7 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			MatchCTMark(gatewayCTMark).
 			MatchCTStateNew(false).MatchCTStateTrk(true).
 			Action().LoadRange(binding.NxmFieldDstMAC, gwMACData, &binding.Range{0, 47}).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
@@ -928,7 +936,7 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 		table.BuildFlow(priorityNormal-10).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
 			MatchCTStateNew(true).MatchCTStateTrk(true).
-			Action().CT(true, table.GetNext(), ctZone).CTDone().
+			Action().CT(true, table.GetNext(), ctZone, nil).CTDone().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
@@ -937,7 +945,7 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			Action().SetSrcMAC(gwMAC).
 			Action().SetDstMAC(podMAC).
 			Action().DecTTL().
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
@@ -946,7 +954,7 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			Action().SetSrcMAC(gwMAC).
 			Action().SetDstMAC(vMAC).
 			Action().SetTunnelDst(tunnelPeer).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIPv6).
 			Cookie(getCookieID()).
@@ -955,20 +963,20 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			Action().SetSrcMAC(gwMAC).
 			Action().SetDstMAC(vMAC).
 			Action().SetTunnelDst(tunnelPeerIPv6).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
 			MatchDstIP(gwIP).
 			Action().SetDstMAC(gwMAC).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).
 			Cookie(getCookieID()).
 			MatchDstMAC(podMAC).
 			Action().LoadToRegField(portCacheField, podOFport).
 			Action().LoadRegMark(portFoundMark).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal).
 			Cookie(getCookieID()).
@@ -978,14 +986,14 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			Done(), table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Cookie(getCookieID()).
 			MatchDstIPNet(*serviceCIDR).
-			Action().Output(int(gwOFPort)).
+			Action().Output(gwOFPort).
 			Done(),
 		table.BuildFlow(priorityNormal).
 			Cookie(getCookieID()).
 			MatchProtocol(binding.ProtocolIP).
 			MatchSrcIP(podIP).
 			MatchIPDSCP(ipDSCP).
-			Action().GotoTable(table.GetNext()).
+			Action().NextTable().
 			Done(),
 		table.BuildFlow(priorityNormal+20).MatchProtocol(binding.ProtocolTCP).Cookie(getCookieID()).MatchDstPort(uint16(8080), nil).
 			Action().Conjunction(uint32(1001), uint8(3), uint8(3)).Done(),
@@ -998,9 +1006,9 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 		table.BuildFlow(priorityNormal+20).MatchProtocol(binding.ProtocolIP).Cookie(getCookieID()).MatchRegFieldWithValue(portCacheField, podOFport).
 			Action().Conjunction(uint32(1001), uint8(2), uint8(3)).Done(),
 		table.BuildFlow(priorityNormal+20).MatchProtocol(binding.ProtocolIP).Cookie(getCookieID()).MatchConjID(1001).
-			Action().GotoTable(table.GetNext()).Done(),
+			Action().NextTable().Done(),
 		table.BuildFlow(priorityNormal+20).MatchProtocol(binding.ProtocolIP).Cookie(getCookieID()).MatchConjID(1001).MatchSrcIP(gwIP).
-			Action().GotoTable(table.GetNext()).Done(),
+			Action().NextTable().Done(),
 	)
 
 	gotoTableAction := fmt.Sprintf("goto_table:%d", table.GetNext())
@@ -1011,11 +1019,11 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 		&ExpectFlow{"priority=200,ip,in_port=3,dl_src=aa:aa:aa:aa:aa:13,nw_src=192.168.1.3", gotoTableAction},
 		&ExpectFlow{"priority=200,arp,arp_tpa=192.168.2.1,arp_op=1", "move:NXM_OF_ETH_SRC[]->NXM_OF_ETH_DST[],set_field:aa:bb:cc:dd:ee:ff->eth_src,load:0x2->NXM_OF_ARP_OP[],move:NXM_NX_ARP_SHA[]->NXM_NX_ARP_THA[],set_field:aa:bb:cc:dd:ee:ff->arp_sha,move:NXM_OF_ARP_SPA[]->NXM_OF_ARP_TPA[],set_field:192.168.2.1->arp_spa,IN_PORT"},
 		&ExpectFlow{"priority=190,arp", "NORMAL"},
-		&ExpectFlow{"priority=200,tcp", fmt.Sprintf("learn(table=%d,idle_timeout=10,priority=190,delete_learned,cookie=0x1,eth_type=0x800,nw_proto=6,NXM_OF_TCP_DST[],NXM_NX_REG0[0..15]=0xfff,load:NXM_NX_REG0[0..15]->NXM_NX_REG0[0..15],load:0xffe->NXM_NX_REG0[16..31]),resubmit(,%d)", table.GetID(), table.GetID())},
+		&ExpectFlow{"priority=200,tcp", fmt.Sprintf("learn(table=%d,idle_timeout=10,priority=190,delete_learned,cookie=0x1,eth_type=0x800,nw_proto=6,NXM_OF_TCP_DST[],NXM_NX_REG0[0..15]=0xfff,load:NXM_NX_REG0[0..15]->NXM_NX_REG0[0..15],load:0xffe->NXM_NX_REG0[16..31]),goto_table:%d", table.GetID(), table.GetNext())},
 		&ExpectFlow{"priority=200,ip", fmt.Sprintf("ct(table=%d,zone=65520)", table.GetNext())},
-		&ExpectFlow{"priority=210,ct_state=-new+trk,ct_mark=0x20/0xff,ip,reg0=0x1/0xffff", gotoTableAction},
-		&ExpectFlow{"priority=200,ct_state=+new+trk,ip,reg0=0x1/0xffff", fmt.Sprintf("ct(commit,table=%d,zone=65520,exec(load:0x20->NXM_NX_CT_MARK[0..7])", table.GetNext())},
-		&ExpectFlow{"priority=200,ct_state=-new+trk,ct_mark=0x20/0xff,ip", fmt.Sprintf("load:0xaaaaaaaaaa11->NXM_OF_ETH_DST[],%s", gotoTableAction)},
+		&ExpectFlow{"priority=210,ct_state=-new+trk,ct_mark=0x2/0x2,ip,reg0=0x1/0xffff", gotoTableAction},
+		&ExpectFlow{"priority=200,ct_state=+new+trk,ip,reg0=0x1/0xffff", fmt.Sprintf("ct(commit,table=%d,zone=65520,exec(load:0x1->NXM_NX_CT_MARK[1])", table.GetNext())},
+		&ExpectFlow{"priority=200,ct_state=-new+trk,ct_mark=0x2/0x2,ip", fmt.Sprintf("load:0xaaaaaaaaaa11->NXM_OF_ETH_DST[],%s", gotoTableAction)},
 		&ExpectFlow{"priority=200,ct_state=+new+inv,ip", "drop"},
 		&ExpectFlow{"priority=190,ct_state=+new+trk,ip", fmt.Sprintf("ct(commit,table=%d,zone=65520)", table.GetNext())},
 		&ExpectFlow{"priority=200,ip,dl_dst=aa:bb:cc:dd:ee:ff,nw_dst=192.168.1.3", fmt.Sprintf("set_field:aa:aa:aa:aa:aa:11->eth_src,set_field:aa:aa:aa:aa:aa:13->eth_dst,dec_ttl,%s", gotoTableAction)},
@@ -1043,20 +1051,20 @@ func prepareNATflows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 	natedIP2 := net.ParseIP("10.10.0.10")
 	natIPRange1 := &binding.IPRange{StartIP: natedIP1, EndIP: natedIP1}
 	natIPRange2 := &binding.IPRange{StartIP: natedIP1, EndIP: natedIP2}
-	snatCTMark := binding.NewCTMark(0x40, 0, 7)
+	snatCTMark := binding.NewCTMark(binding.NewCTMarkField(0, 7), 0x40)
 	snatMark1 := binding.NewOneBitRegMark(marksReg, 17, "SNATMark1")
 	snatMark2 := binding.NewOneBitRegMark(marksReg, 18, "SNATMark2")
 	dnatMark1 := binding.NewOneBitRegMark(marksReg, 19, "DNATMark1")
 	dnatMark2 := binding.NewOneBitRegMark(marksReg, 20, "DNATMark2")
 	flows := []binding.Flow{
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
-			Action().CT(false, table.GetNext(), ctZone).NAT().CTDone().
+			Action().CT(false, table.GetNext(), ctZone, nil).NAT().CTDone().
 			Cookie(getCookieID()).
 			Done(),
 		table.BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
 			MatchRegMark(snatMark1).
-			Action().CT(true, table.GetNext(), ctZone).
+			Action().CT(true, table.GetNext(), ctZone, nil).
 			SNAT(natIPRange1, nil).
 			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(getCookieID()).
@@ -1064,7 +1072,7 @@ func prepareNATflows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 		table.BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
 			MatchRegMark(snatMark2).
-			Action().CT(true, table.GetNext(), ctZone).
+			Action().CT(true, table.GetNext(), ctZone, nil).
 			SNAT(natIPRange2, nil).
 			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(getCookieID()).
@@ -1072,7 +1080,7 @@ func prepareNATflows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 		table.BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
 			MatchRegMark(dnatMark1).
-			Action().CT(true, table.GetNext(), ctZone).
+			Action().CT(true, table.GetNext(), ctZone, nil).
 			DNAT(natIPRange1, nil).
 			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(getCookieID()).
@@ -1080,7 +1088,7 @@ func prepareNATflows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 		table.BuildFlow(priorityNormal).
 			MatchProtocol(binding.ProtocolIP).
 			MatchRegMark(dnatMark2).
-			Action().CT(true, table.GetNext(), ctZone).
+			Action().CT(true, table.GetNext(), ctZone, nil).
 			DNAT(natIPRange2, nil).
 			LoadToCtMark(snatCTMark).CTDone().
 			Cookie(getCookieID()).

@@ -14,6 +14,12 @@
 
 package k8s
 
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
 // NamespacedName generates the conventional K8s resource name,
 // which connects namespace and name with "/".
 func NamespacedName(namespace, name string) string {
@@ -22,4 +28,30 @@ func NamespacedName(namespace, name string) string {
 		return name
 	}
 	return namespace + "/" + name
+}
+
+// SplitNamespacedName splits conventional K8s resource name
+// to Namespace and Resource Name
+func SplitNamespacedName(name string) (string, string) {
+	tokens := strings.Split(name, "/")
+
+	if len(tokens) == 2 {
+		return tokens[0], tokens[1]
+	}
+
+	return "", tokens[0]
+}
+
+func ParseStatefulSetName(name string) (statefulSetName string, index int, err error) {
+	splittedName := strings.Split(name, "-")
+	if len(splittedName) < 2 {
+		err = fmt.Errorf("invalid StatefulSet name: %s", name)
+		return
+	}
+	index, err = strconv.Atoi(splittedName[len(splittedName)-1])
+	if err != nil {
+		return
+	}
+	statefulSetName = strings.Join(splittedName[:len(splittedName)-1], "-")
+	return
 }

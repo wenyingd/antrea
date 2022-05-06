@@ -16,11 +16,12 @@ package env
 
 import (
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 
 	"k8s.io/klog/v2"
+
+	"antrea.io/antrea/pkg/util/runtime"
 )
 
 const (
@@ -33,15 +34,23 @@ const (
 	antreaCloudEKSEnvKey = "ANTREA_CLOUD_EKS"
 
 	defaultAntreaNamespace = "kube-system"
+
+	allowNoEncapWithoutAntreaProxyEnvKey = "ALLOW_NO_ENCAP_WITHOUT_ANTREA_PROXY"
 )
 
 // GetNodeName returns the node's name used in Kubernetes, based on the priority:
 // - Environment variable NODE_NAME, which should be set by Downward API
 // - OS's hostname
 func GetNodeName() (string, error) {
+	lowerWindowsNodeName := func(name string) string {
+		if runtime.IsWindowsPlatform() {
+			return strings.ToLower(name)
+		}
+		return name
+	}
 	nodeName := os.Getenv(NodeNameEnvKey)
 	if nodeName != "" {
-		return nodeName, nil
+		return lowerWindowsNodeName(nodeName), nil
 	}
 	klog.Infof("Environment variable %s not found, using hostname instead", NodeNameEnvKey)
 	var err error
@@ -50,10 +59,7 @@ func GetNodeName() (string, error) {
 		klog.Errorf("Failed to get local hostname: %v", err)
 		return "", err
 	}
-	if runtime.GOOS == "windows" {
-		return strings.ToLower(nodeName), nil
-	}
-	return nodeName, nil
+	return lowerWindowsNodeName(nodeName), nil
 }
 
 // GetPodName returns name of the Pod where the code executes.
@@ -120,4 +126,10 @@ func GetAntreaNamespace() string {
 		namespace = defaultAntreaNamespace
 	}
 	return namespace
+}
+
+// GetAllowNoEncapWithoutAntreaProxy returns whether AntreaProxy can be disabled for traffic
+// modes which support noEncap.
+func GetAllowNoEncapWithoutAntreaProxy() bool {
+	return getBoolEnvVar(allowNoEncapWithoutAntreaProxyEnvKey, false)
 }

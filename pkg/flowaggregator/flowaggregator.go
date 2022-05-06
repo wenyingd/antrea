@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/vmware/go-ipfix/pkg/collector"
@@ -31,6 +32,8 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/flowaggregator/clickhouseclient"
+	"antrea.io/antrea/pkg/flowaggregator/querier"
 	"antrea.io/antrea/pkg/ipfix"
 )
 
@@ -119,11 +122,31 @@ var (
 		"sourcePodLabels",
 		"destinationPodLabels",
 	}
+	antreaFlowEndSecondsElementList = []string{
+		"flowEndSecondsFromSourceNode",
+		"flowEndSecondsFromDestinationNode",
+	}
+	antreaThroughputElementList = []string{
+		"throughput",
+		"reverseThroughput",
+	}
+	antreaSourceThroughputElementList = []string{
+		"throughputFromSourceNode",
+		"reverseThroughputFromSourceNode",
+	}
+	antreaDestinationThroughputElementList = []string{
+		"throughputFromDestinationNode",
+		"reverseThroughputFromDestinationNode",
+	}
 	aggregationElements = &ipfixintermediate.AggregationElements{
 		NonStatsElements:                   nonStatsElementList,
 		StatsElements:                      statsElementList,
 		AggregatedSourceStatsElements:      antreaSourceStatsElementList,
 		AggregatedDestinationStatsElements: antreaDestinationStatsElementList,
+		AntreaFlowEndSecondsElements:       antreaFlowEndSecondsElementList,
+		ThroughputElements:                 antreaThroughputElementList,
+		SourceThroughputElements:           antreaSourceThroughputElementList,
+		DestinationThroughputElements:      antreaDestinationThroughputElementList,
 	}
 
 	correlateFields = []string{
@@ -174,6 +197,7 @@ type flowAggregator struct {
 	aggregatorTransportProtocol AggregatorTransportProtocol
 	collectingProcess           ipfix.IPFIXCollectingProcess
 	aggregationProcess          ipfix.IPFIXAggregationProcess
+	dbExportProcess             *clickhouseclient.ClickHouseExportProcess
 	activeFlowRecordTimeout     time.Duration
 	inactiveFlowRecordTimeout   time.Duration
 	exportingProcess            ipfix.IPFIXExportingProcess
@@ -182,10 +206,13 @@ type flowAggregator struct {
 	registry                    ipfix.IPFIXRegistry
 	set                         ipfixentities.Set
 	flowAggregatorAddress       string
+	includePodLabels            bool
 	k8sClient                   kubernetes.Interface
 	observationDomainID         uint32
 	podInformer                 coreinformers.PodInformer
 	sendJSONRecord              bool
+	numRecordsExported          int64
+	numRecordsReceived          int64
 }
 
 func NewFlowAggregator(
@@ -195,6 +222,7 @@ func NewFlowAggregator(
 	inactiveFlowRecTimeout time.Duration,
 	aggregatorTransportProtocol AggregatorTransportProtocol,
 	flowAggregatorAddress string,
+	includePodLabels bool,
 	k8sClient kubernetes.Interface,
 	observationDomainID uint32,
 	podInformer coreinformers.PodInformer,
@@ -211,6 +239,7 @@ func NewFlowAggregator(
 		registry:                    registry,
 		set:                         ipfixentities.NewSet(false),
 		flowAggregatorAddress:       flowAggregatorAddress,
+		includePodLabels:            includePodLabels,
 		k8sClient:                   k8sClient,
 		observationDomainID:         observationDomainID,
 		podInformer:                 podInformer,
@@ -282,7 +311,8 @@ func (fa *flowAggregator) InitCollectingProcess() error {
 			IsEncrypted:   false,
 		}
 	}
-	cpInput.NumExtraElements = len(antreaSourceStatsElementList) + len(antreaDestinationStatsElementList) + len(antreaLabelsElementList)
+	cpInput.NumExtraElements = len(antreaSourceStatsElementList) + len(antreaDestinationStatsElementList) + len(antreaLabelsElementList) +
+		len(antreaFlowEndSecondsElementList) + len(antreaThroughputElementList) + len(antreaSourceThroughputElementList) + len(antreaDestinationThroughputElementList)
 	var err error
 	fa.collectingProcess, err = ipfix.NewIPFIXCollectingProcess(cpInput)
 	return err
@@ -299,6 +329,12 @@ func (fa *flowAggregator) InitAggregationProcess() error {
 		AggregateElements:     aggregationElements,
 	}
 	fa.aggregationProcess, err = ipfix.NewIPFIXAggregationProcess(apInput)
+	return err
+}
+
+func (fa *flowAggregator) InitDBExportProcess(chInput clickhouseclient.ClickHouseInput) error {
+	var err error
+	fa.dbExportProcess, err = clickhouseclient.NewClickHouseClient(chInput)
 	return err
 }
 
@@ -335,7 +371,6 @@ func (fa *flowAggregator) initExportingProcess() error {
 			CollectorProtocol:   fa.externalFlowCollectorProto,
 			ObservationDomainID: fa.observationDomainID,
 			TempRefTimeout:      0,
-			PathMTU:             0,
 			IsEncrypted:         false,
 			SendJSONRecord:      fa.sendJSONRecord,
 		}
@@ -346,7 +381,6 @@ func (fa *flowAggregator) initExportingProcess() error {
 			CollectorProtocol:   fa.externalFlowCollectorProto,
 			ObservationDomainID: fa.observationDomainID,
 			TempRefTimeout:      1800,
-			PathMTU:             0,
 			IsEncrypted:         false,
 			SendJSONRecord:      fa.sendJSONRecord,
 		}
@@ -367,11 +401,16 @@ func (fa *flowAggregator) initExportingProcess() error {
 	return nil
 }
 
-func (fa *flowAggregator) Run(stopCh <-chan struct{}) {
+func (fa *flowAggregator) Run(stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
 	go fa.collectingProcess.Start()
 	defer fa.collectingProcess.Stop()
 	go fa.aggregationProcess.Start()
 	defer fa.aggregationProcess.Stop()
+	if fa.dbExportProcess != nil {
+		go fa.dbExportProcess.Start()
+		defer fa.dbExportProcess.Stop()
+	}
 	go fa.flowRecordExpiryCheck(stopCh)
 
 	<-stopCh
@@ -379,7 +418,7 @@ func (fa *flowAggregator) Run(stopCh <-chan struct{}) {
 
 func (fa *flowAggregator) flowRecordExpiryCheck(stopCh <-chan struct{}) {
 	expireTimer := time.NewTimer(fa.activeFlowRecordTimeout)
-
+	logTicker := time.NewTicker(time.Minute)
 	for {
 		select {
 		case <-stopCh:
@@ -389,7 +428,7 @@ func (fa *flowAggregator) flowRecordExpiryCheck(stopCh <-chan struct{}) {
 			expireTimer.Stop()
 			return
 		case <-expireTimer.C:
-			if fa.exportingProcess == nil {
+			if fa.externalFlowCollectorAddr != "" && fa.exportingProcess == nil {
 				err := fa.initExportingProcess()
 				if err != nil {
 					klog.Errorf("Error when initializing exporting process: %v, will retry in %s", err, fa.activeFlowRecordTimeout)
@@ -404,13 +443,21 @@ func (fa *flowAggregator) flowRecordExpiryCheck(stopCh <-chan struct{}) {
 				klog.Errorf("Error when sending expired flow records: %v", err)
 				// If there is an error when sending flow records because of intermittent connectivity, we reset the connection
 				// to IPFIX collector and retry in the next export cycle to reinitialize the connection and send flow records.
-				fa.exportingProcess.CloseConnToCollector()
-				fa.exportingProcess = nil
+				if fa.exportingProcess != nil {
+					fa.exportingProcess.CloseConnToCollector()
+					fa.exportingProcess = nil
+				}
 				expireTimer.Reset(fa.activeFlowRecordTimeout)
 				continue
 			}
 			// Get the new expiry and reset the timer.
 			expireTimer.Reset(fa.aggregationProcess.GetExpiryFromExpirePriorityQueue())
+		case <-logTicker.C:
+			// Add visibility of processing stats of Flow Aggregator
+			klog.V(4).InfoS("Total number of records received", "count", fa.collectingProcess.GetNumRecordsReceived())
+			klog.V(4).InfoS("Total number of records exported", "count", fa.numRecordsExported)
+			klog.V(4).InfoS("Total number of flows stored in Flow Aggregator", "count", fa.aggregationProcess.GetNumFlows())
+			klog.V(4).InfoS("Number of exporters connected with Flow Aggregator", "count", fa.collectingProcess.GetNumConnToCollector())
 		}
 	}
 }
@@ -430,24 +477,27 @@ func (fa *flowAggregator) sendFlowKeyRecord(key ipfixintermediate.FlowKey, recor
 		fa.fillK8sMetadata(key, record.Record)
 		fa.aggregationProcess.SetCorrelatedFieldsFilled(record)
 	}
-	if !fa.aggregationProcess.AreExternalFieldsFilled(*record) {
+	if fa.includePodLabels && !fa.aggregationProcess.AreExternalFieldsFilled(*record) {
 		fa.fillPodLabels(key, record.Record)
 		fa.aggregationProcess.SetExternalFieldsFilled(record)
 	}
-
 	if err := fa.set.AddRecord(record.Record.GetOrderedElementList(), templateID); err != nil {
 		return err
 	}
-
-	sentBytes, err := fa.exportingProcess.SendSet(fa.set)
-	if err != nil {
+	if fa.exportingProcess != nil {
+		sentBytes, err := fa.exportingProcess.SendSet(fa.set)
+		if err != nil {
+			return err
+		}
+		klog.V(4).Infof("Data set sent successfully: %d Bytes sent", sentBytes)
+	}
+	if fa.dbExportProcess != nil {
+		fa.dbExportProcess.CacheSet(fa.set)
+	}
+	if err := fa.aggregationProcess.ResetStatAndThroughputElementsInRecord(record.Record); err != nil {
 		return err
 	}
-	if err = fa.aggregationProcess.ResetStatElementsInRecord(record.Record); err != nil {
-		return err
-	}
-
-	klog.V(4).Infof("Data set sent successfully: %d Bytes sent", sentBytes)
+	fa.numRecordsExported = fa.numRecordsExported + 1
 	return nil
 }
 
@@ -462,52 +512,82 @@ func (fa *flowAggregator) sendTemplateSet(isIPv6 bool) (int, error) {
 		templateID = fa.templateIDv6
 	}
 	for _, ie := range ianaInfoElements {
-		element, err := fa.registry.GetInfoElement(ie, ipfixregistry.IANAEnterpriseID)
+		ie, err := fa.createInfoElementForTemplateSet(ie, ipfixregistry.IANAEnterpriseID)
 		if err != nil {
-			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
+			return 0, err
 		}
-		ie := ipfixentities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
 	}
 	for _, ie := range ianaReverseInfoElements {
-		element, err := fa.registry.GetInfoElement(ie, ipfixregistry.IANAReversedEnterpriseID)
+		ie, err := fa.createInfoElementForTemplateSet(ie, ipfixregistry.IANAReversedEnterpriseID)
 		if err != nil {
-			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
+			return 0, err
 		}
-		ie := ipfixentities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
 	}
 	for _, ie := range antreaInfoElements {
-		element, err := fa.registry.GetInfoElement(ie, ipfixregistry.AntreaEnterpriseID)
+		ie, err := fa.createInfoElementForTemplateSet(ie, ipfixregistry.AntreaEnterpriseID)
 		if err != nil {
-			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
+			return 0, err
 		}
-		ie := ipfixentities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
 	}
-	for _, ie := range antreaSourceStatsElementList {
-		element, err := fa.registry.GetInfoElement(ie, ipfixregistry.AntreaEnterpriseID)
+	// The order of source and destination stats elements needs to match the order specified in
+	// addFieldsForStatsAggregation method in go-ipfix aggregation process.
+	for i := range statsElementList {
+		// Add Antrea source stats fields
+		ieName := antreaSourceStatsElementList[i]
+		ie, err := fa.createInfoElementForTemplateSet(ieName, ipfixregistry.AntreaEnterpriseID)
 		if err != nil {
-			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
+			return 0, err
 		}
-		ie := ipfixentities.NewInfoElementWithValue(element, nil)
+		elements = append(elements, ie)
+		// Add Antrea destination stats fields
+		ieName = antreaDestinationStatsElementList[i]
+		ie, err = fa.createInfoElementForTemplateSet(ieName, ipfixregistry.AntreaEnterpriseID)
+		if err != nil {
+			return 0, err
+		}
 		elements = append(elements, ie)
 	}
-	for _, ie := range antreaDestinationStatsElementList {
-		element, err := fa.registry.GetInfoElement(ie, ipfixregistry.AntreaEnterpriseID)
+	for _, ie := range antreaFlowEndSecondsElementList {
+		ie, err := fa.createInfoElementForTemplateSet(ie, ipfixregistry.AntreaEnterpriseID)
 		if err != nil {
-			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
+			return 0, err
 		}
-		ie := ipfixentities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
 	}
-	for _, ie := range antreaLabelsElementList {
-		element, err := fa.registry.GetInfoElement(ie, ipfixregistry.AntreaEnterpriseID)
+	for i := range antreaThroughputElementList {
+		// Add common throughput fields
+		ieName := antreaThroughputElementList[i]
+		ie, err := fa.createInfoElementForTemplateSet(ieName, ipfixregistry.AntreaEnterpriseID)
 		if err != nil {
-			return 0, fmt.Errorf("%s not present. returned error: %v", ie, err)
+			return 0, err
 		}
-		ie := ipfixentities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
+		// Add source node specific throughput fields
+		ieName = antreaSourceThroughputElementList[i]
+		ie, err = fa.createInfoElementForTemplateSet(ieName, ipfixregistry.AntreaEnterpriseID)
+		if err != nil {
+			return 0, err
+		}
+		elements = append(elements, ie)
+		// Add destination node specific throughput fields
+		ieName = antreaDestinationThroughputElementList[i]
+		ie, err = fa.createInfoElementForTemplateSet(ieName, ipfixregistry.AntreaEnterpriseID)
+		if err != nil {
+			return 0, err
+		}
+		elements = append(elements, ie)
+	}
+	if fa.includePodLabels {
+		for _, ie := range antreaLabelsElementList {
+			ie, err := fa.createInfoElementForTemplateSet(ie, ipfixregistry.AntreaEnterpriseID)
+			if err != nil {
+				return 0, err
+			}
+			elements = append(elements, ie)
+		}
 	}
 	fa.set.ResetSet()
 	if err := fa.set.PrepareSet(ipfixentities.Template, templateID); err != nil {
@@ -525,23 +605,20 @@ func (fa *flowAggregator) sendTemplateSet(isIPv6 bool) (int, error) {
 // that have incomplete info due to deny network policy.
 func (fa *flowAggregator) fillK8sMetadata(key ipfixintermediate.FlowKey, record ipfixentities.Record) {
 	// fill source Pod info when sourcePodName is empty
-	if sourcePodName, index, exist := record.GetInfoElementWithValue("sourcePodName"); exist {
-		if sourcePodName.Value == "" {
+	if sourcePodName, _, exist := record.GetInfoElementWithValue("sourcePodName"); exist {
+		if sourcePodName.GetStringValue() == "" {
 			pods, err := fa.podInformer.Informer().GetIndexer().ByIndex(podInfoIndex, key.SourceAddress)
 			if err == nil && len(pods) > 0 {
 				pod, ok := pods[0].(*corev1.Pod)
 				if !ok {
 					klog.Warningf("Invalid Pod obj in cache")
 				}
-				sourcePodName.Value = pod.Name
-				record.SetInfoElementWithValue(index, *sourcePodName)
-				if sourcePodNamespace, index, exist := record.GetInfoElementWithValue("sourcePodNamespace"); exist {
-					sourcePodNamespace.Value = pod.Namespace
-					record.SetInfoElementWithValue(index, *sourcePodNamespace)
+				sourcePodName.SetStringValue(pod.Name)
+				if sourcePodNamespace, _, exist := record.GetInfoElementWithValue("sourcePodNamespace"); exist {
+					sourcePodNamespace.SetStringValue(pod.Namespace)
 				}
-				if sourceNodeName, index, exist := record.GetInfoElementWithValue("sourceNodeName"); exist {
-					sourceNodeName.Value = pod.Spec.NodeName
-					record.SetInfoElementWithValue(index, *sourceNodeName)
+				if sourceNodeName, _, exist := record.GetInfoElementWithValue("sourceNodeName"); exist {
+					sourceNodeName.SetStringValue(pod.Spec.NodeName)
 				}
 			} else {
 				klog.Warning(err)
@@ -549,23 +626,20 @@ func (fa *flowAggregator) fillK8sMetadata(key ipfixintermediate.FlowKey, record 
 		}
 	}
 	// fill destination Pod info when destinationPodName is empty
-	if destinationPodName, index, exist := record.GetInfoElementWithValue("destinationPodName"); exist {
-		if destinationPodName.Value == "" {
+	if destinationPodName, _, exist := record.GetInfoElementWithValue("destinationPodName"); exist {
+		if destinationPodName.GetStringValue() == "" {
 			pods, err := fa.podInformer.Informer().GetIndexer().ByIndex(podInfoIndex, key.DestinationAddress)
 			if len(pods) > 0 && err == nil {
 				pod, ok := pods[0].(*corev1.Pod)
 				if !ok {
 					klog.Warningf("Invalid Pod obj in cache")
 				}
-				destinationPodName.Value = pod.Name
-				record.SetInfoElementWithValue(index, *destinationPodName)
-				if destinationPodNamespace, index, exist := record.GetInfoElementWithValue("destinationPodNamespace"); exist {
-					destinationPodNamespace.Value = pod.Namespace
-					record.SetInfoElementWithValue(index, *destinationPodNamespace)
+				destinationPodName.SetStringValue(pod.Name)
+				if destinationPodNamespace, _, exist := record.GetInfoElementWithValue("destinationPodNamespace"); exist {
+					destinationPodNamespace.SetStringValue(pod.Namespace)
 				}
-				if destinationNodeName, index, exist := record.GetInfoElementWithValue("destinationNodeName"); exist {
-					destinationNodeName.Value = pod.Spec.NodeName
-					record.SetInfoElementWithValue(index, *destinationNodeName)
+				if destinationNodeName, _, exist := record.GetInfoElementWithValue("destinationNodeName"); exist {
+					destinationNodeName.SetStringValue(pod.Spec.NodeName)
 				}
 			} else {
 				klog.Warning(err)
@@ -599,8 +673,11 @@ func (fa *flowAggregator) fillPodLabels(key ipfixintermediate.FlowKey, record ip
 	podLabelString := fa.fetchPodLabels(key.SourceAddress)
 	sourcePodLabelsElement, err := fa.registry.GetInfoElement("sourcePodLabels", ipfixregistry.AntreaEnterpriseID)
 	if err == nil {
-		sourcePodLabelsIE := ipfixentities.NewInfoElementWithValue(sourcePodLabelsElement, bytes.NewBufferString(podLabelString).Bytes())
-		err = record.AddInfoElement(&sourcePodLabelsIE)
+		sourcePodLabelsIE, err := ipfixentities.DecodeAndCreateInfoElementWithValue(sourcePodLabelsElement, bytes.NewBufferString(podLabelString).Bytes())
+		if err != nil {
+			klog.Warningf("Create sourcePodLabels InfoElementWithValue failed: %v", err)
+		}
+		err = record.AddInfoElement(sourcePodLabelsIE)
 		if err != nil {
 			klog.Warningf("Add sourcePodLabels InfoElementWithValue failed: %v", err)
 		}
@@ -610,12 +687,40 @@ func (fa *flowAggregator) fillPodLabels(key ipfixintermediate.FlowKey, record ip
 	podLabelString = fa.fetchPodLabels(key.DestinationAddress)
 	destinationPodLabelsElement, err := fa.registry.GetInfoElement("destinationPodLabels", ipfixregistry.AntreaEnterpriseID)
 	if err == nil {
-		destinationPodLabelsIE := ipfixentities.NewInfoElementWithValue(destinationPodLabelsElement, bytes.NewBufferString(podLabelString).Bytes())
-		err = record.AddInfoElement(&destinationPodLabelsIE)
+		destinationPodLabelsIE, err := ipfixentities.DecodeAndCreateInfoElementWithValue(destinationPodLabelsElement, bytes.NewBufferString(podLabelString).Bytes())
+		if err != nil {
+			klog.Warningf("Create destinationPodLabelsIE InfoElementWithValue failed: %v", err)
+		}
+		err = record.AddInfoElement(destinationPodLabelsIE)
 		if err != nil {
 			klog.Warningf("Add destinationPodLabels InfoElementWithValue failed: %v", err)
 		}
 	} else {
 		klog.Warningf("Get destinationPodLabels InfoElement failed: %v", err)
 	}
+}
+
+func (fa *flowAggregator) GetFlowRecords(flowKey *ipfixintermediate.FlowKey) []map[string]interface{} {
+	return fa.aggregationProcess.GetRecords(flowKey)
+}
+
+func (fa *flowAggregator) GetRecordMetrics() querier.Metrics {
+	return querier.Metrics{
+		NumRecordsExported: fa.numRecordsExported,
+		NumRecordsReceived: fa.collectingProcess.GetNumRecordsReceived(),
+		NumFlows:           fa.aggregationProcess.GetNumFlows(),
+		NumConnToCollector: fa.collectingProcess.GetNumConnToCollector(),
+	}
+}
+
+func (fa *flowAggregator) createInfoElementForTemplateSet(ieName string, enterpriseID uint32) (ipfixentities.InfoElementWithValue, error) {
+	element, err := fa.registry.GetInfoElement(ieName, enterpriseID)
+	if err != nil {
+		return nil, fmt.Errorf("%s not present. returned error: %v", ieName, err)
+	}
+	ie, err := ipfixentities.DecodeAndCreateInfoElementWithValue(element, nil)
+	if err != nil {
+		return nil, err
+	}
+	return ie, nil
 }

@@ -15,6 +15,7 @@
 package memberlist
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -22,10 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/groupcache/consistenthash"
 	"github.com/hashicorp/memberlist"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/agent/consistenthash"
 	"antrea.io/antrea/pkg/apis/crd/v1alpha2"
 	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha2"
 	crdlister "antrea.io/antrea/pkg/client/listers/crd/v1alpha2"
@@ -60,6 +61,9 @@ const (
 	nodeEventTypeUpdate nodeEventType = "Update"
 )
 
+// ErrNoNodeAvailable is the error returned if no Node is chosen in SelectNodeForIP and ShouldSelectIP.
+var ErrNoNodeAvailable = errors.New("no Node available")
+
 type nodeEventType string
 
 // Default Hash Fn is crc32.ChecksumIEEE.
@@ -76,13 +80,17 @@ var mapNodeEventType = map[memberlist.NodeEventType]nodeEventType{
 	memberlist.NodeUpdate: nodeEventTypeUpdate,
 }
 
-type clusterNodeEventHandler func(objName string)
+type ClusterNodeEventHandler func(objName string)
+
+type Interface interface {
+	SelectNodeForIP(ip, externalIPPool string, filters ...func(string) bool) (string, error)
+	AliveNodes() sets.String
+	AddClusterEventHandler(handler ClusterNodeEventHandler)
+}
 
 // Cluster implements ClusterInterface.
 type Cluster struct {
 	bindPort int
-	// IP addr of local Node.
-	localNodeIP net.IP
 	// Name of local Node. Node name must be unique in the cluster.
 	nodeName string
 
@@ -100,7 +108,7 @@ type Cluster struct {
 	// For example, when a new Node joins the cluster, each Node should compute whether it should still hold all
 	// its existing Egresses, and when a Node leaves the cluster,
 	// each Node should check whether it is now responsible for some of the Egresses from that Node.
-	clusterNodeEventHandlers []clusterNodeEventHandler
+	clusterNodeEventHandlers []ClusterNodeEventHandler
 
 	nodeInformer     coreinformers.NodeInformer
 	nodeLister       corelisters.NodeLister
@@ -116,8 +124,8 @@ type Cluster struct {
 
 // NewCluster returns a new *Cluster.
 func NewCluster(
+	nodeIP net.IP,
 	clusterBindPort int,
-	localNodeIP net.IP,
 	nodeName string,
 	nodeInformer coreinformers.NodeInformer,
 	externalIPPoolInformer crdinformers.ExternalIPPoolInformer,
@@ -126,7 +134,6 @@ func NewCluster(
 	nodeEventCh := make(chan memberlist.NodeEvent, 1024)
 	c := &Cluster{
 		bindPort:                        clusterBindPort,
-		localNodeIP:                     localNodeIP,
 		nodeName:                        nodeName,
 		consistentHashMap:               make(map[string]*consistenthash.Map),
 		nodeEventsCh:                    nodeEventCh,
@@ -143,6 +150,7 @@ func NewCluster(
 	conf.Name = c.nodeName
 	conf.BindPort = c.bindPort
 	conf.AdvertisePort = c.bindPort
+	conf.AdvertiseAddr = nodeIP.String()
 	conf.Events = &memberlist.ChannelEventDelegate{Ch: nodeEventCh}
 	conf.LogOutput = ioutil.Discard
 	klog.V(1).InfoS("New memberlist cluster", "config", conf)
@@ -165,7 +173,11 @@ func NewCluster(
 		cache.ResourceEventHandlerFuncs{
 			AddFunc: c.enqueueExternalIPPool,
 			UpdateFunc: func(oldObj, newObj interface{}) {
-				c.enqueueExternalIPPool(newObj)
+				oldExternalIPPool := oldObj.(*v1alpha2.ExternalIPPool)
+				curExternalIPPool := newObj.(*v1alpha2.ExternalIPPool)
+				if !reflect.DeepEqual(oldExternalIPPool.Spec.NodeSelector, curExternalIPPool.Spec.NodeSelector) {
+					c.enqueueExternalIPPool(newObj)
+				}
 			},
 			DeleteFunc: c.enqueueExternalIPPool,
 		},
@@ -213,12 +225,12 @@ func (c *Cluster) handleUpdateNode(oldObj, newObj interface{}) {
 	node := newObj.(*corev1.Node)
 	oldNode := oldObj.(*corev1.Node)
 	if reflect.DeepEqual(node.GetLabels(), oldNode.GetLabels()) {
-		klog.V(2).InfoS("Processing Node UPDATE event error, labels not changed", "nodeName", node.Name)
+		klog.V(2).InfoS("Processed Node UPDATE event, labels not changed", "nodeName", node.Name)
 		return
 	}
 	oldMatches, newMatches := c.filterEIPsFromNodeLabels(oldNode), c.filterEIPsFromNodeLabels(node)
 	if oldMatches.Equal(newMatches) {
-		klog.V(2).InfoS("Processing Node UPDATE event error, Node cluster status not changed", "nodeName", node.Name)
+		klog.V(2).InfoS("Processed Node UPDATE event, Node cluster status not changed", "nodeName", node.Name)
 		return
 	}
 	affectedEIPs := oldMatches.Union(newMatches)
@@ -257,13 +269,10 @@ func (c *Cluster) newClusterMember(node *corev1.Node) (string, error) {
 		return "", fmt.Errorf("obtain IP addresses from K8s Node failed: %v", err)
 	}
 	nodeAddr := nodeAddrs.IPv4
-	fmtStr := "%s:%d"
 	if nodeAddr == nil {
 		nodeAddr = nodeAddrs.IPv6
-		fmtStr = "[%s]:%d"
 	}
-	member := fmt.Sprintf(fmtStr, nodeAddr, c.bindPort)
-	return member, nil
+	return nodeAddr.String(), nil
 }
 
 func (c *Cluster) allClusterMembers() (clusterNodes []string, err error) {
@@ -380,7 +389,7 @@ func (c *Cluster) syncConsistentHash(eipName string) error {
 
 	eip, err := c.externalIPPoolLister.Get(eipName)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			c.consistentHashRWMutex.Lock()
 			defer c.consistentHashRWMutex.Unlock()
 			delete(c.consistentHashMap, eipName)
@@ -393,13 +402,13 @@ func (c *Cluster) syncConsistentHash(eipName string) error {
 	updateConsistentHash := func(eip *v1alpha2.ExternalIPPool) error {
 		nodeSel, err := metav1.LabelSelectorAsSelector(&eip.Spec.NodeSelector)
 		if err != nil {
-			return err
+			return fmt.Errorf("labelSelectorAsSelector error: %v", err)
 		}
 		nodes, err := c.nodeLister.List(nodeSel)
 		if err != nil {
-			return err
+			return fmt.Errorf("listing Nodes error: %v", err)
 		}
-		aliveNodes := c.aliveNodes()
+		aliveNodes := c.AliveNodes()
 		// Node alive and Node labels match ExternalIPPool nodeSelector.
 		var aliveAndMatchedNodes []string
 		for _, node := range nodes {
@@ -437,7 +446,7 @@ func (c *Cluster) handleClusterNodeEvents(nodeEvent *memberlist.NodeEvent) {
 		// if the Node has failed, ExternalIPPools consistentHash maybe changed, and affected ExternalIPPool should be enqueued.
 		coreNode, err := c.nodeLister.Get(node.Name)
 		if err != nil {
-			if errors.IsNotFound(err) {
+			if apierrors.IsNotFound(err) {
 				// Node has been deleted, and deleteNode handler has been executed.
 				klog.ErrorS(err, "Processing Node event, not found", "eventType", event)
 				return
@@ -453,8 +462,8 @@ func (c *Cluster) handleClusterNodeEvents(nodeEvent *memberlist.NodeEvent) {
 	}
 }
 
-// aliveNodes returns the list of nodeNames in the cluster.
-func (c *Cluster) aliveNodes() sets.String {
+// AliveNodes returns the list of nodeNames in the cluster.
+func (c *Cluster) AliveNodes() sets.String {
 	nodes := sets.NewString()
 	for _, node := range c.mList.Members() {
 		nodes.Insert(node.Name)
@@ -462,22 +471,43 @@ func (c *Cluster) aliveNodes() sets.String {
 	return nodes
 }
 
-// ShouldSelectEgress returns true if the local Node selected as the owner Node of the Egress,
-// the local Node in the cluster holds the same consistent hash ring for each ExternalIPPool,
-// consistentHash.Get gets the closest item (Node name) in the hash to the provided key(egressIP),
-// if the name of the local Node is equal to the name of the selected Node, returns true.
-func (c *Cluster) ShouldSelectEgress(egress *v1alpha2.Egress) (bool, error) {
-	eipName := egress.Spec.ExternalIPPool
-	if eipName == "" || egress.Spec.EgressIP == "" {
+// ShouldSelectIP returns true if the local Node selected as the owner Node of the IP in the specific
+// ExternalIPPool. The local Node in the cluster holds the same consistent hash ring for each ExternalIPPool,
+// consistentHash.Get gets the closest item (Node name) in the hash to the provided key (IP), if the name of
+// the local Node is equal to the name of the selected Node, returns true.
+func (c *Cluster) ShouldSelectIP(ip, externalIPPool string, filters ...func(string) bool) (bool, error) {
+	if externalIPPool == "" || ip == "" {
 		return false, nil
 	}
 	c.consistentHashRWMutex.RLock()
 	defer c.consistentHashRWMutex.RUnlock()
-	consistentHash, ok := c.consistentHashMap[eipName]
+	consistentHash, ok := c.consistentHashMap[externalIPPool]
 	if !ok {
-		return false, fmt.Errorf("local Node consistentHashMap has not synced, ExternalIPPool %s", eipName)
+		return false, fmt.Errorf("local Node consistentHashMap has not synced, ExternalIPPool %s", externalIPPool)
 	}
-	return consistentHash.Get(egress.Spec.EgressIP) == c.nodeName, nil
+	node := consistentHash.GetWithFilters(ip, filters...)
+	if node == "" && len(filters) > 0 {
+		return false, ErrNoNodeAvailable
+	}
+	return node == c.nodeName, nil
+}
+
+// SelectNodeForIP returns the closest item (Node name) in the hash to the provided key (IP) and ExternalIPPool.
+func (c *Cluster) SelectNodeForIP(ip, externalIPPool string, filters ...func(string) bool) (string, error) {
+	if externalIPPool == "" || ip == "" {
+		return "", fmt.Errorf("IP and externalIPPool cannot be empty")
+	}
+	c.consistentHashRWMutex.RLock()
+	defer c.consistentHashRWMutex.RUnlock()
+	consistentHash, ok := c.consistentHashMap[externalIPPool]
+	if !ok {
+		return "", fmt.Errorf("local Node consistentHashMap has not synced, ExternalIPPool %s", externalIPPool)
+	}
+	node := consistentHash.GetWithFilters(ip, filters...)
+	if node == "" {
+		return "", ErrNoNodeAvailable
+	}
+	return node, nil
 }
 
 func (c *Cluster) notify(objName string) {
@@ -488,6 +518,6 @@ func (c *Cluster) notify(objName string) {
 
 // AddClusterEventHandler adds a clusterNodeEventHandler, which will run when consistentHashMap is updated,
 // due to an ExternalIPPool or Node event.
-func (c *Cluster) AddClusterEventHandler(handler clusterNodeEventHandler) {
+func (c *Cluster) AddClusterEventHandler(handler ClusterNodeEventHandler) {
 	c.clusterNodeEventHandlers = append(c.clusterNodeEventHandlers, handler)
 }

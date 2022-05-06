@@ -21,13 +21,14 @@
 CLUSTER_NAME=""
 ANTREA_IMAGE="projects.registry.vmware.com/antrea/antrea-ubuntu:latest"
 IMAGES=$ANTREA_IMAGE
-ANTREA_CNI=true
+ANTREA_CNI=false
 POD_CIDR="10.10.0.0/16"
 IP_FAMILY="ipv4"
 NUM_WORKERS=2
 SUBNETS=""
 ENCAP_MODE=""
 PROXY=true
+KUBE_PROXY_MODE="iptables"
 PROMETHEUS=false
 
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
@@ -38,7 +39,7 @@ function echoerr {
 }
 
 _usage="
-Usage: $0 create CLUSTER_NAME [--pod-cidr POD_CIDR] [--antrea-cni true|false ] [--num-workers NUM_WORKERS] [--images IMAGES] [--subnets SUBNETS] [--ip-family ipv4|ipv6]
+Usage: $0 create CLUSTER_NAME [--pod-cidr POD_CIDR] [--antrea-cni] [--num-workers NUM_WORKERS] [--images IMAGES] [--subnets SUBNETS] [--ip-family ipv4|ipv6]
                   destroy CLUSTER_NAME
                   modify-node NODE_NAME
                   help
@@ -49,7 +50,8 @@ where:
   --pod-cidr: specifies pod cidr used in kind cluster, default is $POD_CIDR
   --encap-mode: inter-node pod traffic encap mode, default is encap
   --no-proxy: disable Antrea proxy
-  --antrea-cni: specifies install Antrea CNI in kind cluster, default is true
+  --no-kube-proxy: disable Kube proxy
+  --antrea-cni: install Antrea CNI in Kind cluster; by default the cluster is created without a CNI installed
   --prometheus: create RBAC resources for Prometheus, default is false
   --num-workers: specifies number of worker nodes in kind cluster, default is $NUM_WORKERS
   --images: specifies images loaded to kind cluster, default is $IMAGES
@@ -76,10 +78,13 @@ function get_encap_mode {
 
 function modify {
   node="$1"
-  peerIdx=$(docker exec "$node" ip link | grep eth0 | awk -F[@:] '{ print $3 }' | cut -c 3-)
-  peerName=$(docker run --net=host antrea/ethtool:latest ip link | grep ^"$peerIdx": | awk -F[:@] '{ print $2 }' | cut -c 2-)
-  echo "Disabling TX checksum offload for node $node ($peerName)"
-  docker run --net=host --privileged antrea/ethtool:latest ethtool -K "$peerName" tx off
+  # In Kind cluster, DNAT operation is configured by Docker as all DNS requests from Pod CoreDNS are NAT'd to the Docker
+  # DNS embedded resolver, which is running on localhost. When kube-proxy is enabled, parameter net.ipv4.conf.all.route_localnet
+  # is set to 1 by kube-proxy. This setting ensures that the DNS response can be forwarded back to Pod CoreDNS, otherwise
+  # DNS response from Docker DNS embedded resolver will be discarded. When kube-proxy is disabled, to ensure that DNS
+  # response can be forwarded back to Pod CoreDNS, we also set parameter net.ipv4.conf.all.route_localnet to 1 through
+  # the following command:
+  docker exec "$node" sysctl -w net.ipv4.conf.all.route_localnet=1
 }
 
 function configure_networks {
@@ -178,6 +183,16 @@ function configure_networks {
       sleep 2
     done
   done
+
+  nodes="$(kind get nodes --name $CLUSTER_NAME)"
+  nodes="$(echo $nodes)"
+  for node in $nodes; do
+    # disable tx checksum offload
+    # otherwise we observe that inter-Node tunnelled traffic crossing Docker networks is dropped
+    # because of an invalid outer checksum.
+    docker exec "$node" ethtool -K eth0 tx off
+    modify $node
+  done
 }
 
 function delete_networks {
@@ -222,8 +237,17 @@ function create {
   fi
 
   if [[ "$IP_FAMILY" != "ipv4" ]] && [[ "$IP_FAMILY" != "ipv6" ]]; then
-    echoerr "invalid value for --ip-family \"$IP_FAMILY\", expected \"ipv4\" or \"ipv6\""
+    echoerr "Invalid value for --ip-family \"$IP_FAMILY\", expected \"ipv4\" or \"ipv6\""
     exit 1
+  fi
+
+  if [[ $ANTREA_CNI != true ]] && [[ $PROMETHEUS == true ]]; then
+    echoerr "Cannot use --prometheus without --antrea-cni"
+    exit 1
+  fi
+
+  if [[ $ANTREA_CNI != true ]] && [[ $ENCAP_MODE != "" ]]; then
+    echoerr "Using --encap-mode without --antrea-cni has no effect"
   fi
 
   set +e
@@ -244,10 +268,11 @@ networking:
   disableDefaultCNI: true
   podSubnet: $POD_CIDR
   ipFamily: $IP_FAMILY
+  kubeProxyMode: $KUBE_PROXY_MODE
 nodes:
 - role: control-plane
 EOF
-  for i in $(seq 1 $NUM_WORKERS); do
+  for (( i=0; i<$NUM_WORKERS; i++ )); do
     echo -e "- role: worker" >> $config_file
   done
   kind create cluster --name $CLUSTER_NAME --config $config_file
@@ -282,8 +307,8 @@ EOF
     if [[ $PROXY == false ]]; then
       cmd+=" --no-proxy"
     fi
-    echo "$cmd --kind $(get_encap_mode) | kubectl apply --context kind-$CLUSTER_NAME -f -"
-    eval "$cmd --kind $(get_encap_mode) | kubectl apply --context kind-$CLUSTER_NAME -f -"
+    echo "$cmd $(get_encap_mode) | kubectl apply --context kind-$CLUSTER_NAME -f -"
+    eval "$cmd $(get_encap_mode) | kubectl apply --context kind-$CLUSTER_NAME -f -"
 
     if [[ $PROMETHEUS == true ]]; then
       kubectl apply --context kind-$CLUSTER_NAME -f $THIS_DIR/../../build/yamls/antrea-prometheus-rbac.yml
@@ -340,6 +365,10 @@ while [[ $# -gt 0 ]]
       PROXY=false
       shift
       ;;
+    --no-kube-proxy)
+      KUBE_PROXY_MODE="none"
+      shift
+      ;;
     --prometheus)
       PROMETHEUS=true
       shift
@@ -353,8 +382,8 @@ while [[ $# -gt 0 ]]
       shift 2
       ;;
     --antrea-cni)
-      ANTREA_CNI="$2"
-      shift 2
+      ANTREA_CNI=true
+      shift
       ;;
     --num-workers)
       NUM_WORKERS="$2"

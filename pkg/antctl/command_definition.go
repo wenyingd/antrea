@@ -23,16 +23,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/antctl/output"
 	"antrea.io/antrea/pkg/antctl/runtime"
-	"antrea.io/antrea/pkg/antctl/transform/common"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	"antrea.io/antrea/pkg/controller/networkpolicy"
 )
@@ -46,8 +44,7 @@ const (
 )
 
 const (
-	maxTableOutputColumnLength int    = 50
-	sortByEffectivePriority    string = "effectivePriority"
+	sortByEffectivePriority string = "effectivePriority"
 )
 
 // commandGroup is used to group commands, it could be specified in commandDefinition.
@@ -76,6 +73,7 @@ const (
 	flat commandGroup = iota
 	get
 	query
+	mc
 )
 
 var groupCommands = map[commandGroup]*cobra.Command{
@@ -88,6 +86,11 @@ var groupCommands = map[commandGroup]*cobra.Command{
 		Use:   "query",
 		Short: "Execute a user-provided query",
 		Long:  "Execute a user-provided query",
+	},
+	mc: {
+		Use:   "mc",
+		Short: "Sub-commands of multi-cluster feature",
+		Long:  "Sub-commands of multi-cluster feature",
 	},
 }
 
@@ -200,9 +203,10 @@ type commandDefinition struct {
 	long    string
 	example string // It will be filled with generated examples if it is not provided.
 	// commandGroup represents the group of the command.
-	commandGroup       commandGroup
-	controllerEndpoint *endpoint
-	agentEndpoint      *endpoint
+	commandGroup           commandGroup
+	controllerEndpoint     *endpoint
+	agentEndpoint          *endpoint
+	flowAggregatorEndpoint *endpoint
 	// transformedResponse is the final response struct of the command. If the
 	// AddonTransform is set, TransformedResponse is not needed to be used as the
 	// response struct of the handler, but it is still needed to guide the formatter.
@@ -215,6 +219,8 @@ func (cd *commandDefinition) namespaced() bool {
 		return cd.agentEndpoint != nil && cd.agentEndpoint.resourceEndpoint != nil && cd.agentEndpoint.resourceEndpoint.namespaced
 	} else if runtime.Mode == runtime.ModeController {
 		return cd.controllerEndpoint != nil && cd.controllerEndpoint.resourceEndpoint != nil && cd.controllerEndpoint.resourceEndpoint.namespaced
+	} else if runtime.Mode == runtime.ModeFlowAggregator {
+		return cd.flowAggregatorEndpoint != nil && cd.flowAggregatorEndpoint.resourceEndpoint != nil && cd.flowAggregatorEndpoint.resourceEndpoint.namespaced
 	}
 	return false
 }
@@ -224,6 +230,8 @@ func (cd *commandDefinition) getAddonTransform() func(reader io.Reader, single b
 		return cd.agentEndpoint.addonTransform
 	} else if runtime.Mode == runtime.ModeController && cd.controllerEndpoint != nil {
 		return cd.controllerEndpoint.addonTransform
+	} else if runtime.Mode == runtime.ModeFlowAggregator && cd.flowAggregatorEndpoint != nil {
+		return cd.flowAggregatorEndpoint.addonTransform
 	}
 	return nil
 }
@@ -243,6 +251,13 @@ func (cd *commandDefinition) getEndpoint() endpointResponder {
 			}
 			return cd.controllerEndpoint.nonResourceEndpoint
 		}
+	} else if runtime.Mode == runtime.ModeFlowAggregator {
+		if cd.flowAggregatorEndpoint != nil {
+			if cd.flowAggregatorEndpoint.resourceEndpoint != nil {
+				return cd.flowAggregatorEndpoint.resourceEndpoint
+			}
+			return cd.flowAggregatorEndpoint.nonResourceEndpoint
+		}
 	}
 	return nil
 }
@@ -255,6 +270,10 @@ func (cd *commandDefinition) getRequestErrorFallback() func() (io.Reader, error)
 	} else if runtime.Mode == runtime.ModeController {
 		if cd.controllerEndpoint != nil {
 			return cd.controllerEndpoint.requestErrorFallback
+		}
+	} else if runtime.Mode == runtime.ModeFlowAggregator {
+		if cd.flowAggregatorEndpoint != nil {
+			return cd.flowAggregatorEndpoint.requestErrorFallback
 		}
 	}
 	return nil
@@ -276,7 +295,11 @@ func (cd *commandDefinition) applySubCommandToRoot(root *cobra.Command, client A
 	if groupCommand, ok := groupCommands[cd.commandGroup]; ok {
 		groupCommand.AddCommand(cmd)
 	} else {
-		root.AddCommand(cmd)
+		// when antctl runs outside the Controller/Agent/FlowAggregator Pod. This check ensures that
+		// the log-level command is not added to the list of available commands.
+		if cmd.Use != "log-level [level]" || (cmd.Use == "log-level [level]" && runtime.InPod) {
+			root.AddCommand(cmd)
+		}
 	}
 	cd.applyExampleToCommand(cmd)
 
@@ -302,7 +325,7 @@ func (cd *commandDefinition) validate() []error {
 	if cd.transformedResponse == nil {
 		errs = append(errs, fmt.Errorf("%s: command does not define output struct", cd.use))
 	}
-	if cd.agentEndpoint == nil && cd.controllerEndpoint == nil {
+	if cd.agentEndpoint == nil && cd.controllerEndpoint == nil && cd.flowAggregatorEndpoint == nil {
 		errs = append(errs, fmt.Errorf("%s: command does not define any supported component", cd.use))
 	}
 	if cd.agentEndpoint != nil && cd.agentEndpoint.nonResourceEndpoint != nil && cd.agentEndpoint.resourceEndpoint != nil {
@@ -316,6 +339,12 @@ func (cd *commandDefinition) validate() []error {
 	}
 	if cd.controllerEndpoint != nil && cd.controllerEndpoint.nonResourceEndpoint == nil && cd.controllerEndpoint.resourceEndpoint == nil {
 		errs = append(errs, fmt.Errorf("%s: command for controller must define one endpoint", cd.use))
+	}
+	if cd.flowAggregatorEndpoint != nil && cd.flowAggregatorEndpoint.nonResourceEndpoint != nil && cd.flowAggregatorEndpoint.resourceEndpoint != nil {
+		errs = append(errs, fmt.Errorf("%s: command for flow aggregator can only define one endpoint", cd.use))
+	}
+	if cd.flowAggregatorEndpoint != nil && cd.flowAggregatorEndpoint.nonResourceEndpoint == nil && cd.flowAggregatorEndpoint.resourceEndpoint == nil {
+		errs = append(errs, fmt.Errorf("%s: command for flow aggregator must define one endpoint", cd.use))
 	}
 	empty := struct{}{}
 	existingFlags := map[string]struct{}{"output": empty, "help": empty, "kubeconfig": empty, "timeout": empty, "verbose": empty}
@@ -358,176 +387,6 @@ func (cd *commandDefinition) decode(r io.Reader, single bool) (interface{}, erro
 	return reflect.Indirect(ref).Interface(), nil
 }
 
-func jsonEncode(obj interface{}, output *bytes.Buffer) error {
-	if err := json.NewEncoder(output).Encode(obj); err != nil {
-		return fmt.Errorf("error when encoding data in json: %w", err)
-	}
-	return nil
-}
-
-func (cd *commandDefinition) jsonOutput(obj interface{}, writer io.Writer) error {
-	var output bytes.Buffer
-	if err := jsonEncode(obj, &output); err != nil {
-		return fmt.Errorf("error when encoding data in json: %w", err)
-	}
-
-	var prettifiedBuf bytes.Buffer
-	err := json.Indent(&prettifiedBuf, output.Bytes(), "", "  ")
-	if err != nil {
-		return fmt.Errorf("error when formatting outputing in json: %w", err)
-	}
-	_, err = io.Copy(writer, &prettifiedBuf)
-	if err != nil {
-		return fmt.Errorf("error when outputing in json format: %w", err)
-	}
-	return nil
-}
-
-func (cd *commandDefinition) yamlOutput(obj interface{}, writer io.Writer) error {
-	var jsonObj interface{}
-	var buf bytes.Buffer
-	if err := json.NewEncoder(&buf).Encode(obj); err != nil {
-		return fmt.Errorf("error when outputing in yaml format: %w", err)
-	}
-	// Comment copied from: sigs.k8s.io/yaml
-	// We are using yaml.Unmarshal here (instead of json.Unmarshal) because the
-	// Go JSON library doesn't try to pick the right number type (int, float,
-	// etc.) when unmarshalling to interface{}, it just picks float64
-	// universally. go-yaml does go through the effort of picking the right
-	// number type, so we can preserve number type throughout this process.
-	if err := yaml.Unmarshal(buf.Bytes(), &jsonObj); err != nil {
-		return fmt.Errorf("error when outputing in yaml format: %w", err)
-	}
-	if err := yaml.NewEncoder(writer).Encode(jsonObj); err != nil {
-		return fmt.Errorf("error when outputing in yaml format: %w", err)
-	}
-	return nil
-}
-
-// respTransformer collects output fields in original transformedResponse
-// and flattens them. respTransformer realizes this by turning obj into
-// JSON and unmarshalling it.
-// E.g. agent's transformedVersionResponse will only have two fields after
-// transforming: agentVersion and antctlVersion.
-func respTransformer(obj interface{}) (interface{}, error) {
-	var jsonObj bytes.Buffer
-	if err := json.NewEncoder(&jsonObj).Encode(obj); err != nil {
-		return nil, fmt.Errorf("error when encoding data in json: %w", err)
-	}
-	jsonStr := jsonObj.String()
-
-	var target interface{}
-	if err := json.Unmarshal([]byte(jsonStr), &target); err != nil {
-		return nil, fmt.Errorf("error when unmarshalling data in json: %w", err)
-	}
-	return target, nil
-}
-
-// tableOutputForGetCommands formats the table output for "get" commands.
-func (cd *commandDefinition) tableOutputForGetCommands(obj interface{}, writer io.Writer) error {
-	var list []common.TableOutput
-	if reflect.TypeOf(obj).Kind() == reflect.Slice {
-		s := reflect.ValueOf(obj)
-		if s.Len() == 0 || s.Index(0).Interface() == nil {
-			var buffer bytes.Buffer
-			buffer.WriteString("\n")
-			if _, err := io.Copy(writer, &buffer); err != nil {
-				return fmt.Errorf("error when copy output into writer: %w", err)
-			}
-			return nil
-		}
-		if _, ok := s.Index(0).Interface().(common.TableOutput); !ok {
-			return cd.tableOutput(obj, writer)
-		}
-		for i := 0; i < s.Len(); i++ {
-			ele := s.Index(i)
-			list = append(list, ele.Interface().(common.TableOutput))
-		}
-	} else {
-		ele, ok := obj.(common.TableOutput)
-		if !ok {
-			return cd.tableOutput(obj, writer)
-		}
-		list = []common.TableOutput{ele}
-	}
-
-	// Get the elements and headers of table.
-	args := list[0].GetTableHeader()
-	rows := make([][]string, len(list)+1)
-	rows[0] = list[0].GetTableHeader()
-	for i, element := range list {
-		rows[i+1] = element.GetTableRow(maxTableOutputColumnLength)
-	}
-
-	if list[0].SortRows() {
-		// Sort the table rows according to columns in order.
-		body := rows[1:]
-		sort.Slice(body, func(i, j int) bool {
-			for k := range body[i] {
-				if body[i][k] != body[j][k] {
-					return body[i][k] < body[j][k]
-				}
-			}
-			return true
-		})
-	}
-	// Construct the table.
-	numRows, numCols := len(list)+1, len(args)
-	widths := getColumnWidths(numRows, numCols, rows)
-	return constructTable(numRows, numCols, widths, rows, writer)
-}
-
-func getColumnWidths(numRows int, numCols int, rows [][]string) []int {
-	widths := make([]int, numCols)
-	if numCols == 1 {
-		// Do not limit the column length for a single column table.
-		// This is for the case a single column table can have long rows which cannot
-		// fit into a single line (one example is the ovsflows outputs).
-		widths[0] = 0
-	} else {
-		// Get the width of every column.
-		for j := 0; j < numCols; j++ {
-			width := len(rows[0][j])
-			for i := 1; i < numRows; i++ {
-				if len(rows[i][j]) == 0 {
-					rows[i][j] = "<NONE>"
-				}
-				if width < len(rows[i][j]) {
-					width = len(rows[i][j])
-				}
-			}
-			widths[j] = width
-			if j != 0 {
-				widths[j]++
-			}
-		}
-	}
-	return widths
-}
-
-func constructTable(numRows int, numCols int, widths []int, rows [][]string, writer io.Writer) error {
-	var buffer bytes.Buffer
-	for i := 0; i < numRows; i++ {
-		for j := 0; j < numCols; j++ {
-			val := ""
-			if j != 0 {
-				val = " " + val
-			}
-			val += rows[i][j]
-			if widths[j] > 0 {
-				val += strings.Repeat(" ", widths[j]-len(val))
-			}
-			buffer.WriteString(val)
-		}
-		buffer.WriteString("\n")
-	}
-	if _, err := io.Copy(writer, &buffer); err != nil {
-		return fmt.Errorf("error when copy output into writer: %w", err)
-	}
-
-	return nil
-}
-
 // tableOutputForQueryEndpoint implements printing sub tables (list of tables) for each response, utilizing constructTable
 // with multiplicity.
 func (cd *commandDefinition) tableOutputForQueryEndpoint(obj interface{}, writer io.Writer) error {
@@ -558,8 +417,8 @@ func (cd *commandDefinition) tableOutputForQueryEndpoint(obj interface{}, writer
 		rows := append(header, body...)
 		sortRows(rows)
 		numRows, numCol := len(rows), len(rows[0])
-		widths := getColumnWidths(numRows, numCol, rows)
-		if err := constructTable(numRows, numCol, widths, rows, writer); err != nil {
+		widths := output.GetColumnWidths(numRows, numCol, rows)
+		if err := output.ConstructTable(numRows, numCol, widths, rows, writer); err != nil {
 			return err
 		}
 		return nil
@@ -633,82 +492,6 @@ func (cd *commandDefinition) tableOutputForQueryEndpoint(obj interface{}, writer
 	return nil
 }
 
-func (cd *commandDefinition) tableOutput(obj interface{}, writer io.Writer) error {
-	target, err := respTransformer(obj)
-	if err != nil {
-		return fmt.Errorf("error when transforming obj: %w", err)
-	}
-
-	list, multiple := target.([]interface{})
-	var args []string
-	if multiple {
-		for _, el := range list {
-			m := el.(map[string]interface{})
-			for k := range m {
-				args = append(args, k)
-			}
-			// break after one iteration intentionally (we are just retrieving attribute
-			// names to use as the table header in the output)
-			break // nolint:staticcheck
-		}
-	} else {
-		m, _ := target.(map[string]interface{})
-		for k := range m {
-			args = append(args, k)
-		}
-	}
-
-	var buffer bytes.Buffer
-	for _, arg := range args {
-		buffer.WriteString(arg)
-		buffer.WriteString("\t")
-	}
-	attrLine := buffer.String()
-
-	var valLines []string
-	if multiple {
-		for _, el := range list {
-			m := el.(map[string]interface{})
-			buffer.Reset()
-			for _, k := range args {
-				var output bytes.Buffer
-				if err = jsonEncode(m[k], &output); err != nil {
-					return fmt.Errorf("error when encoding data in json: %w", err)
-				}
-				buffer.WriteString(strings.Trim(output.String(), "\"\n"))
-				buffer.WriteString("\t")
-			}
-			valLines = append(valLines, buffer.String())
-		}
-	} else {
-		buffer.Reset()
-		m, _ := target.(map[string]interface{})
-		for _, k := range args {
-			var output bytes.Buffer
-			if err = jsonEncode(m[k], &output); err != nil {
-				return fmt.Errorf("error when encoding: %w", err)
-			}
-			buffer.WriteString(strings.Trim(output.String(), "\"\n"))
-			buffer.WriteString("\t")
-		}
-		valLines = append(valLines, buffer.String())
-	}
-
-	var b bytes.Buffer
-	w := tabwriter.NewWriter(&b, 15, 0, 1, ' ', 0)
-	fmt.Fprintln(w, attrLine)
-	for _, line := range valLines {
-		fmt.Fprintln(w, line)
-	}
-	w.Flush()
-
-	if _, err = io.Copy(writer, &b); err != nil {
-		return fmt.Errorf("error when copy output into writer: %w", err)
-	}
-
-	return nil
-}
-
 // output reads bytes from the resp and outputs the data to the writer in desired
 // format. If the AddonTransform is set, it will use the function to transform
 // the data first. It will try to output the resp in the format ft specified after
@@ -744,18 +527,18 @@ func (cd *commandDefinition) output(resp io.Reader, writer io.Writer, ft formatt
 	// Output structure data in format
 	switch ft {
 	case jsonFormatter:
-		return cd.jsonOutput(obj, writer)
+		return output.JsonOutput(obj, writer)
 	case yamlFormatter:
-		return cd.yamlOutput(obj, writer)
+		return output.YamlOutput(obj, writer)
 	case tableFormatter:
 		if cd.commandGroup == get {
-			return cd.tableOutputForGetCommands(obj, writer)
+			return output.TableOutputForGetCommands(obj, writer)
 		} else if cd.commandGroup == query {
 			if cd.controllerEndpoint.nonResourceEndpoint.path == "/endpoint" {
 				return cd.tableOutputForQueryEndpoint(obj, writer)
 			}
 		} else {
-			return cd.tableOutput(obj, writer)
+			return output.TableOutput(obj, writer)
 		}
 	default:
 		return fmt.Errorf("unsupported format type: %v", ft)

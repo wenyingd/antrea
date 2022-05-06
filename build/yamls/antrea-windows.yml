@@ -5,12 +5,12 @@ data:
     # wins will rename the binary when executing it. So we need to copy the binary everytime before running it.
     mkdir -force /host/k/antrea/bin
     cp /k/antrea/bin/* /host/k/antrea/bin/
-    C:/k/antrea/utils/wins.exe cli process run --path /k/antrea/bin/antrea-agent.exe --args "--config=/k/antrea/etc/antrea-agent.conf --logtostderr=false --log_dir=/k/antrea/logs/ --alsologtostderr --log_file_max_size=100 --log_file_max_num=4" --envs "KUBERNETES_SERVICE_HOST=$env:KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT=$env:KUBERNETES_SERVICE_PORT ANTREA_SERVICE_HOST=$env:ANTREA_SERVICE_HOST ANTREA_SERVICE_PORT=$env:ANTREA_SERVICE_PORT NODE_NAME=$env:NODE_NAME KUBE_DNS_SERVICE_HOST=$env:KUBE_DNS_SERVICE_HOST KUBE_DNS_SERVICE_PORT=$env:KUBE_DNS_SERVICE_PORT"
+    C:/k/antrea/utils/wins.exe cli process run --path /k/antrea/bin/antrea-agent.exe --args "--config=/k/antrea/etc/antrea-agent.conf --logtostderr=false --log_dir=/var/log/antrea/ --alsologtostderr --log_file_max_size=100 --log_file_max_num=4 --v=0" --envs "KUBERNETES_SERVICE_HOST=$env:KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT=$env:KUBERNETES_SERVICE_PORT ANTREA_SERVICE_HOST=$env:ANTREA_SERVICE_HOST ANTREA_SERVICE_PORT=$env:ANTREA_SERVICE_PORT NODE_NAME=$env:NODE_NAME KUBE_DNS_SERVICE_HOST=$env:KUBE_DNS_SERVICE_HOST KUBE_DNS_SERVICE_PORT=$env:KUBE_DNS_SERVICE_PORT"
 kind: ConfigMap
 metadata:
   labels:
     app: antrea
-  name: antrea-agent-windows-5kkc4t55t4
+  name: antrea-agent-windows-kht6m7hthm
   namespace: kube-system
 ---
 apiVersion: v1
@@ -22,6 +22,11 @@ data:
     # It should be enabled on Windows, otherwise NetworkPolicy will not take effect on
     # Service traffic.
     #  AntreaProxy: true
+
+    # Enable EndpointSlice support in AntreaProxy. Don't enable this feature unless that EndpointSlice
+    # API version v1beta1 is supported and set as enabled in Kubernetes. If AntreaProxy is not enabled,
+    # this flag will not take effect.
+    #  EndpointSlice: false
 
     # Enable flowexporter which exports polled conntrack connections as IPFIX flow records from each agent to a configured collector.
     #  FlowExporter: false
@@ -98,9 +103,34 @@ data:
     #trafficEncapMode: encap
 
     # The name of the interface on Node which is used for tunneling or routing the traffic across Nodes.
-    # If there are multiple IP addresses configured on the interface, the first one is used.
-    # The interface configured with Node IP is used if this parameter is not set.
+    # If there are multiple IP addresses configured on the interface, the first one is used. The IP
+    # address used for tunneling or routing traffic to remote Nodes is decided in the following order of
+    # preference (from highest to lowest):
+    # 1. transportInterface
+    # 2. transportInterfaceCIDRs
+    # 3. The Node IP
     #transportInterface:
+
+    # The network CIDRs of the interface on Node which is used for tunneling or routing the traffic across
+    # Nodes. If there are multiple interfaces configured the same network CIDR, the first one is used. The
+    # IP address used for tunneling or routing traffic to remote Nodes is decided in the following order of
+    # preference (from highest to lowest):
+    # 1. transportInterface
+    # 2. transportInterfaceCIDRs
+    # 3. The Node IP
+    #transportInterfaceCIDRs: [<IPv4 CIDR>,<IPv6 CIDR>]
+
+    # Provide the address of Kubernetes apiserver, to override any value provided in kubeconfig or InClusterConfig.
+    # Defaults to "". It must be a host string, a host:port pair, or a URL to the base of the apiserver.
+    #kubeAPIServerOverride: ""
+
+    # Option antreaProxy contains AntreaProxy related configuration options.
+    antreaProxy:
+      # ProxyAll tells antrea-agent to proxy ClusterIP Service traffic, regardless of where they come from.
+      # Therefore, running kube-proxy is no longer required. This requires the AntreaProxy feature to be enabled.
+      # Note that this option is experimental. If kube-proxy is removed, option kubeAPIServerOverride must be used to access
+      # apiserver directly.
+      #proxyAll: false
   antrea-cni.conflist: |
     {
         "cniVersion":"0.3.0",
@@ -119,7 +149,7 @@ kind: ConfigMap
 metadata:
   labels:
     app: antrea
-  name: antrea-windows-config-74ctmgh7mf
+  name: antrea-windows-config-mf82kffb45
   namespace: kube-system
 ---
 apiVersion: apps/v1
@@ -164,8 +194,6 @@ spec:
         imagePullPolicy: IfNotPresent
         name: antrea-agent
         volumeMounts:
-        - mountPath: /host
-          name: host
         - mountPath: \\.\pipe\rancher_wins
           name: wins
         - mountPath: /etc/antrea
@@ -174,6 +202,8 @@ spec:
           name: antrea-agent-windows
         - mountPath: /host/k/antrea/
           name: host-antrea-home
+        - mountPath: /var/log/antrea/
+          name: var-log-antrea
       hostNetwork: true
       initContainers:
       - args:
@@ -194,8 +224,8 @@ spec:
           name: host-cni-bin
         - mountPath: /host/k/antrea/
           name: host-antrea-home
-        - mountPath: /host
-          name: host
+        - mountPath: /host/var/run/secrets/
+          name: host-secrets-path
       nodeSelector:
         kubernetes.io/os: windows
       priorityClassName: system-node-critical
@@ -207,11 +237,11 @@ spec:
         operator: Exists
       volumes:
       - configMap:
-          name: antrea-windows-config-74ctmgh7mf
+          name: antrea-windows-config-mf82kffb45
         name: antrea-windows-config
       - configMap:
           defaultMode: 420
-          name: antrea-agent-windows-5kkc4t55t4
+          name: antrea-agent-windows-kht6m7hthm
         name: antrea-agent-windows
       - hostPath:
           path: /etc/cni/net.d
@@ -226,10 +256,15 @@ spec:
           type: DirectoryOrCreate
         name: host-antrea-home
       - hostPath:
-          path: /
-        name: host
-      - hostPath:
           path: \\.\pipe\rancher_wins
         name: wins
+      - hostPath:
+          path: /var/log/antrea/
+          type: DirectoryOrCreate
+        name: var-log-antrea
+      - hostPath:
+          path: /var/run/secrets/
+          type: DirectoryOrCreate
+        name: host-secrets-path
   updateStrategy:
     type: RollingUpdate

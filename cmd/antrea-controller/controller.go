@@ -30,6 +30,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	aggregatorclientset "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
+	netutils "k8s.io/utils/net"
 
 	"antrea.io/antrea/pkg/apiserver"
 	"antrea.io/antrea/pkg/apiserver/certificate"
@@ -37,19 +38,19 @@ import (
 	"antrea.io/antrea/pkg/apiserver/storage"
 	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions"
 	"antrea.io/antrea/pkg/clusteridentity"
-	"antrea.io/antrea/pkg/controller/crdmirroring"
-	"antrea.io/antrea/pkg/controller/crdmirroring/crdhandler"
 	"antrea.io/antrea/pkg/controller/egress"
 	egressstore "antrea.io/antrea/pkg/controller/egress/store"
+	"antrea.io/antrea/pkg/controller/externalippool"
 	"antrea.io/antrea/pkg/controller/grouping"
+	antreaipam "antrea.io/antrea/pkg/controller/ipam"
 	"antrea.io/antrea/pkg/controller/metrics"
 	"antrea.io/antrea/pkg/controller/networkpolicy"
 	"antrea.io/antrea/pkg/controller/networkpolicy/store"
 	"antrea.io/antrea/pkg/controller/querier"
+	"antrea.io/antrea/pkg/controller/serviceexternalip"
 	"antrea.io/antrea/pkg/controller/stats"
 	"antrea.io/antrea/pkg/controller/traceflow"
 	"antrea.io/antrea/pkg/features"
-	legacycrdinformers "antrea.io/antrea/pkg/legacyclient/informers/externalversions"
 	"antrea.io/antrea/pkg/log"
 	"antrea.io/antrea/pkg/monitor"
 	"antrea.io/antrea/pkg/signals"
@@ -57,6 +58,8 @@ import (
 	"antrea.io/antrea/pkg/util/env"
 	"antrea.io/antrea/pkg/util/k8s"
 	"antrea.io/antrea/pkg/version"
+	"antrea.io/antrea/third_party/ipam/nodeipam"
+	"antrea.io/antrea/third_party/ipam/nodeipam/ipam"
 )
 
 const (
@@ -91,6 +94,7 @@ var allowedPaths = []string{
 	"/validate/clustergroup",
 	"/validate/externalippool",
 	"/validate/egress",
+	"/validate/ippool",
 	"/convert/clustergroup",
 }
 
@@ -116,7 +120,6 @@ func run(o *Options) error {
 	anpInformer := crdInformerFactory.Crd().V1alpha1().NetworkPolicies()
 	tierInformer := crdInformerFactory.Crd().V1alpha1().Tiers()
 	tfInformer := crdInformerFactory.Crd().V1alpha1().Traceflows()
-	cgv1a2Informer := crdInformerFactory.Crd().V1alpha2().ClusterGroups()
 	cgInformer := crdInformerFactory.Crd().V1alpha3().ClusterGroups()
 	egressInformer := crdInformerFactory.Crd().V1alpha2().Egresses()
 	externalIPPoolInformer := crdInformerFactory.Crd().V1alpha2().ExternalIPPools()
@@ -136,25 +139,13 @@ func run(o *Options) error {
 	groupEntityIndex := grouping.NewGroupEntityIndex()
 	groupEntityController := grouping.NewGroupEntityController(groupEntityIndex, podInformer, namespaceInformer, eeInformer)
 
-	legacyCRDClient, err := k8s.CreateLegacyCRDClient(o.config.ClientConnection, "")
-	if err != nil {
-		return fmt.Errorf("error creating legacy CRD client: %v", err)
-	}
-
-	legacyCRDInformerFactory := legacycrdinformers.NewSharedInformerFactory(legacyCRDClient, informerDefaultResync)
-	legacyANPInformer := legacyCRDInformerFactory.Security().V1alpha1().NetworkPolicies()
-	legacyCNPInformer := legacyCRDInformerFactory.Security().V1alpha1().ClusterNetworkPolicies()
-	legacyTierInformer := legacyCRDInformerFactory.Security().V1alpha1().Tiers()
-	legacyCGInformer := legacyCRDInformerFactory.Core().V1alpha2().ClusterGroups()
-	legacyEEInformer := legacyCRDInformerFactory.Core().V1alpha2().ExternalEntities()
-	legacyTFInformer := legacyCRDInformerFactory.Ops().V1alpha1().Traceflows()
-
 	networkPolicyController := networkpolicy.NewNetworkPolicyController(client,
 		crdClient,
 		groupEntityIndex,
 		namespaceInformer,
 		serviceInformer,
 		networkPolicyInformer,
+		nodeInformer,
 		cnpInformer,
 		anpInformer,
 		tierInformer,
@@ -169,84 +160,32 @@ func run(o *Options) error {
 		networkPolicyStatusController = networkpolicy.NewStatusController(crdClient, networkPolicyStore, cnpInformer, anpInformer)
 	}
 
-	var anpMirroringController *crdmirroring.Controller
-	var cnpMirroringController *crdmirroring.Controller
-	var tierMirroringController *crdmirroring.Controller
-	var cgMirroringController *crdmirroring.Controller
-	var eeMirroringController *crdmirroring.Controller
-	if features.DefaultFeatureGate.Enabled(features.AntreaPolicy) && o.config.LegacyCRDMirroring {
-		anpMirroringHandler := crdhandler.NewNetworkPolicyHandler(anpInformer.Lister(),
-			legacyANPInformer.Lister(),
-			crdClient,
-			legacyCRDClient)
-		anpMirroringController = crdmirroring.NewController(anpInformer.Informer(),
-			legacyANPInformer.Informer(),
-			anpMirroringHandler,
-			"NetworkPolicy")
-
-		cnpMirroringHandler := crdhandler.NewClusterNetworkPolicyHandler(cnpInformer.Lister(),
-			legacyCNPInformer.Lister(),
-			crdClient.CrdV1alpha1().ClusterNetworkPolicies(),
-			legacyCRDClient.SecurityV1alpha1().ClusterNetworkPolicies())
-		cnpMirroringController = crdmirroring.NewController(cnpInformer.Informer(),
-			legacyCNPInformer.Informer(),
-			cnpMirroringHandler,
-			"ClusterNetworkPolicy")
-
-		tierMirroringHandler := crdhandler.NewTierHandler(tierInformer.Lister(),
-			legacyTierInformer.Lister(),
-			crdClient.CrdV1alpha1().Tiers(),
-			legacyCRDClient.SecurityV1alpha1().Tiers())
-		tierMirroringController = crdmirroring.NewController(tierInformer.Informer(),
-			legacyTierInformer.Informer(),
-			tierMirroringHandler,
-			"Tier")
-
-		cgMirroringHandler := crdhandler.NewClusterGroupHandler(cgv1a2Informer.Lister(),
-			legacyCGInformer.Lister(),
-			crdClient.CrdV1alpha2().ClusterGroups(),
-			legacyCRDClient.CoreV1alpha2().ClusterGroups())
-		cgMirroringController = crdmirroring.NewController(cgv1a2Informer.Informer(),
-			legacyCGInformer.Informer(),
-			cgMirroringHandler,
-			"ClusterGroup")
-
-		eeMirroringHandler := crdhandler.NewExternalEntityHandler(eeInformer.Lister(),
-			legacyEEInformer.Lister(),
-			crdClient,
-			legacyCRDClient)
-		eeMirroringController = crdmirroring.NewController(eeInformer.Informer(),
-			legacyEEInformer.Informer(),
-			eeMirroringHandler,
-			"ExternalEntity")
-	}
-
 	endpointQuerier := networkpolicy.NewEndpointQuerier(networkPolicyController)
 
 	controllerQuerier := querier.NewControllerQuerier(networkPolicyController, o.config.APIPort)
 
-	controllerMonitor := monitor.NewControllerMonitor(crdClient, legacyCRDClient, nodeInformer, controllerQuerier)
+	controllerMonitor := monitor.NewControllerMonitor(crdClient, nodeInformer, controllerQuerier)
 
 	var egressController *egress.EgressController
+	var externalIPPoolController *externalippool.ExternalIPPoolController
+	var externalIPController *serviceexternalip.ServiceExternalIPController
+	if features.DefaultFeatureGate.Enabled(features.Egress) || features.DefaultFeatureGate.Enabled(features.ServiceExternalIP) {
+		externalIPPoolController = externalippool.NewExternalIPPoolController(
+			crdClient, externalIPPoolInformer,
+		)
+	}
+
 	if features.DefaultFeatureGate.Enabled(features.Egress) {
-		egressController = egress.NewEgressController(crdClient, groupEntityIndex, egressInformer, externalIPPoolInformer, egressGroupStore)
+		egressController = egress.NewEgressController(crdClient, groupEntityIndex, egressInformer, externalIPPoolController, egressGroupStore)
+	}
+
+	if features.DefaultFeatureGate.Enabled(features.ServiceExternalIP) {
+		externalIPController = serviceexternalip.NewServiceExternalIPController(client, serviceInformer, externalIPPoolController)
 	}
 
 	var traceflowController *traceflow.Controller
 	if features.DefaultFeatureGate.Enabled(features.Traceflow) {
 		traceflowController = traceflow.NewTraceflowController(crdClient, podInformer, tfInformer)
-	}
-
-	var traceflowMirroringController *crdmirroring.Controller
-	if features.DefaultFeatureGate.Enabled(features.Traceflow) && o.config.LegacyCRDMirroring {
-		tfMirroringHandler := crdhandler.NewTraceflowHandler(tfInformer.Lister(),
-			legacyTFInformer.Lister(),
-			crdClient.CrdV1alpha1().Traceflows(),
-			legacyCRDClient.OpsV1alpha1().Traceflows())
-		traceflowMirroringController = crdmirroring.NewController(tfInformer.Informer(),
-			legacyTFInformer.Informer(),
-			tfMirroringHandler,
-			"Traceflow")
 	}
 
 	// statsAggregator takes stats summaries from antrea-agents, aggregates them, and serves the Stats APIs with the
@@ -261,11 +200,18 @@ func run(o *Options) error {
 		return fmt.Errorf("error generating Cipher Suite list: %v", err)
 	}
 
+	var antreaIPAMController *antreaipam.AntreaIPAMController
+	if features.DefaultFeatureGate.Enabled(features.AntreaIPAM) {
+		antreaIPAMController = antreaipam.NewAntreaIPAMController(crdClient,
+			informerFactory,
+			crdInformerFactory)
+	}
+
 	apiServerConfig, err := createAPIServerConfig(o.config.ClientConnection.Kubeconfig,
 		client,
 		aggregatorClient,
 		apiExtensionClient,
-		o.config.SelfSignedCert,
+		*o.config.SelfSignedCert,
 		o.config.APIPort,
 		addressGroupStore,
 		appliedToGroupStore,
@@ -278,7 +224,7 @@ func run(o *Options) error {
 		networkPolicyStatusController,
 		egressController,
 		statsAggregator,
-		o.config.EnablePrometheusMetrics,
+		*o.config.EnablePrometheusMetrics,
 		cipherSuites,
 		cipher.TLSVersionMap[o.config.TLSMinVersion])
 	if err != nil {
@@ -303,7 +249,6 @@ func run(o *Options) error {
 
 	informerFactory.Start(stopCh)
 	crdInformerFactory.Start(stopCh)
-	legacyCRDInformerFactory.Start(stopCh)
 
 	go clusterIdentityAllocator.Run(stopCh)
 
@@ -323,7 +268,7 @@ func run(o *Options) error {
 		go statsAggregator.Run(stopCh)
 	}
 
-	if o.config.EnablePrometheusMetrics {
+	if *o.config.EnablePrometheusMetrics {
 		metrics.InitializePrometheusMetrics()
 	}
 
@@ -334,25 +279,81 @@ func run(o *Options) error {
 	if features.DefaultFeatureGate.Enabled(features.AntreaPolicy) {
 		go networkPolicyStatusController.Run(stopCh)
 	}
-
-	if o.config.LegacyCRDMirroring {
-		if features.DefaultFeatureGate.Enabled(features.Traceflow) {
-			go traceflowMirroringController.Run(stopCh)
-		}
-		if features.DefaultFeatureGate.Enabled(features.AntreaPolicy) {
-			go anpMirroringController.Run(stopCh)
-			go cnpMirroringController.Run(stopCh)
-			go tierMirroringController.Run(stopCh)
-			go cgMirroringController.Run(stopCh)
-			go eeMirroringController.Run(stopCh)
+	if features.DefaultFeatureGate.Enabled(features.NodeIPAM) && o.config.NodeIPAM.EnableNodeIPAM {
+		clusterCIDRs, _ := netutils.ParseCIDRs(o.config.NodeIPAM.ClusterCIDRs)
+		_, serviceCIDR, _ := net.ParseCIDR(o.config.NodeIPAM.ServiceCIDR)
+		_, serviceCIDRv6, _ := net.ParseCIDR(o.config.NodeIPAM.ServiceCIDRv6)
+		err = startNodeIPAM(
+			client,
+			informerFactory,
+			clusterCIDRs,
+			serviceCIDR,
+			serviceCIDRv6,
+			o.config.NodeIPAM.NodeCIDRMaskSizeIPv4,
+			o.config.NodeIPAM.NodeCIDRMaskSizeIPv6,
+			stopCh)
+		if err != nil {
+			return fmt.Errorf("failed to initialize node IPAM controller: %v", err)
 		}
 	}
+
+	if features.DefaultFeatureGate.Enabled(features.Egress) || features.DefaultFeatureGate.Enabled(features.ServiceExternalIP) {
+		go externalIPPoolController.Run(stopCh)
+	}
+
 	if features.DefaultFeatureGate.Enabled(features.Egress) {
 		go egressController.Run(stopCh)
 	}
 
+	if features.DefaultFeatureGate.Enabled(features.ServiceExternalIP) {
+		go externalIPController.Run(stopCh)
+	}
+
+	if antreaIPAMController != nil {
+		go antreaIPAMController.Run(stopCh)
+	}
+
 	<-stopCh
 	klog.Info("Stopping Antrea controller")
+	return nil
+}
+
+func getNodeCIDRMaskSizes(clusterCIDRs []*net.IPNet, maskSizeIPv4, maskSizeIPv6 int) []int {
+	nodeMaskCIDRs := make([]int, len(clusterCIDRs))
+
+	for idx, clusterCIDR := range clusterCIDRs {
+		if netutils.IsIPv6CIDR(clusterCIDR) {
+			nodeMaskCIDRs[idx] = maskSizeIPv6
+		} else {
+			nodeMaskCIDRs[idx] = maskSizeIPv4
+		}
+	}
+	return nodeMaskCIDRs
+}
+
+func startNodeIPAM(client clientset.Interface,
+	informerFactory informers.SharedInformerFactory,
+	clusterCIDRs []*net.IPNet,
+	serviceCIDR *net.IPNet,
+	serviceCIDRv6 *net.IPNet,
+	nodeCIDRMaskSizeIPv4 int,
+	nodeCIDRMaskSizeIPv6 int,
+	stopCh <-chan struct{}) error {
+
+	nodeCIDRMaskSizes := getNodeCIDRMaskSizes(clusterCIDRs, nodeCIDRMaskSizeIPv4, nodeCIDRMaskSizeIPv6)
+	nodeIPAM, err := nodeipam.NewNodeIpamController(
+		informerFactory.Core().V1().Nodes(),
+		client,
+		clusterCIDRs,
+		serviceCIDR,
+		serviceCIDRv6,
+		nodeCIDRMaskSizes,
+		ipam.RangeAllocatorType,
+	)
+	if err != nil {
+		return err
+	}
+	go nodeIPAM.Run(stopCh)
 	return nil
 }
 
@@ -380,7 +381,7 @@ func createAPIServerConfig(kubeconfig string,
 	authentication := genericoptions.NewDelegatingAuthenticationOptions()
 	authorization := genericoptions.NewDelegatingAuthorizationOptions().WithAlwaysAllowPaths(allowedPaths...)
 
-	caCertController, err := certificate.ApplyServerCert(selfSignedCert, client, aggregatorClient, apiExtensionClient, secureServing)
+	caCertController, err := certificate.ApplyServerCert(selfSignedCert, client, aggregatorClient, apiExtensionClient, secureServing, apiserver.DefaultCAConfig())
 	if err != nil {
 		return nil, fmt.Errorf("error applying server cert: %v", err)
 	}

@@ -28,10 +28,11 @@ import (
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/metrics"
-	antreatypes "antrea.io/antrea/pkg/agent/types"
 	v1beta "antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
 	"antrea.io/antrea/pkg/querier"
+	"antrea.io/antrea/pkg/util/channel"
+	"antrea.io/antrea/pkg/util/k8s"
 )
 
 const (
@@ -39,6 +40,7 @@ const (
 	appliedToGroupIndex = "appliedToGroup"
 	addressGroupIndex   = "addressGroup"
 	policyIndex         = "policy"
+	toServicesIndex     = "toServices"
 )
 
 // rule is the struct stored in ruleCache, it contains necessary information
@@ -154,8 +156,9 @@ type ruleCache struct {
 	// dirtyRuleHandler is a callback that is run upon finding a rule out-of-sync.
 	dirtyRuleHandler func(string)
 
-	// entityUpdates is a channel for receiving entity (e.g. Pod) updates from CNIServer.
-	entityUpdates <-chan antreatypes.EntityReference
+	// groupIDUpdates is a channel for receiving groupID for Service is assigned
+	// or released events from groupCounters.
+	groupIDUpdates <-chan string
 }
 
 func (c *ruleCache) getNetworkPolicies(npFilter *querier.NetworkPolicyQueryFilter) []v1beta.NetworkPolicy {
@@ -217,6 +220,7 @@ func (c *ruleCache) getAppliedNetworkPolicies(pod, namespace string, npFilter *q
 			}
 			if c.networkPolicyMatchFilter(npFilter, np) {
 				policies = append(policies, *np)
+				policyKeys.Insert(string(rule.PolicyUID))
 			}
 		}
 	}
@@ -318,11 +322,23 @@ func policyIndexFunc(obj interface{}) ([]string, error) {
 	return []string{string(rule.PolicyUID)}, nil
 }
 
+// toServicesIndexFunc knows how to get NamespacedNames of Services referred in
+// ToServices field of a *rule. It's provided to cache.Indexer to build an index of
+// NetworkPolicy.
+func toServicesIndexFunc(obj interface{}) ([]string, error) {
+	rule := obj.(*rule)
+	toSvcNamespacedName := sets.String{}
+	for _, svc := range rule.To.ToServices {
+		toSvcNamespacedName.Insert(k8s.NamespacedName(svc.Namespace, svc.Name))
+	}
+	return toSvcNamespacedName.UnsortedList(), nil
+}
+
 // newRuleCache returns a new *ruleCache.
-func newRuleCache(dirtyRuleHandler func(string), podUpdate <-chan antreatypes.EntityReference) *ruleCache {
+func newRuleCache(dirtyRuleHandler func(string), podUpdateSubscriber *channel.SubscribableChannel, entityUpdateSubscriber *channel.SubscribableChannel, serviceGroupIDUpdate <-chan string) *ruleCache {
 	rules := cache.NewIndexer(
 		ruleKeyFunc,
-		cache.Indexers{addressGroupIndex: addressGroupIndexFunc, appliedToGroupIndex: appliedToGroupIndexFunc, policyIndex: policyIndexFunc},
+		cache.Indexers{addressGroupIndex: addressGroupIndexFunc, appliedToGroupIndex: appliedToGroupIndexFunc, policyIndex: policyIndexFunc, toServicesIndex: toServicesIndexFunc},
 	)
 	cache := &ruleCache{
 		appliedToSetByGroup: make(map[string]v1beta.GroupMemberSet),
@@ -330,36 +346,85 @@ func newRuleCache(dirtyRuleHandler func(string), podUpdate <-chan antreatypes.En
 		policyMap:           make(map[string]*v1beta.NetworkPolicy),
 		rules:               rules,
 		dirtyRuleHandler:    dirtyRuleHandler,
-		entityUpdates:       podUpdate,
+		groupIDUpdates:      serviceGroupIDUpdate,
 	}
-	go cache.processEntityUpdates()
+	// Subscribe Pod update events from CNIServer.
+	if podUpdateSubscriber != nil {
+		podUpdateSubscriber.Subscribe(cache.processPodUpdate)
+	}
+	// Subscribe ExternalEntity update events from ExternalEntityController
+	if entityUpdateSubscriber != nil {
+		entityUpdateSubscriber.Subscribe(cache.processEntityUpdate)
+	}
+	go cache.processGroupIDUpdates()
 	return cache
 }
 
-// processEntityUpdates is an infinite loop that takes entity (e.g. Pod)
-// update events from the channel, finds out AppliedToGroups that contains
-// this Pod and trigger reconciling of related rules.
+// processPodUpdate will be called when CNIServer publishes a Pod update event.
+// It finds out AppliedToGroups that contains this Pod and trigger reconciling
+// of related rules.
 // It can enforce NetworkPolicies to newly added Pods right after CNI ADD is
 // done if antrea-controller has computed the Pods' policies and propagated
 // them to this Node by their labels and NodeName, instead of waiting for their
 // IPs are reported to kube-apiserver and processed by antrea-controller.
-func (c *ruleCache) processEntityUpdates() {
+func (c *ruleCache) processPodUpdate(pod string) {
+	namespace, name := k8s.SplitNamespacedName(pod)
+	member := &v1beta.GroupMember{
+		Pod: &v1beta.PodReference{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	c.appliedToSetLock.RLock()
+	defer c.appliedToSetLock.RUnlock()
+	for group, memberSet := range c.appliedToSetByGroup {
+		if memberSet.Has(member) {
+			c.onAppliedToGroupUpdate(group)
+		}
+	}
+}
+
+// processEntityUpdate will be called when ExternalEntityController publishes an ExternalEntity update event.
+// It finds out AppliedToGroups that contains this ExternalEntity and trigger reconciling
+// of related rules.
+// It can enforce NetworkPolicies to ExternalEntities after ExternalEntityInterface is realised in the interface store.
+func (c *ruleCache) processEntityUpdate(ee string) {
+	namespace, name := k8s.SplitNamespacedName(ee)
+	c.appliedToSetLock.RLock()
+	defer c.appliedToSetLock.RUnlock()
+	externalEntityEquals := func(expEntity *v1beta.ExternalEntityReference, actName, actNamespace string) bool {
+		if expEntity.Name != actName {
+			return false
+		}
+		if expEntity.Namespace != actNamespace {
+			return false
+		}
+		return true
+	}
+	for group, memberSet := range c.appliedToSetByGroup {
+		for _, m := range memberSet.Items() {
+			if externalEntityEquals(m.ExternalEntity, name, namespace) {
+				c.onAppliedToGroupUpdate(group)
+				break
+			}
+		}
+	}
+}
+
+// processGroupIDUpdates is an infinite loop that takes Service groupID
+// update events from the channel, finds out rules that refer this Service in
+// ToServices field and use dirtyRuleHandler to re-queue these rules.
+func (c *ruleCache) processGroupIDUpdates() {
 	for {
 		select {
-		case entity := <-c.entityUpdates:
-			func() {
-				member := &v1beta.GroupMember{
-					Pod:            entity.Pod,
-					ExternalEntity: entity.ExternalEntity,
-				}
-				c.appliedToSetLock.RLock()
-				defer c.appliedToSetLock.RUnlock()
-				for group, memberSet := range c.appliedToSetByGroup {
-					if memberSet.Has(member) {
-						c.onAppliedToGroupUpdate(group)
-					}
-				}
-			}()
+		case svcStr := <-c.groupIDUpdates:
+			toSvcRules, err := c.rules.ByIndex(toServicesIndex, svcStr)
+			if err != nil {
+				continue
+			}
+			for _, toSvcRule := range toSvcRules {
+				c.dirtyRuleHandler(toSvcRule.(*rule).ID)
+			}
 		}
 	}
 }
@@ -625,22 +690,23 @@ func (c *ruleCache) ReplaceNetworkPolicies(policies []*v1beta.NetworkPolicy) {
 // It could happen that an existing NetworkPolicy is "added" again when the
 // watcher reconnects to the Apiserver, we use the same processing as
 // UpdateNetworkPolicy to ensure orphan rules are removed.
-func (c *ruleCache) AddNetworkPolicy(policy *v1beta.NetworkPolicy) error {
+func (c *ruleCache) AddNetworkPolicy(policy *v1beta.NetworkPolicy) {
 	metrics.NetworkPolicyCount.Inc()
 	c.policyMapLock.Lock()
 	defer c.policyMapLock.Unlock()
-	return c.updateNetworkPolicyLocked(policy)
+	c.updateNetworkPolicyLocked(policy)
 }
 
-// UpdateNetworkPolicy updates a cached *v1beta.NetworkPolicy.
+// UpdateNetworkPolicy updates a cached *v1beta.NetworkPolicy and returns whether there is any rule change.
 // The added rules and removed rules will be regarded as dirty.
-func (c *ruleCache) UpdateNetworkPolicy(policy *v1beta.NetworkPolicy) error {
+func (c *ruleCache) UpdateNetworkPolicy(policy *v1beta.NetworkPolicy) bool {
 	c.policyMapLock.Lock()
 	defer c.policyMapLock.Unlock()
 	return c.updateNetworkPolicyLocked(policy)
 }
 
-func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) error {
+// updateNetworkPolicyLocked returns whether there is any rule change.
+func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) bool {
 	c.policyMap[string(policy.UID)] = policy
 	existingRules, _ := c.rules.ByIndex(policyIndex, string(policy.UID))
 	ruleByID := map[string]interface{}{}
@@ -648,6 +714,7 @@ func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) erro
 		ruleByID[r.(*rule).ID] = r
 	}
 
+	anyRuleUpdate := false
 	maxPriority := getMaxPriority(policy)
 	for i := range policy.Rules {
 		r := toRule(&policy.Rules[i], policy, maxPriority)
@@ -665,6 +732,7 @@ func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) erro
 				metrics.EgressNetworkPolicyRuleCount.Inc()
 			}
 			c.dirtyRuleHandler(r.ID)
+			anyRuleUpdate = true
 		}
 	}
 
@@ -678,20 +746,21 @@ func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) erro
 			metrics.EgressNetworkPolicyRuleCount.Dec()
 		}
 		c.dirtyRuleHandler(ruleID)
+		anyRuleUpdate = true
 	}
-	return nil
+	return anyRuleUpdate
 }
 
 // DeleteNetworkPolicy deletes a cached *v1beta.NetworkPolicy.
 // All its rules will be regarded as dirty.
-func (c *ruleCache) DeleteNetworkPolicy(policy *v1beta.NetworkPolicy) error {
+func (c *ruleCache) DeleteNetworkPolicy(policy *v1beta.NetworkPolicy) {
 	c.policyMapLock.Lock()
 	defer c.policyMapLock.Unlock()
 
-	return c.deleteNetworkPolicyLocked(string(policy.UID))
+	c.deleteNetworkPolicyLocked(string(policy.UID))
 }
 
-func (c *ruleCache) deleteNetworkPolicyLocked(uid string) error {
+func (c *ruleCache) deleteNetworkPolicyLocked(uid string) {
 	delete(c.policyMap, uid)
 	existingRules, _ := c.rules.ByIndex(policyIndex, uid)
 	for _, r := range existingRules {
@@ -706,7 +775,6 @@ func (c *ruleCache) deleteNetworkPolicyLocked(uid string) error {
 		c.dirtyRuleHandler(ruleID)
 	}
 	metrics.NetworkPolicyCount.Dec()
-	return nil
 }
 
 // GetCompletedRule constructs a *CompletedRule for the provided ruleID.

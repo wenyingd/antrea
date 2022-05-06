@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2022 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,6 +30,8 @@ type Interface interface {
 	ExternalEntities() ExternalEntityInformer
 	// ExternalIPPools returns a ExternalIPPoolInformer.
 	ExternalIPPools() ExternalIPPoolInformer
+	// IPPools returns a IPPoolInformer.
+	IPPools() IPPoolInformer
 }
 
 type version struct {
@@ -61,4 +63,9 @@ func (v *version) ExternalEntities() ExternalEntityInformer {
 // ExternalIPPools returns a ExternalIPPoolInformer.
 func (v *version) ExternalIPPools() ExternalIPPoolInformer {
 	return &externalIPPoolInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// IPPools returns a IPPoolInformer.
+func (v *version) IPPools() IPPoolInformer {
+	return &iPPoolInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

@@ -21,6 +21,7 @@ package testing
 
 import (
 	config "antrea.io/antrea/pkg/agent/config"
+	openflow "antrea.io/antrea/pkg/ovs/openflow"
 	gomock "github.com/golang/mock/gomock"
 	net "net"
 	reflect "reflect"
@@ -49,6 +50,62 @@ func (m *MockInterface) EXPECT() *MockInterfaceMockRecorder {
 	return m.recorder
 }
 
+// AddClusterIPRoute mocks base method
+func (m *MockInterface) AddClusterIPRoute(arg0 net.IP) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddClusterIPRoute", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddClusterIPRoute indicates an expected call of AddClusterIPRoute
+func (mr *MockInterfaceMockRecorder) AddClusterIPRoute(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddClusterIPRoute", reflect.TypeOf((*MockInterface)(nil).AddClusterIPRoute), arg0)
+}
+
+// AddLoadBalancer mocks base method
+func (m *MockInterface) AddLoadBalancer(arg0 []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddLoadBalancer", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddLoadBalancer indicates an expected call of AddLoadBalancer
+func (mr *MockInterfaceMockRecorder) AddLoadBalancer(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddLoadBalancer", reflect.TypeOf((*MockInterface)(nil).AddLoadBalancer), arg0)
+}
+
+// AddLocalAntreaFlexibleIPAMPodRule mocks base method
+func (m *MockInterface) AddLocalAntreaFlexibleIPAMPodRule(arg0 []net.IP) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddLocalAntreaFlexibleIPAMPodRule", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddLocalAntreaFlexibleIPAMPodRule indicates an expected call of AddLocalAntreaFlexibleIPAMPodRule
+func (mr *MockInterfaceMockRecorder) AddLocalAntreaFlexibleIPAMPodRule(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddLocalAntreaFlexibleIPAMPodRule", reflect.TypeOf((*MockInterface)(nil).AddLocalAntreaFlexibleIPAMPodRule), arg0)
+}
+
+// AddNodePort mocks base method
+func (m *MockInterface) AddNodePort(arg0 []net.IP, arg1 uint16, arg2 openflow.Protocol) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddNodePort", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddNodePort indicates an expected call of AddNodePort
+func (mr *MockInterfaceMockRecorder) AddNodePort(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePort", reflect.TypeOf((*MockInterface)(nil).AddNodePort), arg0, arg1, arg2)
+}
+
 // AddRoutes mocks base method
 func (m *MockInterface) AddRoutes(arg0 *net.IPNet, arg1 string, arg2, arg3 net.IP) error {
 	m.ctrl.T.Helper()
@@ -75,6 +132,62 @@ func (m *MockInterface) AddSNATRule(arg0 net.IP, arg1 uint32) error {
 func (mr *MockInterfaceMockRecorder) AddSNATRule(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddSNATRule", reflect.TypeOf((*MockInterface)(nil).AddSNATRule), arg0, arg1)
+}
+
+// DeleteClusterIPRoute mocks base method
+func (m *MockInterface) DeleteClusterIPRoute(arg0 net.IP) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteClusterIPRoute", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteClusterIPRoute indicates an expected call of DeleteClusterIPRoute
+func (mr *MockInterfaceMockRecorder) DeleteClusterIPRoute(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteClusterIPRoute", reflect.TypeOf((*MockInterface)(nil).DeleteClusterIPRoute), arg0)
+}
+
+// DeleteLoadBalancer mocks base method
+func (m *MockInterface) DeleteLoadBalancer(arg0 []string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteLoadBalancer", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteLoadBalancer indicates an expected call of DeleteLoadBalancer
+func (mr *MockInterfaceMockRecorder) DeleteLoadBalancer(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteLoadBalancer", reflect.TypeOf((*MockInterface)(nil).DeleteLoadBalancer), arg0)
+}
+
+// DeleteLocalAntreaFlexibleIPAMPodRule mocks base method
+func (m *MockInterface) DeleteLocalAntreaFlexibleIPAMPodRule(arg0 []net.IP) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteLocalAntreaFlexibleIPAMPodRule", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteLocalAntreaFlexibleIPAMPodRule indicates an expected call of DeleteLocalAntreaFlexibleIPAMPodRule
+func (mr *MockInterfaceMockRecorder) DeleteLocalAntreaFlexibleIPAMPodRule(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteLocalAntreaFlexibleIPAMPodRule", reflect.TypeOf((*MockInterface)(nil).DeleteLocalAntreaFlexibleIPAMPodRule), arg0)
+}
+
+// DeleteNodePort mocks base method
+func (m *MockInterface) DeleteNodePort(arg0 []net.IP, arg1 uint16, arg2 openflow.Protocol) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteNodePort", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteNodePort indicates an expected call of DeleteNodePort
+func (mr *MockInterfaceMockRecorder) DeleteNodePort(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteNodePort", reflect.TypeOf((*MockInterface)(nil).DeleteNodePort), arg0, arg1, arg2)
 }
 
 // DeleteRoutes mocks base method
@@ -134,17 +247,17 @@ func (mr *MockInterfaceMockRecorder) MigrateRoutesToGw(arg0 interface{}) *gomock
 }
 
 // Reconcile mocks base method
-func (m *MockInterface) Reconcile(arg0 []string) error {
+func (m *MockInterface) Reconcile(arg0 []string, arg1 map[string]bool) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Reconcile", arg0)
+	ret := m.ctrl.Call(m, "Reconcile", arg0, arg1)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Reconcile indicates an expected call of Reconcile
-func (mr *MockInterfaceMockRecorder) Reconcile(arg0 interface{}) *gomock.Call {
+func (mr *MockInterfaceMockRecorder) Reconcile(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reconcile", reflect.TypeOf((*MockInterface)(nil).Reconcile), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reconcile", reflect.TypeOf((*MockInterface)(nil).Reconcile), arg0, arg1)
 }
 
 // Run mocks base method

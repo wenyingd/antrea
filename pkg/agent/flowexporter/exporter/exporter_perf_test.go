@@ -18,28 +18,31 @@
 package exporter
 
 import (
+	"container/heap"
 	"crypto/rand"
 	"flag"
 	"fmt"
+	"math"
 	"math/big"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
+	ipfixentities "github.com/vmware/go-ipfix/pkg/entities"
 	"github.com/vmware/go-ipfix/pkg/registry"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/flowexporter/connections"
-	"antrea.io/antrea/pkg/agent/flowexporter/flowrecords"
+	"antrea.io/antrea/pkg/agent/flowexporter/priorityqueue"
+	"antrea.io/antrea/pkg/ipfix"
 )
 
 const (
 	testNumOfConns         = 20000
 	testNumOfDenyConns     = 20000
 	testNumOfDyingConns    = 2000
-	testNumOfIdleRecords   = 2000
 	testNumOfIdleDenyConns = 2000
 	testBufferSize         = 1048
 )
@@ -48,26 +51,31 @@ var recordsReceived = 0
 
 /*
 Sample output:
-	go test -test.v -run=BenchmarkExport -test.benchmem -bench=BenchmarkExportConntrackConns -memprofile memprofile.out -cpuprofile profile.out
-	goos: linux
-	goarch: amd64
-	pkg: antrea.io/antrea/pkg/agent/flowexporter/exporter
-	cpu: Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
-	BenchmarkExportConntrackConns (truncated output)
-		exporter_perf_test.go:79:
-			Summary:
-			Number of conntrack connections: 20000
-			Number of dying conntrack connections: 2000
-			Total connections received: 18703
-	BenchmarkExportConntrackConns-2   	      75	  13750074 ns/op	  965550 B/op	   22268 allocs/op
-	PASS
-	ok  	antrea.io/antrea/pkg/agent/flowexporter/exporter	5.494s
+go test -test.v -run=BenchmarkExport -test.benchmem -bench=BenchmarkExportConntrackConns -benchtime=100x -memprofile memprofile.out -cpuprofile profile.out
+goos: linux
+goarch: amd64
+pkg: antrea.io/antrea/pkg/agent/flowexporter/exporter
+cpu: Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+BenchmarkExportConntrackConns
+    exporter_perf_test.go:95:
+        Summary:
+        Number of conntrack connections: 20000
+        Number of dying conntrack connections: 2000
+        Total connections received: 19564
+    exporter_perf_test.go:95:
+        Summary:
+        Number of conntrack connections: 20000
+        Number of dying conntrack connections: 2000
+        Total connections received: 18259
+BenchmarkExportConntrackConns-2   	     100	   3174982 ns/op	  328104 B/op	    3262 allocs/op
+PASS
+ok  	antrea.io/antrea/pkg/agent/flowexporter/exporter	1.249s
 Reference value:
 	#conns
-	20000     156	   8037522 ns/op	  340792 B/op	   13540 allocs/op
-	30000      61	  20510362 ns/op	 1082075 B/op	   43304 allocs/op
-	40000      39	  46557414 ns/op	 3180649 B/op	  127687 allocs/op
-	50000      18	  55581807 ns/op	 4420593 B/op	  177554 allocs/op
+	20000     100	   3174982 ns/op	  328104 B/op	    3262 allocs/op
+	30000     100	   5074667 ns/op	  489624 B/op	    4874 allocs/op
+	40000     100	   5910591 ns/op	  649683 B/op	    6442 allocs/op
+	50000     100	   8435327 ns/op	  811341 B/op	    8057 allocs/op
 */
 func BenchmarkExportConntrackConns(b *testing.B) {
 	disableLogToStderr()
@@ -82,33 +90,40 @@ func BenchmarkExportConntrackConns(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		exp.initFlowExporter()
-		exp.sendFlowRecords()
+		for i := 0; i < int(math.Ceil(testNumOfConns/maxConnsToExport)); i++ {
+			exp.sendFlowRecords()
+		}
 	}
 	b.Logf("\nSummary:\nNumber of conntrack connections: %d\nNumber of dying conntrack connections: %d\nTotal connections received: %d\n", testNumOfConns, testNumOfDyingConns, recordsReceived)
 }
 
 /*
 Sample output:
-	go test -test.v -run=BenchmarkExport -test.benchmem -bench=BenchmarkExportDenyConns -memprofile memprofile.out -cpuprofile profile.out
-	goos: linux
-	goarch: amd64
-	pkg: antrea.io/antrea/pkg/agent/flowexporter/exporter
-	cpu: Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
-	BenchmarkExportDenyConns (truncated output)
-		exporter_perf_test.go:112:
-			Summary:
-			Number of deny connections: 20000
-			Number of idle deny connections: 2000
-			Total connections received: 19124
-	BenchmarkExportDenyConns-2   	     204	   6922004 ns/op	  357215 B/op	   12106 allocs/op
-	PASS
-	ok  	antrea.io/antrea/pkg/agent/flowexporter/exporter	6.189s
+go test -test.v -run=BenchmarkExport -test.benchmem -bench=BenchmarkExportDenyConns -benchtime=100x -memprofile memprofile.out -cpuprofile profile.out
+goos: linux
+goarch: amd64
+pkg: antrea.io/antrea/pkg/agent/flowexporter/exporter
+cpu: Intel(R) Core(TM) i7-8750H CPU @ 2.20GHz
+BenchmarkExportDenyConns
+    exporter_perf_test.go:143:
+        Summary:
+        Number of deny connections: 20000
+        Number of idle deny connections: 2000
+        Total connections received: 19218
+    exporter_perf_test.go:143:
+        Summary:
+        Number of deny connections: 20000
+        Number of idle deny connections: 2000
+        Total connections received: 19237
+BenchmarkExportDenyConns-2   	     100	   3133778 ns/op	  322203 B/op	    3474 allocs/op
+PASS
+ok  	antrea.io/antrea/pkg/agent/flowexporter/exporter	1.238s
 Reference value:
 	#conns
-	20000   210	   5401396 ns/op	  195415 B/op	    7908 allocs/op
-	30000   102	  11793506 ns/op	  555344 B/op	   22770 allocs/op
-	40000    64	  19141650 ns/op	 1239398 B/op	   51008 allocs/op
-	50000    37	  27369835 ns/op	 2036012 B/op	   83802 allocs/op
+	20000   100	   3133778 ns/op	  322203 B/op	    3474 allocs/op
+	30000   100	   4813561 ns/op	  480075 B/op	    5175 allocs/op
+	40000   100	   6772657 ns/op	  637599 B/op	    6860 allocs/op
+	50000   100	   7078690 ns/op	  795104 B/op	    8549 allocs/op
 */
 func BenchmarkExportDenyConns(b *testing.B) {
 	disableLogToStderr()
@@ -123,51 +138,48 @@ func BenchmarkExportDenyConns(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		exp.initFlowExporter()
-		exp.sendFlowRecords()
+		for i := 0; i < int(math.Ceil(testNumOfDenyConns/maxConnsToExport)); i++ {
+			exp.sendFlowRecords()
+		}
 	}
 	b.Logf("\nSummary:\nNumber of deny connections: %d\nNumber of idle deny connections: %d\nTotal connections received: %d\n", testNumOfDenyConns, testNumOfIdleDenyConns, recordsReceived)
 
 }
 
-/*
-go test -test.v -run=None -test.benchmem -bench=BenchmarkGetRecordAndDeleteFromMap -memprofile memprofile.out -cpuprofile profile.out
-goos: linux
-goarch: amd64
-pkg: antrea.io/antrea/pkg/agent/flowexporter/exporter
-cpu: Intel(R) Core(TM) i9-9980HK CPU @ 2.40GHz
-BenchmarkGetRecordAndDeleteFromMap
-    exporter_perf_test.go:150:
-        Summary:
-        Number of conntrack connections: 100000
-         Number of dying conntrack connections: 5000
-BenchmarkGetRecordAndDeleteFromMap-2   	168049232	         6.737 ns/op	       0 B/op	       0 allocs/op
-PASS
-ok  	antrea.io/antrea/pkg/agent/flowexporter/exporter	8.707s
-Reference value:
-	#conns
-	20000   168049232	 6.737 ns/op	  0 B/op   0 allocs/op
-*/
-func BenchmarkGetRecordAndDeleteFromMap(b *testing.B) {
-	disableLogToStderr()
-	ctrl := gomock.NewController(b)
-	defer ctrl.Finish()
+func NewFlowExporterForTest(o *flowexporter.FlowExporterOptions) *FlowExporter {
+	// Initialize IPFIX registry
+	registry := ipfix.NewIPFIXRegistry()
+	registry.LoadRegistry()
 
-	conntrackConnStore := connections.NewConntrackConnectionStore(nil, flowrecords.NewFlowRecords(), nil, true, false, nil, nil, 1, 1)
-	records := addConnsAndGetRecords(conntrackConnStore)
-	b.ResetTimer()
-	for n := 0; n < b.N; n++ {
-		getFlowRecordAndDelete := func(key flowexporter.ConnectionKey, record flowexporter.FlowRecord) error {
-			if _, exists := records.GetFlowRecordFromMap(&key); exists {
-				return records.DeleteFlowRecordFromMap(&key)
-			}
-			return nil
-		}
-		records.ForAllFlowRecordsDoWithoutLock(getFlowRecordAndDelete)
+	// Prepare input args for IPFIX exporting process.
+	nodeName := "test-node"
+	expInput := prepareExporterInputArgs(o.FlowCollectorAddr, o.FlowCollectorProto, nodeName)
+
+	v4Enabled := true
+	v6Enabled := false
+
+	denyConnStore := connections.NewDenyConnectionStore(nil, nil, o)
+	conntrackConnStore := connections.NewConntrackConnectionStore(nil, v4Enabled, v6Enabled, nil, nil, nil, o)
+
+	return &FlowExporter{
+		conntrackConnStore:     conntrackConnStore,
+		denyConnStore:          denyConnStore,
+		registry:               registry,
+		v4Enabled:              v4Enabled,
+		v6Enabled:              v6Enabled,
+		exporterInput:          expInput,
+		ipfixSet:               ipfixentities.NewSet(false),
+		k8sClient:              nil,
+		nodeRouteController:    nil,
+		isNetworkPolicyOnly:    false,
+		nodeName:               nodeName,
+		conntrackPriorityQueue: conntrackConnStore.GetPriorityQueue(),
+		denyPriorityQueue:      denyConnStore.GetPriorityQueue(),
+		expiredConns:           make([]flowexporter.Connection, 0, maxConnsToExport*2),
 	}
-	b.Logf("\nSummary:\nNumber of conntrack connections: %d\n Number of dying conntrack connections: %d\n", testNumOfConns, testNumOfDyingConns)
 }
 
-func setupExporter(isConntrackConn bool) (*flowExporter, error) {
+func setupExporter(isConntrackConn bool) (*FlowExporter, error) {
 	var err error
 	collectorAddr, err := startLocalServer()
 	if err != nil {
@@ -175,16 +187,19 @@ func setupExporter(isConntrackConn bool) (*flowExporter, error) {
 	}
 
 	// create connection store and generate connections
-	records := flowrecords.NewFlowRecords()
-	denyConnStore := connections.NewDenyConnectionStore(nil, nil, 0)
-	conntrackConnStore := connections.NewConntrackConnectionStore(nil, flowrecords.NewFlowRecords(), nil, true, false, nil, nil, 1, 1)
+	o := &flowexporter.FlowExporterOptions{
+		FlowCollectorAddr:      collectorAddr.String(),
+		FlowCollectorProto:     collectorAddr.Network(),
+		ActiveFlowTimeout:      testActiveFlowTimeout,
+		IdleFlowTimeout:        testIdleFlowTimeout,
+		StaleConnectionTimeout: 1,
+		PollInterval:           1}
+	exp := NewFlowExporterForTest(o)
 	if isConntrackConn {
-		records = addConnsAndGetRecords(conntrackConnStore)
+		addConns(exp.conntrackConnStore, exp.conntrackConnStore.GetPriorityQueue())
 	} else {
-		addDenyConns(denyConnStore)
+		addDenyConns(exp.denyConnStore, exp.denyConnStore.GetPriorityQueue())
 	}
-
-	exp, _ := NewFlowExporter(conntrackConnStore, records, denyConnStore, collectorAddr.String(), collectorAddr.Network(), testActiveFlowTimeout, testIdleFlowTimeout, true, false, nil, nil, false)
 	return exp, err
 }
 
@@ -211,9 +226,8 @@ func startLocalServer() (net.Addr, error) {
 	return conn.LocalAddr(), nil
 }
 
-func addConnsAndGetRecords(connStore *connections.ConntrackConnectionStore) *flowrecords.FlowRecords {
+func addConns(connStore *connections.ConntrackConnectionStore, expirePriorityQueue *priorityqueue.ExpirePriorityQueue) {
 	randomNum := int(getRandomNum(int64(testNumOfConns - testNumOfDyingConns)))
-	records := flowrecords.NewFlowRecords()
 	for i := 0; i < testNumOfConns; i++ {
 		// create and add connection to connection store
 		randomNum1 := getRandomNum(255)
@@ -224,9 +238,8 @@ func addConnsAndGetRecords(connStore *connections.ConntrackConnectionStore) *flo
 		conn := &flowexporter.Connection{
 			StartTime:                  time.Now().Add(-time.Duration(randomNum1) * time.Second),
 			StopTime:                   time.Now(),
-			LastExportTime:             time.Now().Add(-time.Duration(randomNum1)*time.Millisecond - testActiveFlowTimeout),
 			IsPresent:                  true,
-			DyingAndDoneExport:         false,
+			ReadyToDelete:              false,
 			FlowKey:                    flowKey,
 			OriginalPackets:            100,
 			OriginalBytes:              10,
@@ -246,29 +259,17 @@ func addConnsAndGetRecords(connStore *connections.ConntrackConnectionStore) *flo
 			conn.TCPState = "TIME_WAIT"
 		}
 		connStore.AddConnToMap(&connKey, conn)
-
-		// generate record from connection and add the record to record map
-		record := &flowexporter.FlowRecord{
-			Conn:               *conn,
-			PrevPackets:        0,
-			PrevBytes:          0,
-			PrevReversePackets: 0,
-			PrevReverseBytes:   0,
-			IsIPv6:             false,
-			LastExportTime:     time.Now().Add(-testActiveFlowTimeout),
-			IsActive:           true,
+		pqItem := &flowexporter.ItemToExpire{
+			ActiveExpireTime: time.Now().Add(-time.Duration(randomNum1) * time.Second),
+			IdleExpireTime:   time.Now(),
 		}
-		if i < testNumOfIdleRecords {
-			record.PrevPackets = conn.OriginalPackets
-			record.PrevReversePackets = conn.ReversePackets
-			record.LastExportTime = time.Now().Add(-testIdleFlowTimeout)
-		}
-		records.AddFlowRecordToMap(&connKey, record)
+		pqItem.Conn = conn
+		heap.Push(expirePriorityQueue, pqItem)
+		expirePriorityQueue.KeyToItem[connKey] = pqItem
 	}
-	return records
 }
 
-func addDenyConns(connStore *connections.DenyConnectionStore) {
+func addDenyConns(connStore *connections.DenyConnectionStore, expirePriorityQueue *priorityqueue.ExpirePriorityQueue) {
 	for i := 0; i < testNumOfDenyConns; i++ {
 		randomNum1 := getRandomNum(255)
 		randomNum2 := getRandomNum(255)
@@ -278,12 +279,9 @@ func addDenyConns(connStore *connections.DenyConnectionStore) {
 		conn := &flowexporter.Connection{
 			StartTime:                     time.Now().Add(-time.Duration(randomNum1) * time.Second),
 			StopTime:                      time.Now(),
-			LastExportTime:                time.Now().Add(-time.Duration(randomNum1)*time.Millisecond - testActiveFlowTimeout),
 			FlowKey:                       flowKey,
 			OriginalPackets:               10,
 			OriginalBytes:                 100,
-			DeltaBytes:                    20,
-			DeltaPackets:                  5,
 			SourcePodNamespace:            "ns1",
 			SourcePodName:                 "pod1",
 			EgressNetworkPolicyName:       "egress-reject",
@@ -291,11 +289,15 @@ func addDenyConns(connStore *connections.DenyConnectionStore) {
 			EgressNetworkPolicyNamespace:  "egress-ns",
 			EgressNetworkPolicyRuleAction: registry.NetworkPolicyRuleActionReject,
 		}
-		if i < testNumOfIdleDenyConns {
-			conn.LastExportTime = time.Now().Add(-testIdleFlowTimeout)
-		}
 		connKey := flowexporter.NewConnectionKey(conn)
 		connStore.AddConnToMap(&connKey, conn)
+		pqItem := &flowexporter.ItemToExpire{
+			ActiveExpireTime: time.Now().Add(-time.Duration(randomNum1) * time.Second),
+			IdleExpireTime:   time.Now(),
+		}
+		pqItem.Conn = conn
+		heap.Push(expirePriorityQueue, pqItem)
+		expirePriorityQueue.KeyToItem[connKey] = pqItem
 	}
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2022 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ type CrdV1alpha2Interface interface {
 	EgressesGetter
 	ExternalEntitiesGetter
 	ExternalIPPoolsGetter
+	IPPoolsGetter
 }
 
 // CrdV1alpha2Client is used to interact with features provided by the crd.antrea.io group.
@@ -49,6 +50,10 @@ func (c *CrdV1alpha2Client) ExternalEntities(namespace string) ExternalEntityInt
 
 func (c *CrdV1alpha2Client) ExternalIPPools() ExternalIPPoolInterface {
 	return newExternalIPPools(c)
+}
+
+func (c *CrdV1alpha2Client) IPPools() IPPoolInterface {
+	return newIPPools(c)
 }
 
 // NewForConfig creates a new CrdV1alpha2Client for the given config.

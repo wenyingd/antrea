@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -25,6 +26,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	v1net "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,20 +39,18 @@ import (
 	crdv1alpha2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
 	crdv1alpha3 "antrea.io/antrea/pkg/apis/crd/v1alpha3"
 	"antrea.io/antrea/pkg/features"
-	legacycorev1a2 "antrea.io/antrea/pkg/legacyapis/core/v1alpha2"
-	legacysecv1alpha1 "antrea.io/antrea/pkg/legacyapis/security/v1alpha1"
 	. "antrea.io/antrea/test/e2e/utils"
 )
 
 // common for all tests.
 var (
-	allPods                              []Pod
-	podsByNamespace                      map[string][]Pod
-	k8sUtils                             *KubernetesUtils
-	allTestList                          []*TestCase
-	pods, namespaces                     []string
-	podIPs                               map[string][]string
-	p80, p81, p8080, p8081, p8082, p8085 int32
+	allPods                                     []Pod
+	podsByNamespace                             map[string][]Pod
+	k8sUtils                                    *KubernetesUtils
+	allTestList                                 []*TestCase
+	pods, namespaces                            []string
+	podIPs                                      map[string][]string
+	p80, p81, p8080, p8081, p8082, p8085, p6443 int32
 )
 
 const (
@@ -104,49 +104,13 @@ func failOnError(err error, t *testing.T) {
 	}
 }
 
-func warningOnTimeoutError(err error, t *testing.T) {
-	if err != nil {
-		log.Warningf("Timeout for getting expected status and the tests may get unexpted results.")
-		t.Fatalf("test warned: %v", err)
-	}
-}
-
-// TestCase is a collection of TestSteps to be tested against.
-type TestCase struct {
-	Name  string
-	Steps []*TestStep
-}
-
-// TestStep is a single unit of testing spec. It includes the policy specs that need to be
-// applied for this test, the port to test traffic on and the expected Reachability matrix.
-type TestStep struct {
-	Name          string
-	Reachability  *Reachability
-	TestResources []metav1.Object
-	Ports         []int32
-	Protocol      v1.Protocol
-	Duration      time.Duration
-	CustomProbes  []*CustomProbe
-}
-
-// fqdnTestStep is a single unit of testing spec for FQDN policy tests.
-type fqdnTestStep struct {
+// podToAddrTestStep is a single unit of testing the connectivity from a Pod to an
+// arbitrary destination address.
+type podToAddrTestStep struct {
 	clientPod            Pod
-	fqdnToQuery          string
+	destAddr             string
+	destPort             int32
 	expectedConnectivity PodConnectivityMark
-}
-
-// CustomProbe will spin up (or update) SourcePod and DestPod such that Add event of Pods
-// can be tested against expected connectivity among those Pods.
-type CustomProbe struct {
-	// Create or update a source Pod.
-	SourcePod CustomPod
-	// Create or update a destination Pod.
-	DestPod CustomPod
-	// Port on which the probe will be made.
-	Port int32
-	// Set the expected connectivity.
-	ExpectConnectivity PodConnectivityMark
 }
 
 func initialize(t *testing.T, data *TestData) {
@@ -264,7 +228,7 @@ func testMutateACNPNoRuleName(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}}).
 		SetPriority(10.0).
 		AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-			nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+			nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 	acnp := builder.Get()
 	log.Debugf("creating ACNP %v", acnp.Name)
 	acnp, err := k8sUtils.CreateOrUpdateACNP(acnp)
@@ -312,188 +276,6 @@ func testInvalidACNPNoPriority(t *testing.T) {
 	builder := &ClusterNetworkPolicySpecBuilder{}
 	builder = builder.SetName("acnp-no-priority").
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPRuleNameNotUnique(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy without unique rule names accepted")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-rule-name-not-unique").
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}}).
-		AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-			nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "not-unique").
-		AddIngress(v1.ProtocolTCP, &p81, nil, nil, nil, map[string]string{"pod": "c"}, map[string]string{"ns": "x"},
-			nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "not-unique")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPTierDoesNotExist(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy without existing Tier accepted")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-tier-not-exist").
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}}).
-		SetTier("i-dont-exist")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPPortRangePortUnset(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy egress rule with endPort but no port accepted")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-egress-port-range-port-unset").
-		SetPriority(1.0).
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "b"}}})
-	builder.AddEgress(v1.ProtocolTCP, nil, nil, &p8085, nil, map[string]string{"pod": "c"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "acnp-port-range")
-
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPPortRangeEndPortSmall(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy egress rule with endPort smaller than port accepted")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-egress-port-range-endport-small").
-		SetPriority(1.0).
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "b"}}})
-	builder.AddEgress(v1.ProtocolTCP, &p8082, nil, &p8081, nil, map[string]string{"pod": "c"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "acnp-port-range")
-
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPSpecAppliedToRuleAppliedToSet(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy with spec appliedTo and rules appliedTo set")
-	ruleAppTo := ACNPAppliedToSpec{
-		PodSelector: map[string]string{"pod": "b"},
-	}
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-spec-appto-and-rules-appto").
-		SetPriority(1.0).
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "b"}}})
-	builder = builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, []ACNPAppliedToSpec{ruleAppTo}, crdv1alpha1.RuleActionAllow, "", "")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPAppliedToNotSetInAllRules(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy with appliedTo not set in all rules")
-	ruleAppTo := ACNPAppliedToSpec{
-		PodSelector: map[string]string{"pod": "b"},
-	}
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-appto-not-set-in-all-rules").
-		SetPriority(1.0)
-	builder = builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, []ACNPAppliedToSpec{ruleAppTo}, crdv1alpha1.RuleActionAllow, "", "").
-		AddIngress(v1.ProtocolTCP, &p81, nil, nil, nil, map[string]string{"pod": "c"}, map[string]string{"ns": "x"},
-			nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPIngressPeerCGSetWithPodSelector(t *testing.T) {
-	cgA := "cgA"
-	selectorA := metav1.LabelSelector{MatchLabels: map[string]string{"foo1": "bar1"}}
-	ruleAppTo := ACNPAppliedToSpec{
-		PodSelector: map[string]string{"pod": "b"},
-	}
-	k8sUtils.CreateCG(cgA, &selectorA, nil, nil)
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy with group and podSelector in NetworkPolicyPeer set")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-ingress-group-podselector-set").
-		SetPriority(1.0)
-	builder = builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, nil,
-		nil, nil, false, []ACNPAppliedToSpec{ruleAppTo}, crdv1alpha1.RuleActionAllow, "cgA", "")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-	failOnError(k8sUtils.CleanCGs(), t)
-}
-
-func testInvalidACNPIngressPeerCGSetWithNSSelector(t *testing.T) {
-	cgA := "cgA"
-	selectorA := metav1.LabelSelector{MatchLabels: map[string]string{"foo1": "bar1"}}
-	k8sUtils.CreateCG(cgA, &selectorA, nil, nil)
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy with group and namespaceSelector in NetworkPolicyPeer set")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-ingress-group-nsselector-set").
-		SetPriority(1.0).
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "b"}}})
-	builder = builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "cgA", "")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-	failOnError(k8sUtils.CleanCGs(), t)
-}
-
-func testInvalidACNPIngressPeerCGSetWithIPBlock(t *testing.T) {
-	cgA := "cgA"
-	selectorA := metav1.LabelSelector{MatchLabels: map[string]string{"foo1": "bar1"}}
-	k8sUtils.CreateCG(cgA, &selectorA, nil, nil)
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy with group and ipBlock in NetworkPolicyPeer set")
-	cidr := "10.0.0.10/32"
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-ingress-group-ipblock-set").
-		SetPriority(1.0).
-		SetAppliedToGroup([]ACNPAppliedToSpec{{Group: "cgA"}})
-	builder = builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, &cidr, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, []ACNPAppliedToSpec{{Group: "cgB"}}, crdv1alpha1.RuleActionAllow, "", "")
-	acnp := builder.Get()
-	log.Debugf("creating ACNP %v", acnp.Name)
-	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
-		// Above creation of ACNP must fail as it is an invalid spec.
-		failOnError(invalidNpErr, t)
-	}
-}
-
-func testInvalidACNPIngressPeerNamespacesSetWithNSSelector(t *testing.T) {
-	invalidNpErr := fmt.Errorf("invalid Antrea ClusterNetworkPolicy with namespaces and namespaceSelector in NetworkPolicyPeer set")
-	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-ingress-namespaces-nsselector-set").
-		SetPriority(1.0).
-		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "b"}}})
-	builder = builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "x"},
-		nil, nil, true, nil, crdv1alpha1.RuleActionAllow, "", "")
 	acnp := builder.Get()
 	log.Debugf("creating ACNP %v", acnp.Name)
 	if _, err := k8sUtils.CreateOrUpdateACNP(acnp); err == nil {
@@ -716,7 +498,7 @@ func testACNPAllowXBtoA(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	reachability := NewReachability(allPods, Dropped)
 	reachability.Expect(Pod("x/b"), Pod("x/a"), Connected)
@@ -750,7 +532,7 @@ func testACNPAllowXBtoYA(t *testing.T) {
 		SetPriority(2.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "y"}}})
 	builder.AddIngress(v1.ProtocolTCP, nil, &port81Name, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	reachability := NewReachability(allPods, Dropped)
 	reachability.Expect(Pod("x/b"), Pod("y/a"), Connected)
@@ -782,14 +564,14 @@ func testACNPPriorityOverrideDefaultDeny(t *testing.T) {
 		SetPriority(2).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder1.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	builder2 := &ClusterNetworkPolicySpecBuilder{}
 	builder2 = builder2.SetName("acnp-priority1").
 		SetPriority(1).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	// Ingress from ns:z to x/a will be dropped since acnp-priority1 has higher precedence.
 	reachabilityBothACNP := NewReachability(allPods, Dropped)
@@ -821,7 +603,6 @@ func testACNPPriorityOverrideDefaultDeny(t *testing.T) {
 // testACNPAllowNoDefaultIsolation tests that no default isolation rules are created for Policies.
 func testACNPAllowNoDefaultIsolation(t *testing.T, protocol v1.Protocol) {
 	if protocol == v1.ProtocolSCTP {
-		skipIfProviderIs(t, "kind", "OVS userspace conntrack does not have the SCTP support for now.")
 		// SCTP testing is failing on our IPv6 CI testbeds at the moment. This seems to be
 		// related to an issue with ESX networking for SCTPv6 traffic when the Pods are on
 		// different Node VMs which are themselves on different ESX hosts. We are
@@ -834,9 +615,9 @@ func testACNPAllowNoDefaultIsolation(t *testing.T, protocol v1.Protocol) {
 		SetPriority(1.1).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder.AddIngress(protocol, &p81, nil, nil, nil, nil, map[string]string{"ns": "y"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 	builder.AddEgress(protocol, &p81, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	testStep := []*TestStep{
@@ -859,7 +640,6 @@ func testACNPAllowNoDefaultIsolation(t *testing.T, protocol v1.Protocol) {
 // testACNPDropEgress tests that an ACNP is able to drop egress traffic from pods labelled A to namespace Z.
 func testACNPDropEgress(t *testing.T, protocol v1.Protocol) {
 	if protocol == v1.ProtocolSCTP {
-		skipIfProviderIs(t, "kind", "OVS userspace conntrack does not have the SCTP support for now.")
 		// SCTP testing is failing on our IPv6 CI testbeds at the moment. This seems to be
 		// related to an issue with ESX networking for SCTPv6 traffic when the Pods are on
 		// different Node VMs which are themselves on different ESX hosts. We are
@@ -872,7 +652,7 @@ func testACNPDropEgress(t *testing.T, protocol v1.Protocol) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddEgress(protocol, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Dropped)
@@ -905,7 +685,7 @@ func testACNPDropIngressInSelectedNamespace(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil, nil, nil, false, nil,
-		crdv1alpha1.RuleActionDrop, "", "drop-all-ingress")
+		crdv1alpha1.RuleActionDrop, "", "drop-all-ingress", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectAllIngress("x/a", Dropped)
@@ -936,7 +716,7 @@ func testACNPNoEffectOnOtherProtocols(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability1 := NewReachability(allPods, Connected)
 	reachability1.Expect(Pod("z/a"), Pod("x/a"), Dropped)
@@ -989,7 +769,7 @@ func testACNPAppliedToDenyXBtoCGWithYA(t *testing.T) {
 		SetPriority(2.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{Group: cgName}})
 	builder.AddIngress(v1.ProtocolTCP, nil, &port81Name, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.Expect(Pod("x/b"), Pod("y/a"), Dropped)
@@ -1026,7 +806,7 @@ func testACNPIngressRuleDenyCGWithXBtoYA(t *testing.T) {
 		SetPriority(2.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "y"}}})
 	builder.AddIngress(v1.ProtocolTCP, nil, &port81Name, nil, nil, nil, nil,
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.Expect(Pod("x/b"), Pod("y/a"), Dropped)
@@ -1058,7 +838,7 @@ func testACNPAppliedToRuleCGWithPodsAToNsZ(t *testing.T) {
 	builder = builder.SetName("acnp-deny-cg-with-a-to-z").
 		SetPriority(1.0)
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, []ACNPAppliedToSpec{{Group: cgName}}, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, []ACNPAppliedToSpec{{Group: cgName}}, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Dropped)
@@ -1093,7 +873,7 @@ func testACNPEgressRulePodsAToCGWithNsZ(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Dropped)
@@ -1130,7 +910,7 @@ func testACNPClusterGroupUpdateAppliedTo(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{Group: cgName}})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Dropped)
@@ -1181,7 +961,7 @@ func testACNPClusterGroupUpdate(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Dropped)
@@ -1231,7 +1011,7 @@ func testACNPClusterGroupAppliedToPodAdd(t *testing.T, data *TestData) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{Group: cgName}})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "j"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 	cp := []*CustomProbe{
 		{
 			SourcePod: CustomPod{
@@ -1279,7 +1059,7 @@ func testACNPClusterGroupRefRulePodAdd(t *testing.T, data *TestData) {
 			},
 		})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgName, "", nil)
 	cp := []*CustomProbe{
 		{
 			SourcePod: CustomPod{
@@ -1347,7 +1127,7 @@ func testACNPClusterGroupRefRuleIPBlocks(t *testing.T) {
 		SetIPBlocks(ipBlock2)
 
 	builder := &ClusterNetworkPolicySpecBuilder{}
-	builder = builder.SetName("acnp-deny-ya-to-x-ips-ingress").
+	builder = builder.SetName("acnp-deny-x-ips-ingress-for-ya").
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{
 			{
@@ -1356,9 +1136,9 @@ func testACNPClusterGroupRefRuleIPBlocks(t *testing.T) {
 			},
 		})
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgv1a3Name, "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgv1a3Name, "", nil)
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgv1a2Name, "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgv1a2Name, "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.Expect(Pod("x/a"), Pod("y/a"), Dropped)
@@ -1377,7 +1157,7 @@ func testACNPClusterGroupRefRuleIPBlocks(t *testing.T) {
 		},
 	}
 	testCase := []*TestCase{
-		{"ACNP Drop Ingress From Pod: y/a to ClusterGroup with ipBlocks", testStep},
+		{"ACNP Drop Ingress From x to Pod y/a to ClusterGroup with ipBlocks", testStep},
 	}
 	executeTests(t, testCase)
 }
@@ -1397,7 +1177,7 @@ func testBaselineNamespaceIsolation(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
 		nil, []metav1.LabelSelectorRequirement{nsExpOtherThanX}, false,
-		nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	// create a K8s NetworkPolicy for Pods in namespace x to allow ingress traffic from Pods in the same namespace,
 	// as well as from the y/a Pod. It should open up ingress from y/a since it's evaluated before the baseline tier.
@@ -1448,7 +1228,7 @@ func testACNPPriorityOverride(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	// Highest priority. Drops traffic from z/b to x/a.
 	builder1.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	builder2 := &ClusterNetworkPolicySpecBuilder{}
 	builder2 = builder2.SetName("acnp-priority2").
@@ -1456,7 +1236,7 @@ func testACNPPriorityOverride(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	// Medium priority. Allows traffic from z to x/a.
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	builder3 := &ClusterNetworkPolicySpecBuilder{}
 	builder3 = builder3.SetName("acnp-priority3").
@@ -1464,7 +1244,7 @@ func testACNPPriorityOverride(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	// Lowest priority. Drops traffic from z to x.
 	builder3.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachabilityTwoACNPs := NewReachability(allPods, Connected)
 	reachabilityTwoACNPs.Expect(Pod("z/a"), Pod("x/b"), Dropped)
@@ -1523,7 +1303,7 @@ func testACNPTierOverride(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	// Highest priority tier. Drops traffic from z/b to x/a.
 	builder1.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	builder2 := &ClusterNetworkPolicySpecBuilder{}
 	builder2 = builder2.SetName("acnp-tier-securityops").
@@ -1532,7 +1312,7 @@ func testACNPTierOverride(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	// Medium priority tier. Allows traffic from z to x/a.
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	builder3 := &ClusterNetworkPolicySpecBuilder{}
 	builder3 = builder3.SetName("acnp-tier-application").
@@ -1541,7 +1321,7 @@ func testACNPTierOverride(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	// Lowest priority tier. Drops traffic from z to x.
 	builder3.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachabilityTwoACNPs := NewReachability(allPods, Connected)
 	reachabilityTwoACNPs.Expect(Pod("z/a"), Pod("x/b"), Dropped)
@@ -1607,7 +1387,7 @@ func testACNPCustomTiers(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	// Medium priority tier. Allows traffic from z to x/a.
 	builder1.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	builder2 := &ClusterNetworkPolicySpecBuilder{}
 	builder2 = builder2.SetName("acnp-tier-low").
@@ -1616,7 +1396,7 @@ func testACNPCustomTiers(t *testing.T) {
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	// Lowest priority tier. Drops traffic from z to x.
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachabilityTwoACNPs := NewReachability(allPods, Connected)
 	reachabilityTwoACNPs.Expect(Pod("z/a"), Pod("x/b"), Dropped)
@@ -1655,7 +1435,7 @@ func testACNPPriorityConflictingRule(t *testing.T) {
 		SetPriority(1).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder1.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	builder2 := &ClusterNetworkPolicySpecBuilder{}
 	builder2 = builder2.SetName("acnp-allow").
@@ -1664,7 +1444,7 @@ func testACNPPriorityConflictingRule(t *testing.T) {
 	// The following ingress rule will take no effect as it is exactly the same as ingress rule of cnp-drop,
 	// but cnp-allow has lower priority.
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	reachabilityBothACNP := NewReachability(allPods, Connected)
 	reachabilityBothACNP.ExpectEgressToNamespace(Pod("z/a"), "x", Dropped)
@@ -1696,10 +1476,10 @@ func testACNPRulePriority(t *testing.T) {
 		SetPriority(5).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder1.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "y"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 	// This rule should take no effect as it will be overridden by the first rule of cnp-allow
 	builder1.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	builder2 := &ClusterNetworkPolicySpecBuilder{}
 	// acnp-allow will also apply to all pods in namespace x
@@ -1707,10 +1487,10 @@ func testACNPRulePriority(t *testing.T) {
 		SetPriority(5).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder2.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 	// This rule should take no effect as it will be overridden by the first rule of cnp-drop
 	builder2.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "y"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 
 	// Only egress from pods in namespace x to namespace y should be denied
 	reachabilityBothACNP := NewReachability(allPods, Connected)
@@ -1741,7 +1521,7 @@ func testACNPPortRange(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddEgress(v1.ProtocolTCP, &p8080, nil, &p8085, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "acnp-port-range")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "acnp-port-range", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Dropped)
@@ -1773,7 +1553,7 @@ func testACNPRejectEgress(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectEgressToNamespace(Pod("x/a"), "z", Rejected)
@@ -1804,7 +1584,7 @@ func testACNPRejectIngress(t *testing.T, protocol v1.Protocol) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}}})
 	builder.AddIngress(protocol, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
 
 	reachability := NewReachability(allPods, Connected)
 	reachability.ExpectIngressFromNamespace(Pod("x/a"), "z", Rejected)
@@ -1826,6 +1606,209 @@ func testACNPRejectIngress(t *testing.T, protocol v1.Protocol) {
 		{"ACNP Reject ingress from NS:z to All Pod:a", testStep},
 	}
 	executeTests(t, testCase)
+}
+
+func testRejectServiceTraffic(t *testing.T, data *TestData) {
+	clientName := "agnhost-client"
+	require.NoError(t, data.createAgnhostPodOnNode(clientName, testNamespace, nodeName(0), false))
+	defer data.deletePodAndWait(defaultTimeout, clientName, testNamespace)
+	_, err := data.podWaitForIPs(defaultTimeout, clientName, testNamespace)
+	require.NoError(t, err)
+
+	svc1, cleanup1 := data.createAgnhostServiceAndBackendPods(t, "s1", testNamespace, nodeName(0), v1.ServiceTypeClusterIP)
+	defer cleanup1()
+
+	svc2, cleanup2 := data.createAgnhostServiceAndBackendPods(t, "s2", testNamespace, nodeName(1), v1.ServiceTypeClusterIP)
+	defer cleanup2()
+
+	testcases := []podToAddrTestStep{
+		{
+			"antrea-test/agnhost-client",
+			svc1.Spec.ClusterIP,
+			80,
+			Rejected,
+		},
+		{
+			"antrea-test/agnhost-client",
+			svc2.Spec.ClusterIP,
+			80,
+			Rejected,
+		},
+	}
+
+	// Test egress.
+	builder1 := &ClusterNetworkPolicySpecBuilder{}
+	builder1 = builder1.SetName("acnp-reject-egress-svc-traffic").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": "agnhost-client"}}})
+	builder1.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"antrea-e2e": "s1"}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+	builder1.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"antrea-e2e": "s2"}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+
+	acnpEgress := builder1.Get()
+	k8sUtils.CreateOrUpdateACNP(acnpEgress)
+	failOnError(waitForResourceReady(acnpEgress, timeout), t)
+	time.Sleep(networkPolicyDelay)
+
+	for _, tc := range testcases {
+		log.Tracef("Probing: %s -> %s:%d", tc.clientPod.PodName(), tc.destAddr, tc.destPort)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "antrea-e2e", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+		if err != nil {
+			t.Errorf("failure -- could not complete probe: %v", err)
+		}
+		if connectivity != tc.expectedConnectivity {
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+		}
+	}
+	failOnError(k8sUtils.DeleteACNP(builder1.Name), t)
+	failOnError(waitForResourceDelete("", builder1.Name, resourceACNP, timeout), t)
+	time.Sleep(networkPolicyDelay)
+
+	// Test ingress.
+	builder2 := &ClusterNetworkPolicySpecBuilder{}
+	builder2 = builder2.SetName("acnp-reject-ingress-svc-traffic").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": "s1"}}, {PodSelector: map[string]string{"antrea-e2e": "s2"}}})
+	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"antrea-e2e": "agnhost-client"}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+
+	acnpIngress := builder2.Get()
+	k8sUtils.CreateOrUpdateACNP(acnpIngress)
+	failOnError(waitForResourceReady(acnpIngress, timeout), t)
+	time.Sleep(networkPolicyDelay)
+
+	for _, tc := range testcases {
+		log.Tracef("Probing: %s -> %s:%d", tc.clientPod.PodName(), tc.destAddr, tc.destPort)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "antrea-e2e", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+		if err != nil {
+			t.Errorf("failure -- could not complete probe: %v", err)
+		}
+		if connectivity != tc.expectedConnectivity {
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+		}
+	}
+	failOnError(k8sUtils.DeleteACNP(builder2.Name), t)
+	failOnError(waitForResourceDelete("", builder2.Name, resourceACNP, timeout), t)
+	time.Sleep(networkPolicyDelay)
+}
+
+// RejectNoInfiniteLoop tests that a reject action in both traffic directions won't cause an infinite rejection loop.
+func testRejectNoInfiniteLoop(t *testing.T, data *TestData) {
+	clientName := "agnhost-client"
+	require.NoError(t, data.createAgnhostPodOnNode(clientName, testNamespace, nodeName(0), false))
+	defer data.deletePodAndWait(defaultTimeout, clientName, testNamespace)
+	_, err := data.podWaitForIPs(defaultTimeout, clientName, testNamespace)
+	require.NoError(t, err)
+
+	_, server0IP, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server", nodeName(0), testNamespace, false)
+	defer cleanupFunc()
+
+	_, server1IP, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server", nodeName(1), testNamespace, false)
+	defer cleanupFunc()
+
+	var testcases []podToAddrTestStep
+	if clusterInfo.podV4NetworkCIDR != "" {
+		testcases = append(testcases, []podToAddrTestStep{
+			{
+				"antrea-test/agnhost-client",
+				server0IP.ipv4.String(),
+				80,
+				Rejected,
+			},
+			{
+				"antrea-test/agnhost-client",
+				server1IP.ipv4.String(),
+				80,
+				Rejected,
+			},
+		}...)
+	}
+	if clusterInfo.podV6NetworkCIDR != "" {
+		testcases = append(testcases, []podToAddrTestStep{
+			{
+				"antrea-test/agnhost-client",
+				server0IP.ipv6.String(),
+				80,
+				Rejected,
+			},
+			{
+				"antrea-test/agnhost-client",
+				server1IP.ipv6.String(),
+				80,
+				Rejected,
+			},
+		}...)
+	}
+
+	runTestsWithACNP := func(acnp *crdv1alpha1.ClusterNetworkPolicy, testcases []podToAddrTestStep) {
+		k8sUtils.CreateOrUpdateACNP(acnp)
+		failOnError(waitForResourceReady(acnp, timeout), t)
+		time.Sleep(networkPolicyDelay)
+
+		for _, tc := range testcases {
+			log.Tracef("Probing: %s -> %s:%d", tc.clientPod.PodName(), tc.destAddr, tc.destPort)
+			connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "antrea-e2e", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+			if err != nil {
+				t.Errorf("failure -- could not complete probe: %v", err)
+			}
+			if connectivity != tc.expectedConnectivity {
+				t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+					tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+			}
+		}
+		failOnError(k8sUtils.DeleteACNP(acnp.Name), t)
+		failOnError(waitForResourceDelete("", acnp.Name, resourceACNP, timeout), t)
+		time.Sleep(networkPolicyDelay)
+	}
+
+	// Test client and server reject traffic that ingress from each other.
+	builder1 := &ClusterNetworkPolicySpecBuilder{}
+	builder1 = builder1.SetName("acnp-reject-ingress-double-dir").
+		SetPriority(1.0)
+	builder1.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"app": "nginx"}, nil,
+		nil, nil, false, []ACNPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": clientName}}}, crdv1alpha1.RuleActionReject, "", "", nil)
+	builder1.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"antrea-e2e": clientName}, nil,
+		nil, nil, false, []ACNPAppliedToSpec{{PodSelector: map[string]string{"app": "nginx"}}}, crdv1alpha1.RuleActionReject, "", "", nil)
+
+	runTestsWithACNP(builder1.Get(), testcases)
+
+	// Test client and server reject traffic that egress to each other.
+	builder2 := &ClusterNetworkPolicySpecBuilder{}
+	builder2 = builder2.SetName("acnp-reject-egress-double-dir").
+		SetPriority(1.0)
+	builder2.AddEgress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"app": "nginx"}, nil,
+		nil, nil, false, []ACNPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": clientName}}}, crdv1alpha1.RuleActionReject, "", "", nil)
+	builder2.AddEgress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"antrea-e2e": clientName}, nil,
+		nil, nil, false, []ACNPAppliedToSpec{{PodSelector: map[string]string{"app": "nginx"}}}, crdv1alpha1.RuleActionReject, "", "", nil)
+
+	runTestsWithACNP(builder2.Get(), testcases)
+
+	// Test server reject traffic that egress to client and ingress from client.
+	builder3 := &ClusterNetworkPolicySpecBuilder{}
+	builder3 = builder3.SetName("acnp-reject-server-double-dir").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"app": "nginx"}}})
+	builder3.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"antrea-e2e": clientName}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+	builder3.AddEgress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"antrea-e2e": clientName}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+
+	runTestsWithACNP(builder3.Get(), testcases)
+
+	// Test client reject traffic that egress to server and ingress from server.
+	builder4 := &ClusterNetworkPolicySpecBuilder{}
+	builder4 = builder4.SetName("acnp-reject-client-double-dir").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": clientName}}})
+	builder4.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"app": "nginx"}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+	builder4.AddEgress(v1.ProtocolTCP, nil, nil, nil, nil, map[string]string{"app": "nginx"}, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionReject, "", "", nil)
+
+	runTestsWithACNP(builder4.Get(), testcases)
 }
 
 // testANPPortRange tests the port range in a ANP can work.
@@ -1980,7 +1963,7 @@ func testAuditLoggingBasic(t *testing.T, data *TestData) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	builder.AddEgress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, map[string]string{"ns": "z"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 	builder.AddEgressLogging()
 
 	acnp, err := k8sUtils.CreateOrUpdateACNP(builder.Get())
@@ -2014,7 +1997,7 @@ func testAuditLoggingBasic(t *testing.T, data *TestData) {
 	cmd := []string{"cat", logDir + logfileName}
 
 	if err := wait.Poll(1*time.Second, 10*time.Second, func() (bool, error) {
-		stdout, stderr, err := data.runCommandFromPod(antreaNamespace, antreaPodName, "antrea-agent", cmd)
+		stdout, stderr, err := data.RunCommandFromPod(antreaNamespace, antreaPodName, "antrea-agent", cmd)
 		if err != nil || stderr != "" {
 			// file may not exist yet
 			t.Logf("Error when printing the audit log file, err: %v, stderr: %v", err, stderr)
@@ -2039,7 +2022,7 @@ func testAuditLoggingBasic(t *testing.T, data *TestData) {
 					}
 					expectedNumEntries += 1
 					// The audit log should contain log entry `... Drop <ofPriority> <x/a IP> <z/* IP> ...`
-					re := regexp.MustCompile(`Drop [0-9]+ ` + srcIPs[i] + ` ` + dstIPs[j])
+					re := regexp.MustCompile(`Drop [0-9]+ ` + srcIPs[i] + ` [0-9]+ ` + dstIPs[j] + ` ` + strconv.Itoa(int(p80)))
 					if re.MatchString(stdout) {
 						actualNumEntries += 1
 					} else {
@@ -2093,9 +2076,9 @@ func testAppliedToPerRule(t *testing.T) {
 		PodSelector: map[string]string{"pod": "b"}, NSSelector: map[string]string{"ns": "y"},
 		PodSelectorMatchExp: nil, NSSelectorMatchExp: nil}
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, []ACNPAppliedToSpec{cnpATGrp1}, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, []ACNPAppliedToSpec{cnpATGrp1}, crdv1alpha1.RuleActionDrop, "", "", nil)
 	builder2.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "z"},
-		nil, nil, false, []ACNPAppliedToSpec{cnpATGrp2}, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, []ACNPAppliedToSpec{cnpATGrp2}, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability2 := NewReachability(allPods, Connected)
 	reachability2.Expect(Pod("x/b"), Pod("x/a"), Dropped)
@@ -2134,7 +2117,7 @@ func testACNPClusterGroupServiceRefCreateAndUpdate(t *testing.T, data *TestData)
 	builder := &ClusterNetworkPolicySpecBuilder{}
 	builder = builder.SetName("cnp-cg-svc-ref").SetPriority(1.0).SetAppliedToGroup([]ACNPAppliedToSpec{{Group: cg1Name}})
 	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil, nil, nil,
-		false, nil, crdv1alpha1.RuleActionDrop, cg2Name, "")
+		false, nil, crdv1alpha1.RuleActionDrop, cg2Name, "", nil)
 
 	// Pods backing svc1 (label pod=a) in Namespace x should not allow ingress from Pods backing svc2 (label pod=b) in Namespace y.
 	reachability := NewReachability(allPods, Connected)
@@ -2185,7 +2168,7 @@ func testACNPClusterGroupServiceRefCreateAndUpdate(t *testing.T, data *TestData)
 	builderUpdated = builderUpdated.SetName("cnp-cg-svc-ref").SetPriority(1.0)
 	builderUpdated.SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"pod": "a"}, NSSelector: map[string]string{"ns": "x"}}})
 	builderUpdated.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "y"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	// Pod x/a should not allow ingress from y/b per the updated ACNP spec.
 	testStep3 := &TestStep{
@@ -2226,7 +2209,7 @@ func testACNPNestedClusterGroupCreateAndUpdate(t *testing.T, data *TestData) {
 	builder = builder.SetName("cnp-nested-cg").SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "z"}}}).
 		AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil, nil, nil,
-			false, nil, crdv1alpha1.RuleActionDrop, cgNestedName, "")
+			false, nil, crdv1alpha1.RuleActionDrop, cgNestedName, "", nil)
 
 	// Pods in Namespace z should not allow traffic from Pods backing svc1 (label pod=a) in Namespace x.
 	// Note that in this testStep cg3 will not be created yet, so even though cg-nested selects cg1 and
@@ -2299,17 +2282,91 @@ func testACNPNestedClusterGroupCreateAndUpdate(t *testing.T, data *TestData) {
 	executeTestsWithData(t, testCase, data)
 }
 
-func testACNPNamespaceIsolation(t *testing.T, data *TestData) {
+func testACNPNestedIPBlockClusterGroupCreateAndUpdate(t *testing.T) {
+	podXAIP, _ := podIPs["x/a"]
+	podXBIP, _ := podIPs["x/b"]
+	genCIDR := func(ip string) string {
+		if strings.Contains(ip, ".") {
+			return ip + "/32"
+		}
+		return ip + "/128"
+	}
+	cg1Name, cg2Name, cg3Name := "cg-x-a-ipb", "cg-x-b-ipb", "cg-select-x-c"
+	cgParentName := "cg-parent"
+	var ipBlockXA, ipBlockXB []crdv1alpha1.IPBlock
+	for i := 0; i < len(podXAIP); i++ {
+		ipBlockXA = append(ipBlockXA, crdv1alpha1.IPBlock{CIDR: genCIDR(podXAIP[i])})
+		ipBlockXB = append(ipBlockXB, crdv1alpha1.IPBlock{CIDR: genCIDR(podXBIP[i])})
+	}
+	cgBuilder1 := &ClusterGroupV1Alpha3SpecBuilder{}
+	cgBuilder1 = cgBuilder1.SetName(cg1Name).SetIPBlocks(ipBlockXA)
+	cgBuilder2 := &ClusterGroupV1Alpha3SpecBuilder{}
+	cgBuilder2 = cgBuilder2.SetName(cg2Name).SetIPBlocks(ipBlockXB)
+	cgParent := &ClusterGroupV1Alpha3SpecBuilder{}
+	cgParent = cgParent.SetName(cgParentName).SetChildGroups([]string{cg1Name, cg2Name})
+
+	builder := &ClusterNetworkPolicySpecBuilder{}
+	builder = builder.SetName("acnp-deny-x-ips-ingress-for-ya").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{
+			{
+				PodSelector: map[string]string{"pod": "a"},
+				NSSelector:  map[string]string{"ns": "y"},
+			},
+		})
+	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, cgParentName, "", nil)
+
+	reachability := NewReachability(allPods, Connected)
+	reachability.Expect("x/a", "y/a", Dropped)
+	reachability.Expect("x/b", "y/a", Dropped)
+	testStep := &TestStep{
+		"Port 80",
+		reachability,
+		[]metav1.Object{builder.Get(), cgBuilder1.Get(), cgBuilder2.Get(), cgParent.Get()},
+		[]int32{80},
+		v1.ProtocolTCP,
+		0,
+		nil,
+	}
+
+	cgBuilder3 := &ClusterGroupV1Alpha3SpecBuilder{}
+	cgBuilder3 = cgBuilder3.SetName(cg3Name).
+		SetNamespaceSelector(map[string]string{"ns": "x"}, nil).
+		SetPodSelector(map[string]string{"pod": "c"}, nil)
+	updatedCGParent := &ClusterGroupV1Alpha3SpecBuilder{}
+	updatedCGParent = updatedCGParent.SetName(cgParentName).SetChildGroups([]string{cg1Name, cg3Name})
+
+	reachability2 := NewReachability(allPods, Connected)
+	reachability2.Expect("x/a", "y/a", Dropped)
+	reachability2.Expect("x/c", "y/a", Dropped)
+	testStep2 := &TestStep{
+		"Port 80, updated",
+		reachability2,
+		[]metav1.Object{cgBuilder3.Get(), updatedCGParent.Get()},
+		[]int32{80},
+		v1.ProtocolTCP,
+		0,
+		nil,
+	}
+
+	testCase := []*TestCase{
+		{"ACNP Drop Ingress From x to Pod y/a with nested ClusterGroup with ipBlocks", []*TestStep{testStep, testStep2}},
+	}
+	executeTests(t, testCase)
+}
+
+func testACNPNamespaceIsolation(t *testing.T) {
 	builder := &ClusterNetworkPolicySpecBuilder{}
 	builder = builder.SetName("test-acnp-ns-isolation").
 		SetTier("baseline").
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{}}})
-	// deny ingress traffic except from own namespace
+	// deny ingress traffic except from own namespace, which is always allowed.
 	builder.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, nil, nil, nil, nil,
-		true, nil, crdv1alpha1.RuleActionAllow, "", "")
+		true, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 	builder.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, nil, map[string]string{}, nil, nil,
-		false, nil, crdv1alpha1.RuleActionDrop, "", "")
+		false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability := NewReachability(allPods, Dropped)
 	reachability.ExpectAllSelfNamespace(Connected)
@@ -2327,11 +2384,10 @@ func testACNPNamespaceIsolation(t *testing.T, data *TestData) {
 	builder2 = builder2.SetName("test-acnp-ns-isolation-applied-to-per-rule").
 		SetTier("baseline").
 		SetPriority(1.0)
-	//SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}})
 	builder2.AddEgress(v1.ProtocolTCP, nil, nil, nil, nil, nil, nil, nil, nil,
-		true, []ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}}, crdv1alpha1.RuleActionAllow, "", "")
+		true, []ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}}, crdv1alpha1.RuleActionAllow, "", "", nil)
 	builder2.AddEgress(v1.ProtocolTCP, nil, nil, nil, nil, nil, map[string]string{}, nil, nil,
-		false, []ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}}, crdv1alpha1.RuleActionDrop, "", "")
+		false, []ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}}, crdv1alpha1.RuleActionDrop, "", "", nil)
 
 	reachability2 := NewReachability(allPods, Connected)
 	reachability2.ExpectEgressToNamespace(Pod("x/a"), "y", Dropped)
@@ -2354,12 +2410,64 @@ func testACNPNamespaceIsolation(t *testing.T, data *TestData) {
 		{"ACNP Namespace isolation for all namespaces", []*TestStep{testStep1}},
 		{"ACNP Namespace isolation for namespace x", []*TestStep{testStep2}},
 	}
-	executeTestsWithData(t, testCase, data)
+	executeTests(t, testCase)
+}
+
+func testACNPStrictNamespacesIsolation(t *testing.T) {
+	builder := &ClusterNetworkPolicySpecBuilder{}
+	builder = builder.SetName("test-acnp-strict-ns-isolation").
+		SetTier("securityops").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{{NSSelector: map[string]string{}}})
+	builder.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, nil, nil, nil, nil,
+		true, nil, crdv1alpha1.RuleActionPass, "", "", nil)
+	builder.AddIngress(v1.ProtocolTCP, nil, nil, nil, nil, nil, map[string]string{}, nil, nil,
+		false, nil, crdv1alpha1.RuleActionDrop, "", "", nil)
+	// deny ingress traffic except from own namespace, which is delegated to Namespace owners (who can create K8s
+	// NetworkPolicies to regulate intra-Namespace traffic)
+	reachability := NewReachability(allPods, Dropped)
+	reachability.ExpectAllSelfNamespace(Connected)
+	testStep1 := &TestStep{
+		"Namespace isolation, Port 80",
+		reachability,
+		[]metav1.Object{builder.Get()},
+		[]int32{80},
+		v1.ProtocolTCP,
+		0,
+		nil,
+	}
+
+	// Add a K8s namespaced NetworkPolicy in ns x that isolates all Pods in that namespace.
+	builder2 := &NetworkPolicySpecBuilder{}
+	builder2 = builder2.SetName("x", "default-deny-in-namespace-x")
+	builder2.SetTypeIngress()
+	reachability2 := NewReachability(allPods, Dropped)
+	reachability2.ExpectAllSelfNamespace(Connected)
+	reachability2.ExpectSelfNamespace("x", Dropped)
+	reachability2.ExpectSelf(allPods, Connected)
+	testStep2 := &TestStep{
+		"Namespace isolation with K8s NP, Port 80",
+		reachability2,
+		[]metav1.Object{builder2.Get()},
+		[]int32{80},
+		v1.ProtocolTCP,
+		0,
+		nil,
+	}
+
+	testCase := []*TestCase{
+		{"ACNP strict Namespace isolation for all namespaces", []*TestStep{testStep1, testStep2}},
+	}
+	executeTests(t, testCase)
 }
 
 func testFQDNPolicy(t *testing.T) {
 	// The ipv6-only test env doesn't have IPv6 access to the web.
 	skipIfNotIPv4Cluster(t)
+	// It is convenient to have higher log verbosity for FQDNtests for troubleshooting failures.
+	logLevel := log.GetLevel()
+	log.SetLevel(log.TraceLevel)
+	defer log.SetLevel(logLevel)
 	builder := &ClusterNetworkPolicySpecBuilder{}
 	builder = builder.SetName("test-acnp-drop-all-google").
 		SetTier("application").
@@ -2368,25 +2476,29 @@ func testFQDNPolicy(t *testing.T) {
 	builder.AddFQDNRule("*google.com", v1.ProtocolTCP, nil, nil, nil, "r1", nil, crdv1alpha1.RuleActionReject)
 	builder.AddFQDNRule("wayfair.com", v1.ProtocolTCP, nil, nil, nil, "r2", nil, crdv1alpha1.RuleActionDrop)
 
-	testcases := []fqdnTestStep{
+	testcases := []podToAddrTestStep{
 		{
 			"x/a",
 			"drive.google.com",
+			80,
 			Rejected,
 		},
 		{
 			"x/b",
 			"maps.google.com",
+			80,
 			Rejected,
 		},
 		{
 			"y/a",
 			"wayfair.com",
+			80,
 			Dropped,
 		},
 		{
 			"y/b",
 			"facebook.com",
+			80,
 			Connected,
 		},
 	}
@@ -2394,14 +2506,14 @@ func testFQDNPolicy(t *testing.T) {
 	failOnError(err, t)
 	time.Sleep(networkPolicyDelay)
 	for _, tc := range testcases {
-		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.fqdnToQuery)
-		connectivity, err := k8sUtils.ProbeEgress(tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.fqdnToQuery, 80, v1.ProtocolTCP)
+		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.destAddr)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "pod", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
 		if err != nil {
 			t.Errorf("failure -- could not complete probe: %v", err)
 		}
 		if connectivity != tc.expectedConnectivity {
-			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s connectivity: %v, expected: %v",
-				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.fqdnToQuery, connectivity, tc.expectedConnectivity)
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
 		}
 	}
 	// cleanup test resources
@@ -2420,6 +2532,9 @@ func testFQDNPolicy(t *testing.T) {
 // For a headless Service, the Endpoints IP will be directly returned by the DNS
 // server. In this case, FQDN based policies can be enforced successfully.
 func testFQDNPolicyInClusterService(t *testing.T) {
+	logLevel := log.GetLevel()
+	log.SetLevel(log.TraceLevel)
+	defer log.SetLevel(logLevel)
 	var services []*v1.Service
 	if clusterInfo.podV4NetworkCIDR != "" {
 		ipv4Svc := k8sUtils.BuildService("ipv4-svc", "x", 80, 80, map[string]string{"pod": "a"}, nil)
@@ -2455,22 +2570,25 @@ func testFQDNPolicyInClusterService(t *testing.T) {
 	k8sUtils.CreateOrUpdateACNP(acnp)
 	failOnError(waitForResourceReady(acnp, timeout), t)
 
-	var testcases []fqdnTestStep
+	var testcases []podToAddrTestStep
 	for _, service := range services {
-		eachServiceCases := []fqdnTestStep{
+		eachServiceCases := []podToAddrTestStep{
 			{
 				"y/b",
 				svcDNSName(service),
+				80,
 				Rejected,
 			},
 			{
 				"z/c",
 				svcDNSName(service),
+				80,
 				Dropped,
 			},
 			{
 				"x/c",
 				svcDNSName(service),
+				80,
 				Connected,
 			},
 		}
@@ -2478,14 +2596,14 @@ func testFQDNPolicyInClusterService(t *testing.T) {
 	}
 
 	for _, tc := range testcases {
-		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.fqdnToQuery)
-		connectivity, err := k8sUtils.ProbeEgress(tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.fqdnToQuery, 80, v1.ProtocolTCP)
+		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.destAddr)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "pod", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
 		if err != nil {
 			t.Errorf("failure -- could not complete probe: %v", err)
 		}
 		if connectivity != tc.expectedConnectivity {
-			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s connectivity: %v, expected: %v",
-				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.fqdnToQuery, connectivity, tc.expectedConnectivity)
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
 		}
 	}
 	// cleanup test resources
@@ -2493,6 +2611,311 @@ func testFQDNPolicyInClusterService(t *testing.T) {
 		failOnError(k8sUtils.DeleteService(service.Namespace, service.Name), t)
 		failOnError(waitForResourceDelete(service.Namespace, service.Name, resourceSVC, timeout), t)
 	}
+	failOnError(k8sUtils.DeleteACNP(builder.Name), t)
+	failOnError(waitForResourceDelete("", builder.Name, resourceACNP, timeout), t)
+	time.Sleep(networkPolicyDelay)
+}
+
+func testToServices(t *testing.T) {
+	skipIfProxyDisabled(t)
+	var services []*v1.Service
+	if clusterInfo.podV4NetworkCIDR != "" {
+		ipv4Svc := k8sUtils.BuildService("ipv4-svc", "x", 81, 81, map[string]string{"pod": "a"}, nil)
+		ipv4Svc.Spec.IPFamilies = []v1.IPFamily{v1.IPv4Protocol}
+		services = append(services, ipv4Svc)
+	}
+	if clusterInfo.podV6NetworkCIDR != "" {
+		ipv6Svc := k8sUtils.BuildService("ipv6-svc", "x", 80, 80, map[string]string{"pod": "b"}, nil)
+		ipv6Svc.Spec.IPFamilies = []v1.IPFamily{v1.IPv6Protocol}
+		services = append(services, ipv6Svc)
+	}
+
+	var svcRefs []crdv1alpha1.NamespacedName
+	var builtSvcs []*v1.Service
+	for _, service := range services {
+		builtSvc, _ := k8sUtils.CreateOrUpdateService(service)
+		failOnError(waitForResourceReady(service, timeout), t)
+		svcRefs = append(svcRefs, crdv1alpha1.NamespacedName{
+			Name:      service.Name,
+			Namespace: service.Namespace,
+		})
+		builtSvcs = append(builtSvcs, builtSvc)
+	}
+
+	builder := &ClusterNetworkPolicySpecBuilder{}
+	builder = builder.SetName("test-acnp-to-services").
+		SetTier("application").
+		SetPriority(1.0)
+	builder.AddToServicesRule(svcRefs, "svc", []ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "y"}}}, crdv1alpha1.RuleActionDrop)
+	time.Sleep(networkPolicyDelay)
+
+	acnp := builder.Get()
+	k8sUtils.CreateOrUpdateACNP(acnp)
+	failOnError(waitForResourceReady(acnp, timeout), t)
+
+	var testcases []podToAddrTestStep
+	for _, service := range builtSvcs {
+		eachServiceCases := []podToAddrTestStep{
+			{
+				"y/b",
+				service.Spec.ClusterIP,
+				service.Spec.Ports[0].Port,
+				Dropped,
+			},
+			{
+				"z/c",
+				service.Spec.ClusterIP,
+				service.Spec.Ports[0].Port,
+				Connected,
+			},
+		}
+		testcases = append(testcases, eachServiceCases...)
+	}
+
+	for _, tc := range testcases {
+		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.destAddr)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "pod", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+		if err != nil {
+			t.Errorf("failure -- could not complete probe: %v", err)
+		}
+		if connectivity != tc.expectedConnectivity {
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+		}
+	}
+	// cleanup test resources
+	failOnError(k8sUtils.DeleteACNP(builder.Name), t)
+	failOnError(waitForResourceDelete("", builder.Name, resourceACNP, timeout), t)
+	time.Sleep(networkPolicyDelay)
+	for _, service := range services {
+		failOnError(k8sUtils.DeleteService(service.Namespace, service.Name), t)
+		failOnError(waitForResourceDelete(service.Namespace, service.Name, resourceSVC, timeout), t)
+	}
+}
+
+func testServiceAccountSelector(t *testing.T, data *TestData) {
+	k8sUtils.CreateOrUpdateServiceAccount(k8sUtils.BuildServiceAccount("test-sa", "x", nil))
+	defer k8sUtils.DeleteServiceAccount("x", "test-sa")
+
+	serverName, serverIP, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server", controlPlaneNodeName(), testNamespace, false)
+	defer cleanupFunc()
+
+	client0Name, _, cleanupFunc := createAndWaitForPodWithServiceAccount(t, data, data.createAgnhostPodWithSAOnNode, "client", controlPlaneNodeName(), "x", false, "test-sa")
+	defer cleanupFunc()
+
+	client1Name, _, cleanupFunc := createAndWaitForPodWithServiceAccount(t, data, data.createAgnhostPodWithSAOnNode, "client", controlPlaneNodeName(), "x", false, "default")
+	defer cleanupFunc()
+
+	sa := &crdv1alpha1.NamespacedName{
+		Name:      "test-sa",
+		Namespace: "x",
+	}
+
+	builder := &ClusterNetworkPolicySpecBuilder{}
+	builder = builder.SetName("acnp-service-account").
+		SetPriority(1.0).
+		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": serverName}}})
+	builder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, nil, nil,
+		nil, nil, false, nil, crdv1alpha1.RuleActionDrop, "", "", sa)
+
+	acnp := builder.Get()
+	_, err := k8sUtils.CreateOrUpdateACNP(acnp)
+	if err != nil {
+		log.Infof("err %s", err.Error())
+	}
+	failOnError(waitForResourceReady(acnp, timeout), t)
+	time.Sleep(networkPolicyDelay)
+
+	var testcases []podToAddrTestStep
+	if clusterInfo.podV4NetworkCIDR != "" {
+		ipv4Testcases := []podToAddrTestStep{
+			{
+				Pod("x/" + client0Name),
+				serverIP.ipv4.String(),
+				80,
+				Dropped,
+			},
+			{
+				Pod("x/" + client1Name),
+				serverIP.ipv4.String(),
+				80,
+				Connected,
+			},
+		}
+		testcases = append(testcases, ipv4Testcases...)
+	}
+
+	if clusterInfo.podV6NetworkCIDR != "" {
+		ipv6Testcases := []podToAddrTestStep{
+			{
+				Pod("x/" + client0Name),
+				serverIP.ipv6.String(),
+				80,
+				Dropped,
+			},
+			{
+				Pod("x/" + client1Name),
+				serverIP.ipv6.String(),
+				80,
+				Connected,
+			},
+		}
+		testcases = append(testcases, ipv6Testcases...)
+	}
+
+	for _, tc := range testcases {
+		log.Tracef("Probing: %s -> %s:%d", tc.clientPod.PodName(), tc.destAddr, tc.destPort)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "antrea-e2e", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+		if err != nil {
+			t.Errorf("failure -- could not complete probe: %v", err)
+		}
+		if connectivity != tc.expectedConnectivity {
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+		}
+	}
+	failOnError(k8sUtils.DeleteACNP(builder.Name), t)
+	failOnError(waitForResourceDelete("", builder.Name, resourceACNP, timeout), t)
+	time.Sleep(networkPolicyDelay)
+}
+
+func testACNPNodeSelectorEgress(t *testing.T) {
+	builder := &ClusterNetworkPolicySpecBuilder{}
+	builder = builder.SetName("test-acnp-drop-egress-control-plane").
+		SetPriority(1.0)
+	nodeSelector := metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/hostname": controlPlaneNodeName()}}
+	builder.AddNodeSelectorRule(&nodeSelector, v1.ProtocolTCP, &p6443, "egress-control-plane-drop",
+		[]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}, PodSelector: map[string]string{"pod": "a"}}},
+		crdv1alpha1.RuleActionDrop, true)
+
+	var testcases []podToAddrTestStep
+	if clusterInfo.podV4NetworkCIDR != "" {
+		ipv4Testcases := []podToAddrTestStep{
+			{
+				"x/a",
+				controlPlaneNodeIPv4(),
+				6443,
+				Dropped,
+			},
+			{
+				"x/b",
+				controlPlaneNodeIPv4(),
+				6443,
+				Connected,
+			},
+		}
+		testcases = append(testcases, ipv4Testcases...)
+	}
+
+	if clusterInfo.podV6NetworkCIDR != "" {
+		ipv6Testcases := []podToAddrTestStep{
+			{
+				"x/a",
+				controlPlaneNodeIPv6(),
+				6443,
+				Dropped,
+			},
+			{
+				"x/b",
+				controlPlaneNodeIPv6(),
+				6443,
+				Connected,
+			},
+		}
+		testcases = append(testcases, ipv6Testcases...)
+	}
+	_, err := k8sUtils.CreateOrUpdateACNP(builder.Get())
+	failOnError(err, t)
+	time.Sleep(networkPolicyDelay)
+	for _, tc := range testcases {
+		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.destAddr)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "pod", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+		if err != nil {
+			t.Errorf("failure -- could not complete probe: %v", err)
+		}
+		if connectivity != tc.expectedConnectivity {
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+		}
+	}
+	// cleanup test resources
+	failOnError(k8sUtils.DeleteACNP(builder.Name), t)
+	failOnError(waitForResourceDelete("", builder.Name, resourceACNP, timeout), t)
+	time.Sleep(networkPolicyDelay)
+}
+
+func testACNPNodeSelectorIngress(t *testing.T, data *TestData) {
+	_, serverIP0, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server0", nodeName(1), "x", false)
+	defer cleanupFunc()
+
+	_, serverIP1, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server1", nodeName(1), "y", false)
+	defer cleanupFunc()
+
+	clientName := "agnhost-client"
+	require.NoError(t, data.createAgnhostPodOnNode(clientName, "z", controlPlaneNodeName(), true))
+	defer data.deletePodAndWait(defaultTimeout, clientName, "z")
+	_, err := data.podWaitForIPs(defaultTimeout, clientName, "z")
+	require.NoError(t, err)
+
+	builder := &ClusterNetworkPolicySpecBuilder{}
+	builder = builder.SetName("test-acnp-drop-ingress-from-control-plane").
+		SetPriority(1.0)
+	nodeSelector := metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/hostname": controlPlaneNodeName()}}
+	builder.AddNodeSelectorRule(&nodeSelector, v1.ProtocolTCP, &p80, "ingress-control-plane-drop",
+		[]ACNPAppliedToSpec{{NSSelector: map[string]string{"ns": "x"}}},
+		crdv1alpha1.RuleActionDrop, false)
+
+	testcases := []podToAddrTestStep{}
+	if clusterInfo.podV4NetworkCIDR != "" {
+		ipv4TestCases := []podToAddrTestStep{
+			{
+				Pod("z/" + clientName),
+				serverIP0.ipv4.String(),
+				80,
+				Dropped,
+			},
+			{
+				Pod("z/" + clientName),
+				serverIP1.ipv4.String(),
+				80,
+				Connected,
+			},
+		}
+		testcases = append(testcases, ipv4TestCases...)
+	}
+	if clusterInfo.podV6NetworkCIDR != "" {
+		ipv6TestCases := []podToAddrTestStep{
+			{
+				Pod("z/" + clientName),
+				serverIP0.ipv6.String(),
+				80,
+				Dropped,
+			},
+			{
+				Pod("z/" + clientName),
+				serverIP1.ipv6.String(),
+				80,
+				Connected,
+			},
+		}
+		testcases = append(testcases, ipv6TestCases...)
+	}
+
+	_, err = k8sUtils.CreateOrUpdateACNP(builder.Get())
+	failOnError(err, t)
+	time.Sleep(networkPolicyDelay)
+	for _, tc := range testcases {
+		log.Tracef("Probing: %s -> %s", tc.clientPod.PodName(), tc.destAddr)
+		connectivity, err := k8sUtils.ProbeAddr(tc.clientPod.Namespace(), "antrea-e2e", tc.clientPod.PodName(), tc.destAddr, tc.destPort, v1.ProtocolTCP)
+		if err != nil {
+			t.Errorf("failure -- could not complete probe: %v", err)
+		}
+		if connectivity != tc.expectedConnectivity {
+			t.Errorf("failure -- wrong results for probe: Source %s/%s --> Dest %s:%d connectivity: %v, expected: %v",
+				tc.clientPod.Namespace(), tc.clientPod.PodName(), tc.destAddr, tc.destPort, connectivity, tc.expectedConnectivity)
+		}
+	}
+	// cleanup test resources
 	failOnError(k8sUtils.DeleteACNP(builder.Name), t)
 	failOnError(waitForResourceDelete("", builder.Name, resourceACNP, timeout), t)
 	time.Sleep(networkPolicyDelay)
@@ -2683,14 +3106,6 @@ func waitForResourceReady(obj metav1.Object, timeout time.Duration) error {
 	defer timeCost()("ready")
 	if err = wait.Poll(100*time.Millisecond, timeout, func() (bool, error) {
 		switch p := obj.(type) {
-		case *legacysecv1alpha1.ClusterNetworkPolicy:
-			_, err = k8sUtils.GetACNP(p.Name)
-		case *legacysecv1alpha1.NetworkPolicy:
-			_, err = k8sUtils.GetANP(p.Namespace, p.Name)
-		case *legacysecv1alpha1.Tier:
-			_, err = k8sUtils.GetTier(p.Name)
-		case *legacycorev1a2.ClusterGroup:
-			_, err = k8sUtils.GetV1Alpha2CG(p.Name)
 		case *crdv1alpha1.ClusterNetworkPolicy:
 			_, err = k8sUtils.GetACNP(p.Name)
 		case *crdv1alpha1.NetworkPolicy:
@@ -2760,16 +3175,6 @@ func TestAntreaPolicy(t *testing.T) {
 
 	t.Run("TestGroupValidateAntreaNativePolicies", func(t *testing.T) {
 		t.Run("Case=ACNPNoPriority", func(t *testing.T) { testInvalidACNPNoPriority(t) })
-		t.Run("Case=ACNPRuleNameNotUniqueDenied", func(t *testing.T) { testInvalidACNPRuleNameNotUnique(t) })
-		t.Run("Case=ACNPTierDoesNotExistDenied", func(t *testing.T) { testInvalidACNPTierDoesNotExist(t) })
-		t.Run("Case=ACNPPortRangePortUnsetDenied", func(t *testing.T) { testInvalidACNPPortRangePortUnset(t) })
-		t.Run("Case=ACNPPortRangePortEndPortSmallDenied", func(t *testing.T) { testInvalidACNPPortRangeEndPortSmall(t) })
-		t.Run("Case=ACNPIngressPeerCGSetWithIPBlock", func(t *testing.T) { testInvalidACNPIngressPeerCGSetWithIPBlock(t) })
-		t.Run("Case=ACNPIngressPeerCGSetWithPodSelector", func(t *testing.T) { testInvalidACNPIngressPeerCGSetWithPodSelector(t) })
-		t.Run("Case=ACNPIngressPeerCGSetWithNSSelector", func(t *testing.T) { testInvalidACNPIngressPeerCGSetWithNSSelector(t) })
-		t.Run("Case=ACNPIngressPeerNamespaceSetWithNSSelector", func(t *testing.T) { testInvalidACNPIngressPeerNamespacesSetWithNSSelector(t) })
-		t.Run("Case=ACNPSpecAppliedToRuleAppliedToSet", func(t *testing.T) { testInvalidACNPSpecAppliedToRuleAppliedToSet(t) })
-		t.Run("Case=ACNPAppliedToNotSetInAllRules", func(t *testing.T) { testInvalidACNPAppliedToNotSetInAllRules(t) })
 		t.Run("Case=ANPNoPriority", func(t *testing.T) { testInvalidANPNoPriority(t) })
 		t.Run("Case=ANPRuleNameNotUniqueDenied", func(t *testing.T) { testInvalidANPRuleNameNotUnique(t) })
 		t.Run("Case=ANPTierDoesNotExistDenied", func(t *testing.T) { testInvalidANPTierDoesNotExist(t) })
@@ -2816,6 +3221,8 @@ func TestAntreaPolicy(t *testing.T) {
 		t.Run("Case=ACNPRejectEgress", func(t *testing.T) { testACNPRejectEgress(t) })
 		t.Run("Case=ACNPRejectIngress", func(t *testing.T) { testACNPRejectIngress(t, v1.ProtocolTCP) })
 		t.Run("Case=ACNPRejectIngressUDP", func(t *testing.T) { testACNPRejectIngress(t, v1.ProtocolUDP) })
+		t.Run("Case=RejectServiceTraffic", func(t *testing.T) { testRejectServiceTraffic(t, data) })
+		t.Run("Case=RejectNoInfiniteLoop", func(t *testing.T) { testRejectNoInfiniteLoop(t, data) })
 		t.Run("Case=ACNPNoEffectOnOtherProtocols", func(t *testing.T) { testACNPNoEffectOnOtherProtocols(t) })
 		t.Run("Case=ACNPBaselinePolicy", func(t *testing.T) { testBaselineNamespaceIsolation(t) })
 		t.Run("Case=ACNPPriorityOverride", func(t *testing.T) { testACNPPriorityOverride(t) })
@@ -2828,7 +3235,8 @@ func TestAntreaPolicy(t *testing.T) {
 		t.Run("Case=testANPMultipleAppliedToSingleRule", func(t *testing.T) { testANPMultipleAppliedTo(t, data, true) })
 		t.Run("Case=testANPMultipleAppliedToMultipleRules", func(t *testing.T) { testANPMultipleAppliedTo(t, data, false) })
 		t.Run("Case=AppliedToPerRule", func(t *testing.T) { testAppliedToPerRule(t) })
-		t.Run("Case=ACNPNamespaceIsolation", func(t *testing.T) { testACNPNamespaceIsolation(t, data) })
+		t.Run("Case=ACNPNamespaceIsolation", func(t *testing.T) { testACNPNamespaceIsolation(t) })
+		t.Run("Case=ACNPStrictNamespaceIsolation", func(t *testing.T) { testACNPStrictNamespacesIsolation(t) })
 		t.Run("Case=ACNPClusterGroupEgressRulePodsAToCGWithNsZ", func(t *testing.T) { testACNPEgressRulePodsAToCGWithNsZ(t) })
 		t.Run("Case=ACNPClusterGroupUpdate", func(t *testing.T) { testACNPClusterGroupUpdate(t) })
 		t.Run("Case=ACNPClusterGroupAppliedToDenyXBToCGWithYA", func(t *testing.T) { testACNPAppliedToDenyXBtoCGWithYA(t) })
@@ -2840,8 +3248,13 @@ func TestAntreaPolicy(t *testing.T) {
 		t.Run("Case=ACNPClusterGroupIngressRuleDenyCGWithXBtoYA", func(t *testing.T) { testACNPIngressRuleDenyCGWithXBtoYA(t) })
 		t.Run("Case=ACNPClusterGroupServiceRef", func(t *testing.T) { testACNPClusterGroupServiceRefCreateAndUpdate(t, data) })
 		t.Run("Case=ACNPNestedClusterGroup", func(t *testing.T) { testACNPNestedClusterGroupCreateAndUpdate(t, data) })
+		t.Run("Case=ACNPNestedIPBlockClusterGroup", func(t *testing.T) { testACNPNestedIPBlockClusterGroupCreateAndUpdate(t) })
 		t.Run("Case=ACNPFQDNPolicy", func(t *testing.T) { testFQDNPolicy(t) })
 		t.Run("Case=FQDNPolicyInCluster", func(t *testing.T) { testFQDNPolicyInClusterService(t) })
+		t.Run("Case=ACNPToServices", func(t *testing.T) { testToServices(t) })
+		t.Run("Case=ACNPServiceAccountSelector", func(t *testing.T) { testServiceAccountSelector(t, data) })
+		t.Run("Case=ACNPNodeSelectorEgress", func(t *testing.T) { testACNPNodeSelectorEgress(t) })
+		t.Run("Case=ACNPNodeSelectorIngress", func(t *testing.T) { testACNPNodeSelectorIngress(t, data) })
 	})
 	// print results for reachability tests
 	printResults()
@@ -2862,9 +3275,9 @@ func TestAntreaPolicyStatus(t *testing.T) {
 	}
 	defer teardownTest(t, data)
 
-	_, _, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-0", controlPlaneNodeName(), testNamespace)
+	_, _, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-0", controlPlaneNodeName(), testNamespace, false)
 	defer cleanupFunc()
-	_, _, cleanupFunc = createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-1", workerNodeName(1), testNamespace)
+	_, _, cleanupFunc = createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-1", workerNodeName(1), testNamespace, false)
 	defer cleanupFunc()
 
 	anpBuilder := &AntreaNetworkPolicySpecBuilder{}
@@ -2884,7 +3297,7 @@ func TestAntreaPolicyStatus(t *testing.T) {
 		SetPriority(1.0).
 		SetAppliedToGroup([]ACNPAppliedToSpec{{PodSelector: map[string]string{"app": "nginx"}}})
 	acnpBuilder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
-		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "")
+		nil, nil, false, nil, crdv1alpha1.RuleActionAllow, "", "", nil)
 	acnp := acnpBuilder.Get()
 	log.Debugf("creating ACNP %v", acnp.Name)
 	_, err = data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Create(context.TODO(), acnp, metav1.CreateOptions{})
@@ -2897,22 +3310,81 @@ func TestAntreaPolicyStatus(t *testing.T) {
 		CurrentNodesRealized: 2,
 		DesiredNodesRealized: 2,
 	}
-	err = wait.Poll(100*time.Millisecond, policyRealizedTimeout, func() (bool, error) {
-		anp, err := data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Get(context.TODO(), anp.Name, metav1.GetOptions{})
+	checkANPStatus(t, data, anp, expectedStatus)
+	checkACNPStatus(t, data, acnp, expectedStatus)
+}
+
+func TestAntreaPolicyStatusWithAppliedToPerRule(t *testing.T) {
+	skipIfHasWindowsNodes(t)
+	skipIfAntreaPolicyDisabled(t)
+
+	data, err := setupTest(t)
+	if err != nil {
+		t.Fatalf("Error when setting up test: %v", err)
+	}
+	defer teardownTest(t, data)
+
+	server0Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-0", controlPlaneNodeName(), testNamespace, false)
+	defer cleanupFunc()
+	server1Name, _, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "server-1", workerNodeName(1), testNamespace, false)
+	defer cleanupFunc()
+
+	anpBuilder := &AntreaNetworkPolicySpecBuilder{}
+	anpBuilder = anpBuilder.SetName(testNamespace, "anp-applied-to-per-rule").
+		SetPriority(1.0)
+	anpBuilder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
+		nil, nil, []ANPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": server0Name}}}, crdv1alpha1.RuleActionAllow, "")
+	anpBuilder.AddIngress(v1.ProtocolTCP, &p80, nil, nil, nil, map[string]string{"pod": "b"}, map[string]string{"ns": "x"},
+		nil, nil, []ANPAppliedToSpec{{PodSelector: map[string]string{"antrea-e2e": server1Name}}}, crdv1alpha1.RuleActionAllow, "")
+	anp := anpBuilder.Get()
+	log.Debugf("creating ANP %v", anp.Name)
+	anp, err = data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Create(context.TODO(), anp, metav1.CreateOptions{})
+	assert.NoError(t, err)
+	defer data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Delete(context.TODO(), anp.Name, metav1.DeleteOptions{})
+
+	anp = checkANPStatus(t, data, anp, crdv1alpha1.NetworkPolicyStatus{
+		Phase:                crdv1alpha1.NetworkPolicyRealized,
+		ObservedGeneration:   1,
+		CurrentNodesRealized: 2,
+		DesiredNodesRealized: 2,
+	})
+
+	// Remove the second ingress rule.
+	anp.Spec.Ingress = anp.Spec.Ingress[0:1]
+	_, err = data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Update(context.TODO(), anp, metav1.UpdateOptions{})
+	assert.NoError(t, err)
+	checkANPStatus(t, data, anp, crdv1alpha1.NetworkPolicyStatus{
+		Phase:                crdv1alpha1.NetworkPolicyRealized,
+		ObservedGeneration:   2,
+		CurrentNodesRealized: 1,
+		DesiredNodesRealized: 1,
+	})
+}
+
+func checkANPStatus(t *testing.T, data *TestData, anp *crdv1alpha1.NetworkPolicy, expectedStatus crdv1alpha1.NetworkPolicyStatus) *crdv1alpha1.NetworkPolicy {
+	err := wait.Poll(100*time.Millisecond, policyRealizedTimeout, func() (bool, error) {
+		var err error
+		anp, err = data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Get(context.TODO(), anp.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
 		return anp.Status == expectedStatus, nil
 	})
 	assert.NoError(t, err, "Antrea NetworkPolicy failed to reach expected status")
-	err = wait.Poll(100*time.Millisecond, policyRealizedTimeout, func() (bool, error) {
-		anp, err := data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Get(context.TODO(), acnp.Name, metav1.GetOptions{})
+	return anp
+}
+
+func checkACNPStatus(t *testing.T, data *TestData, acnp *crdv1alpha1.ClusterNetworkPolicy, expectedStatus crdv1alpha1.NetworkPolicyStatus) *crdv1alpha1.ClusterNetworkPolicy {
+	err := wait.Poll(100*time.Millisecond, policyRealizedTimeout, func() (bool, error) {
+		var err error
+		acnp, err = data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Get(context.TODO(), acnp.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
-		return anp.Status == expectedStatus, nil
+		return acnp.Status == expectedStatus, nil
 	})
 	assert.NoError(t, err, "Antrea ClusterNetworkPolicy failed to reach expected status")
+	return acnp
 }
 
 // waitForANPRealized waits untils an ANP is realized and returns, or times out. A policy is
@@ -2952,10 +3424,10 @@ func (data *TestData) waitForACNPRealized(t *testing.T, name string) error {
 // testANPNetworkPolicyStatsWithDropAction tests antreanetworkpolicystats can correctly collect dropped packets stats from ANP if
 // networkpolicystats feature is enabled
 func testANPNetworkPolicyStatsWithDropAction(t *testing.T, data *TestData) {
-	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace)
+	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 	var err error
 	k8sUtils, err = NewKubernetesUtils(data)
@@ -2974,11 +3446,11 @@ func testANPNetworkPolicyStatsWithDropAction(t *testing.T, data *TestData) {
 	// So we need to  "warm-up" the tunnel.
 	if clusterInfo.podV4NetworkCIDR != "" {
 		cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv4.String())}
-		data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+		data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 	}
 	if clusterInfo.podV6NetworkCIDR != "" {
 		cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv6.String())}
-		data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+		data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 	}
 	var anp = &crdv1alpha1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "np1", Labels: map[string]string{"antrea-e2e": "np1"}},
@@ -3036,14 +3508,14 @@ func testANPNetworkPolicyStatsWithDropAction(t *testing.T, data *TestData) {
 			if clusterInfo.podV4NetworkCIDR != "" {
 				cmd := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 80", serverIPs.ipv4.String())}
 				cmd2 := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 443", serverIPs.ipv4.String())}
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
 			}
 			if clusterInfo.podV6NetworkCIDR != "" {
 				cmd := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 80", serverIPs.ipv6.String())}
 				cmd2 := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 443", serverIPs.ipv6.String())}
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
 			}
 			wg.Done()
 		}()
@@ -3087,10 +3559,10 @@ func testANPNetworkPolicyStatsWithDropAction(t *testing.T, data *TestData) {
 }
 
 func testAntreaClusterNetworkPolicyStats(t *testing.T, data *TestData) {
-	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace)
+	serverName, serverIPs, cleanupFunc := createAndWaitForPod(t, data, data.createNginxPodOnNode, "test-server-", "", testNamespace, false)
 	defer cleanupFunc()
 
-	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace)
+	clientName, _, cleanupFunc := createAndWaitForPod(t, data, data.createBusyboxPodOnNode, "test-client-", "", testNamespace, false)
 	defer cleanupFunc()
 	var err error
 	k8sUtils, err = NewKubernetesUtils(data)
@@ -3109,11 +3581,11 @@ func testAntreaClusterNetworkPolicyStats(t *testing.T, data *TestData) {
 	// So we need to  "warm-up" the tunnel.
 	if clusterInfo.podV4NetworkCIDR != "" {
 		cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv4.String())}
-		data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+		data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 	}
 	if clusterInfo.podV6NetworkCIDR != "" {
 		cmd := []string{"/bin/sh", "-c", fmt.Sprintf("nc -vz -w 4 %s 80", serverIPs.ipv6.String())}
-		data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+		data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
 	}
 	var acnp = &crdv1alpha1.ClusterNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: "cnp1", Labels: map[string]string{"antrea-e2e": "cnp1"}},
@@ -3171,14 +3643,14 @@ func testAntreaClusterNetworkPolicyStats(t *testing.T, data *TestData) {
 			if clusterInfo.podV4NetworkCIDR != "" {
 				cmd := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 800", serverIPs.ipv4.String())}
 				cmd2 := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 4430", serverIPs.ipv4.String())}
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
 			}
 			if clusterInfo.podV6NetworkCIDR != "" {
 				cmd := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 800", serverIPs.ipv6.String())}
 				cmd2 := []string{"/bin/sh", "-c", fmt.Sprintf("echo test | nc -w 4 -u %s 4430", serverIPs.ipv6.String())}
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
-				data.runCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd)
+				data.RunCommandFromPod(testNamespace, clientName, busyboxContainerName, cmd2)
 			}
 			wg.Done()
 		}()

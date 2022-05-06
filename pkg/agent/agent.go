@@ -28,6 +28,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ip"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
@@ -36,6 +37,7 @@ import (
 	"antrea.io/antrea/pkg/agent/cniserver"
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/controller/noderoute"
+	"antrea.io/antrea/pkg/agent/externalnode"
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/openflow/cookie"
@@ -47,6 +49,7 @@ import (
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	"antrea.io/antrea/pkg/ovs/ovsctl"
 	"antrea.io/antrea/pkg/util/env"
+	utilip "antrea.io/antrea/pkg/util/ip"
 	"antrea.io/antrea/pkg/util/k8s"
 )
 
@@ -61,33 +64,42 @@ const (
 	maxRetryForRoundNumSave = 5
 )
 
-// getIPNetDeviceFromIP is meant to be overridden for testing.
-var getIPNetDeviceFromIP = util.GetIPNetDeviceFromIP
+var (
+	// getIPNetDeviceFromIP is meant to be overridden for testing.
+	getIPNetDeviceFromIP = util.GetIPNetDeviceFromIP
 
-// getTransportIPNetDeviceByName is meant to be overridden for testing.
-var getTransportIPNetDeviceByName = GetTransportIPNetDeviceByName
+	// getIPNetDeviceByV4CIDR is meant to be overridden for testing.
+	getIPNetDeviceByCIDRs = util.GetIPNetDeviceByCIDRs
+
+	// getTransportIPNetDeviceByName is meant to be overridden for testing.
+	getTransportIPNetDeviceByName = GetTransportIPNetDeviceByName
+)
 
 // Initializer knows how to setup host networking, OpenVSwitch, and Openflow.
 type Initializer struct {
-	client          clientset.Interface
-	ovsBridgeClient ovsconfig.OVSBridgeClient
-	ofClient        openflow.Client
-	routeClient     route.Interface
-	wireGuardClient wireguard.Interface
-	ifaceStore      interfacestore.InterfaceStore
-	ovsBridge       string
-	hostGateway     string // name of gateway port on the OVS bridge
-	mtu             int
-	serviceCIDR     *net.IPNet // K8s Service ClusterIP CIDR
-	serviceCIDRv6   *net.IPNet // K8s Service ClusterIP CIDR in IPv6
-	networkConfig   *config.NetworkConfig
-	nodeConfig      *config.NodeConfig
-	wireGuardConfig *config.WireGuardConfig
-	enableProxy     bool
+	client                clientset.Interface
+	ovsBridgeClient       ovsconfig.OVSBridgeClient
+	ofClient              openflow.Client
+	routeClient           route.Interface
+	wireGuardClient       wireguard.Interface
+	ifaceStore            interfacestore.InterfaceStore
+	ovsBridge             string
+	hostGateway           string // name of gateway port on the OVS bridge
+	mtu                   int
+	networkConfig         *config.NetworkConfig
+	nodeConfig            *config.NodeConfig
+	wireGuardConfig       *config.WireGuardConfig
+	egressConfig          *config.EgressConfig
+	serviceConfig         *config.ServiceConfig
+	enableProxy           bool
+	connectUplinkToBridge bool
 	// networkReadyCh should be closed once the Node's network is ready.
 	// The CNI server will wait for it before handling any CNI Add requests.
+	proxyAll       bool
 	networkReadyCh chan<- struct{}
 	stopCh         <-chan struct{}
+	nodeType       config.NodeType
+	vmInterface    string
 }
 
 func NewInitializer(
@@ -99,29 +111,36 @@ func NewInitializer(
 	ovsBridge string,
 	hostGateway string,
 	mtu int,
-	serviceCIDR *net.IPNet,
-	serviceCIDRv6 *net.IPNet,
 	networkConfig *config.NetworkConfig,
 	wireGuardConfig *config.WireGuardConfig,
+	egressConfig *config.EgressConfig,
+	serviceConfig *config.ServiceConfig,
 	networkReadyCh chan<- struct{},
 	stopCh <-chan struct{},
-	enableProxy bool) *Initializer {
+	nodeType config.NodeType,
+	enableProxy bool,
+	proxyAll bool,
+	connectUplinkToBridge bool,
+) *Initializer {
 	return &Initializer{
-		ovsBridgeClient: ovsBridgeClient,
-		client:          k8sClient,
-		ifaceStore:      ifaceStore,
-		ofClient:        ofClient,
-		routeClient:     routeClient,
-		ovsBridge:       ovsBridge,
-		hostGateway:     hostGateway,
-		mtu:             mtu,
-		serviceCIDR:     serviceCIDR,
-		serviceCIDRv6:   serviceCIDRv6,
-		networkConfig:   networkConfig,
-		wireGuardConfig: wireGuardConfig,
-		networkReadyCh:  networkReadyCh,
-		stopCh:          stopCh,
-		enableProxy:     enableProxy,
+		ovsBridgeClient:       ovsBridgeClient,
+		client:                k8sClient,
+		ifaceStore:            ifaceStore,
+		ofClient:              ofClient,
+		routeClient:           routeClient,
+		ovsBridge:             ovsBridge,
+		hostGateway:           hostGateway,
+		mtu:                   mtu,
+		networkConfig:         networkConfig,
+		wireGuardConfig:       wireGuardConfig,
+		egressConfig:          egressConfig,
+		serviceConfig:         serviceConfig,
+		networkReadyCh:        networkReadyCh,
+		stopCh:                stopCh,
+		nodeType:              nodeType,
+		enableProxy:           enableProxy,
+		proxyAll:              proxyAll,
+		connectUplinkToBridge: connectUplinkToBridge,
 	}
 }
 
@@ -155,13 +174,15 @@ func (i *Initializer) setupOVSBridge() error {
 		return err
 	}
 
-	if err := i.setupDefaultTunnelInterface(); err != nil {
-		return err
-	}
-	// Set up host gateway interface
-	err := i.setupGatewayInterface()
-	if err != nil {
-		return err
+	if i.nodeType == config.K8sNode {
+		if err := i.setupDefaultTunnelInterface(); err != nil {
+			return err
+		}
+		// Set up host gateway interface
+		err := i.setupGatewayInterface()
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -205,52 +226,115 @@ func (i *Initializer) initInterfaceStore() error {
 		return err
 	}
 
+	parseGatewayInterfaceFunc := func(port *ovsconfig.OVSPortData, ovsPort *interfacestore.OVSPortConfig) *interfacestore.InterfaceConfig {
+		intf := &interfacestore.InterfaceConfig{
+			Type:          interfacestore.GatewayInterface,
+			InterfaceName: port.Name,
+			OVSPortConfig: ovsPort}
+		if intf.InterfaceName != i.hostGateway {
+			klog.Warningf("The discovered gateway interface name %s is different from the configured value: %s",
+				intf.InterfaceName, i.hostGateway)
+			// Set the gateway interface name to the discovered name.
+			i.hostGateway = intf.InterfaceName
+		}
+		return intf
+	}
+	parseUplinkInterfaceFunc := func(port *ovsconfig.OVSPortData, ovsPort *interfacestore.OVSPortConfig) *interfacestore.InterfaceConfig {
+		return &interfacestore.InterfaceConfig{
+			Type:          interfacestore.UplinkInterface,
+			InterfaceName: port.Name,
+			OVSPortConfig: ovsPort,
+		}
+	}
+	parseTunnelInterfaceFunc := func(port *ovsconfig.OVSPortData, ovsPort *interfacestore.OVSPortConfig) *interfacestore.InterfaceConfig {
+		intf := noderoute.ParseTunnelInterfaceConfig(port, ovsPort)
+		if intf != nil && port.OFPort == config.DefaultTunOFPort &&
+			intf.InterfaceName != i.nodeConfig.DefaultTunName {
+			klog.Infof("The discovered default tunnel interface name %s is different from the default value: %s",
+				intf.InterfaceName, i.nodeConfig.DefaultTunName)
+			// Set the default tunnel interface name to the discovered name.
+			i.nodeConfig.DefaultTunName = intf.InterfaceName
+		}
+		return intf
+	}
 	ifaceList := make([]*interfacestore.InterfaceConfig, 0, len(ovsPorts))
-	uplinkIfName := i.nodeConfig.UplinkNetConfig.Name
 	for index := range ovsPorts {
 		port := &ovsPorts[index]
 		ovsPort := &interfacestore.OVSPortConfig{
 			PortUUID: port.UUID,
 			OFPort:   port.OFPort}
 		var intf *interfacestore.InterfaceConfig
-		switch {
-		case port.OFPort == config.HostGatewayOFPort:
-			intf = &interfacestore.InterfaceConfig{
-				Type:          interfacestore.GatewayInterface,
-				InterfaceName: port.Name,
-				OVSPortConfig: ovsPort}
-			if intf.InterfaceName != i.hostGateway {
-				klog.Warningf("The discovered gateway interface name %s is different from the configured value: %s",
-					intf.InterfaceName, i.hostGateway)
-				// Set the gateway interface name to the discovered name.
-				i.hostGateway = intf.InterfaceName
+		interfaceType, ok := port.ExternalIDs[interfacestore.AntreaInterfaceTypeKey]
+		if !ok {
+			interfaceType = interfacestore.AntreaUnset
+		}
+		if interfaceType != interfacestore.AntreaUnset {
+			switch interfaceType {
+			case interfacestore.AntreaGateway:
+				intf = parseGatewayInterfaceFunc(port, ovsPort)
+			case interfacestore.AntreaUplink:
+				intf = parseUplinkInterfaceFunc(port, ovsPort)
+			case interfacestore.AntreaTunnel:
+				intf = parseTunnelInterfaceFunc(port, ovsPort)
+			case interfacestore.AntreaHost:
+				if port.Name == i.ovsBridge {
+					// Not load the host interface, because it is configured on the OVS bridge port, and we don't need a
+					// specific interface in the interfaceStore.
+					intf = nil
+				} else {
+					var err error
+					intf, err = externalnode.ParseHostInterfaceConfig(i.ovsBridgeClient, port, ovsPort)
+					if err != nil {
+						klog.ErrorS(err, "Failed to ParseHostInterfaceConfig", "port", port.Name)
+						return err
+					}
+				}
+			case interfacestore.AntreaContainer:
+				// The port should be for a container interface.
+				intf = cniserver.ParseOVSPortInterfaceConfig(port, ovsPort, true)
+			default:
+				klog.InfoS("Unknown Antrea interface type", "type", interfaceType)
 			}
-		case port.Name == uplinkIfName:
-			intf = &interfacestore.InterfaceConfig{
-				Type:          interfacestore.UplinkInterface,
-				InterfaceName: port.Name,
-				OVSPortConfig: ovsPort,
+		} else {
+			// Antrea Interface type is not saved in OVS port external_ids in earlier Antrea versions, so we use
+			// the old way to decide the interface type for the upgrade case.
+			uplinkIfName := i.nodeConfig.UplinkNetConfig.Name
+			var antreaIFType string
+			switch {
+			case port.OFPort == config.HostGatewayOFPort:
+				intf = parseGatewayInterfaceFunc(port, ovsPort)
+				antreaIFType = interfacestore.AntreaGateway
+			case port.Name == uplinkIfName:
+				intf = parseUplinkInterfaceFunc(port, ovsPort)
+				antreaIFType = interfacestore.AntreaUplink
+			case port.IFType == ovsconfig.GeneveTunnel:
+				fallthrough
+			case port.IFType == ovsconfig.VXLANTunnel:
+				fallthrough
+			case port.IFType == ovsconfig.GRETunnel:
+				fallthrough
+			case port.IFType == ovsconfig.STTTunnel:
+				intf = parseTunnelInterfaceFunc(port, ovsPort)
+				antreaIFType = interfacestore.AntreaTunnel
+			case port.Name == i.ovsBridge:
+				intf = nil
+				antreaIFType = interfacestore.AntreaHost
+			default:
+				// The port should be for a container interface.
+				intf = cniserver.ParseOVSPortInterfaceConfig(port, ovsPort, true)
+				antreaIFType = interfacestore.AntreaContainer
 			}
-		case port.IFType == ovsconfig.GeneveTunnel:
-			fallthrough
-		case port.IFType == ovsconfig.VXLANTunnel:
-			fallthrough
-		case port.IFType == ovsconfig.GRETunnel:
-			fallthrough
-		case port.IFType == ovsconfig.STTTunnel:
-			intf = noderoute.ParseTunnelInterfaceConfig(port, ovsPort)
-			if intf != nil && port.OFPort == config.DefaultTunOFPort &&
-				intf.InterfaceName != i.nodeConfig.DefaultTunName {
-				klog.Infof("The discovered default tunnel interface name %s is different from the default value: %s",
-					intf.InterfaceName, i.nodeConfig.DefaultTunName)
-				// Set the default tunnel interface name to the discovered name.
-				i.nodeConfig.DefaultTunName = intf.InterfaceName
+			updatedExtIDs := make(map[string]interface{})
+			for k, v := range port.ExternalIDs {
+				updatedExtIDs[k] = v
 			}
-		default:
-			// The port should be for a container interface.
-			intf = cniserver.ParseOVSPortInterfaceConfig(port, ovsPort, true)
+			updatedExtIDs[interfacestore.AntreaInterfaceTypeKey] = antreaIFType
+			if err := i.ovsBridgeClient.SetPortExternalIDs(port.Name, updatedExtIDs); err != nil {
+				klog.ErrorS(err, "Failed to set Antrea interface type on OVS port", "port", port.Name)
+			}
 		}
 		if intf != nil {
+			klog.V(2).InfoS("Adding interface to cache", "interfaceName", intf.InterfaceName)
 			ifaceList = append(ifaceList, intf)
 		}
 	}
@@ -289,23 +373,30 @@ func (i *Initializer) Initialize() error {
 		}
 	}
 
-	wg.Add(1)
-	// routeClient.Initialize() should be after i.setupOVSBridge() which
-	// creates the host gateway interface.
-	if err := i.routeClient.Initialize(i.nodeConfig, wg.Done); err != nil {
-		return err
-	}
+	if i.nodeType == config.K8sNode {
+		wg.Add(1)
+		// routeClient.Initialize() should be after i.setupOVSBridge() which
+		// creates the host gateway interface.
+		if err := i.routeClient.Initialize(i.nodeConfig, wg.Done); err != nil {
+			return err
+		}
 
-	// Install OpenFlow entries on OVS bridge.
-	if err := i.initOpenFlowPipeline(); err != nil {
-		return err
-	}
+		// Install OpenFlow entries on OVS bridge.
+		if err := i.initOpenFlowPipeline(); err != nil {
+			return err
+		}
 
-	// The Node's network is ready only when both synchronous and asynchronous initialization are done.
-	go func() {
-		wg.Wait()
-		close(i.networkReadyCh)
-	}()
+		// The Node's network is ready only when both synchronous and asynchronous initialization are done.
+		go func() {
+			wg.Wait()
+			close(i.networkReadyCh)
+		}()
+	} else {
+		// Install OpenFlow entries on OVS bridge.
+		if err := i.initOpenFlowPipeline(); err != nil {
+			return err
+		}
+	}
 	klog.Infof("Agent initialized NodeConfig=%v, NetworkConfig=%v", i.nodeConfig, i.networkConfig)
 	return nil
 }
@@ -355,56 +446,15 @@ func (i *Initializer) initOpenFlowPipeline() error {
 	roundInfo := getRoundInfo(i.ovsBridgeClient)
 
 	// Set up all basic flows.
-	ofConnCh, err := i.ofClient.Initialize(roundInfo, i.nodeConfig, i.networkConfig)
+	ofConnCh, err := i.ofClient.Initialize(roundInfo, i.nodeConfig, i.networkConfig, i.egressConfig, i.serviceConfig)
 	if err != nil {
 		klog.Errorf("Failed to initialize openflow client: %v", err)
 		return err
 	}
 
-	// On Windows platform, host network flows are needed for host traffic.
-	if err := i.initHostNetworkFlows(); err != nil {
-		klog.Errorf("Failed to install openflow entries for host network: %v", err)
-		return err
-	}
-
-	// Install OpenFlow entries to enable Pod traffic to external IP
-	// addresses.
-	if err := i.ofClient.InstallExternalFlows(); err != nil {
-		klog.Errorf("Failed to install openflow entries for external connectivity: %v", err)
-		return err
-	}
-
-	// Set up flow entries for gateway interface, including classifier, skip spoof guard check,
-	// L3 forwarding and L2 forwarding
-	if err := i.ofClient.InstallGatewayFlows(); err != nil {
-		klog.Errorf("Failed to setup openflow entries for gateway: %v", err)
-		return err
-	}
-
-	if i.networkConfig.TrafficEncapMode.SupportsEncap() {
-		// Set up flow entries for the default tunnel port interface.
-		if err := i.ofClient.InstallDefaultTunnelFlows(); err != nil {
-			klog.Errorf("Failed to setup openflow entries for tunnel interface: %v", err)
-			return err
-		}
-	}
-
-	if !i.enableProxy {
-		// Set up flow entries to enable Service connectivity. Upstream kube-proxy is leveraged to
-		// provide load-balancing, and the flows installed by this method ensure that traffic sent
-		// from local Pods to any Service address can be forwarded to the host gateway interface
-		// correctly. Otherwise packets might be dropped by egress rules before they are DNATed to
-		// backend Pods.
-		if err := i.ofClient.InstallClusterServiceCIDRFlows([]*net.IPNet{i.serviceCIDR, i.serviceCIDRv6}); err != nil {
-			klog.Errorf("Failed to setup OpenFlow entries for Service CIDRs: %v", err)
-			return err
-		}
-	} else {
-		// Set up flow entries to enable Service connectivity. The agent proxy handles
-		// ClusterIP Services while the upstream kube-proxy is leveraged to handle
-		// any other kinds of Services.
-		if err := i.ofClient.InstallClusterServiceFlows(); err != nil {
-			klog.Errorf("Failed to setup default OpenFlow entries for ClusterIP Services: %v", err)
+	if i.nodeType == config.ExternalNode {
+		err := i.installVmOpenFlows()
+		if err != nil {
 			return err
 		}
 	}
@@ -535,7 +585,10 @@ func (i *Initializer) setupGatewayInterface() error {
 	gatewayIface, portExists := i.ifaceStore.GetInterface(i.hostGateway)
 	if !portExists {
 		klog.V(2).Infof("Creating gateway port %s on OVS bridge", i.hostGateway)
-		gwPortUUID, err := i.ovsBridgeClient.CreateInternalPort(i.hostGateway, config.HostGatewayOFPort, nil)
+		externalIDs := map[string]interface{}{
+			interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaGateway,
+		}
+		gwPortUUID, err := i.ovsBridgeClient.CreateInternalPort(i.hostGateway, config.HostGatewayOFPort, externalIDs)
 		if err != nil {
 			klog.Errorf("Failed to create gateway port %s on OVS bridge: %v", i.hostGateway, err)
 			return err
@@ -552,8 +605,10 @@ func (i *Initializer) setupGatewayInterface() error {
 	// restarts.
 	klog.V(4).Infof("Setting gateway interface %s MTU to %d", i.hostGateway, i.nodeConfig.NodeMTU)
 
-	i.ovsBridgeClient.SetInterfaceMTU(i.hostGateway, i.nodeConfig.NodeMTU)
 	if err := i.configureGatewayInterface(gatewayIface); err != nil {
+		return err
+	}
+	if err := i.setInterfaceMTU(i.hostGateway, i.nodeConfig.NodeMTU); err != nil {
 		return err
 	}
 
@@ -621,6 +676,23 @@ func (i *Initializer) setupDefaultTunnelInterface() error {
 		localIPStr = localIP.String()
 	}
 
+	// The correct OVS tunnel type to use GRE with an IPv6 overlay is
+	// "ip6gre" and not "gre". While it would be possible to support GRE for
+	// an IPv6-only cluster (by simply setting the tunnel type to "ip6gre"),
+	// things would be more complicated for a dual-stack cluster. For such a
+	// cluster, we have both IPv4 and IPv6 tunnels for inter-Node
+	// traffic. We would therefore need to create 2 default tunnel ports:
+	// one with type "gre" and one with type "ip6gre". This would introduce
+	// some complexity as the code currently assumes that we have a single
+	// default tunnel port. So for now, we just reject configurations that
+	// request a GRE tunnel when the Node network supports IPv6.
+	// See https://github.com/antrea-io/antrea/issues/3150
+	if i.networkConfig.TrafficEncapMode.SupportsEncap() &&
+		i.networkConfig.TunnelType == ovsconfig.GRETunnel &&
+		i.nodeConfig.NodeIPv6Addr != nil {
+		return fmt.Errorf("GRE tunnel type is not supported for IPv6 overlay")
+	}
+
 	// Enabling UDP checksum can greatly improve the performance for Geneve and
 	// VXLAN tunnels by triggering GRO on the receiver.
 	shouldEnableCsum := i.networkConfig.TunnelType == ovsconfig.GeneveTunnel || i.networkConfig.TunnelType == ovsconfig.VXLANTunnel
@@ -660,7 +732,10 @@ func (i *Initializer) setupDefaultTunnelInterface() error {
 			tunnelPortName = defaultTunInterfaceName
 			i.nodeConfig.DefaultTunName = tunnelPortName
 		}
-		tunnelPortUUID, err := i.ovsBridgeClient.CreateTunnelPortExt(tunnelPortName, i.networkConfig.TunnelType, config.DefaultTunOFPort, shouldEnableCsum, localIPStr, "", "", nil)
+		externalIDs := map[string]interface{}{
+			interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaTunnel,
+		}
+		tunnelPortUUID, err := i.ovsBridgeClient.CreateTunnelPortExt(tunnelPortName, i.networkConfig.TunnelType, config.DefaultTunOFPort, shouldEnableCsum, localIPStr, "", "", externalIDs)
 		if err != nil {
 			klog.Errorf("Failed to create tunnel port %s type %s on OVS bridge: %v", tunnelPortName, i.networkConfig.TunnelType, err)
 			return err
@@ -688,33 +763,34 @@ func (i *Initializer) enableTunnelCsum(tunnelPortName string) error {
 
 // initNodeLocalConfig retrieves node's subnet CIDR from node.spec.PodCIDR, which is used for IPAM and setup
 // host gateway interface.
-func (i *Initializer) initNodeLocalConfig() error {
-	nodeName, err := env.GetNodeName()
-	if err != nil {
-		return err
-	}
+func (i *Initializer) initK8sNodeLocalConfig(nodeName string) error {
 	node, err := i.client.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
 	if err != nil {
-		klog.Errorf("Failed to get node from K8s with name %s: %v", nodeName, err)
-		return err
+		return fmt.Errorf("failed to get Node with name %s from K8s: %w", nodeName, err)
 	}
 
+	// nodeInterface is the interface that has K8s Node IP. transportInterface is the interface that is used for
+	// tunneling or routing the traffic across Nodes. It defaults to nodeInterface and can be overridden by the
+	// configuration parameters TransportInterface and TransportInterfaceCIDRs.
+	var nodeInterface, transportInterface *net.Interface
+	// nodeIPv4Addr and nodeIPv6Addr are the IP addresses of nodeInterface.
+	// transportIPv4Addr and transportIPv6Addr are the IP addresses of transportInterface.
 	var nodeIPv4Addr, nodeIPv6Addr, transportIPv4Addr, transportIPv6Addr *net.IPNet
-	var localIntf *net.Interface
 	// Find the interface configured with Node IP and use it for Pod traffic.
 	ipAddrs, err := k8s.GetNodeAddrs(node)
 	if err != nil {
 		return fmt.Errorf("failed to obtain local IP addresses from K8s: %w", err)
 	}
-	nodeIPv4Addr, nodeIPv6Addr, localIntf, err = getIPNetDeviceFromIP(ipAddrs)
+	nodeIPv4Addr, nodeIPv6Addr, nodeInterface, err = i.getNodeInterfaceFromIP(ipAddrs)
 	if err != nil {
 		return fmt.Errorf("failed to get local IPNet device with IP %v: %v", ipAddrs, err)
 	}
 	transportIPv4Addr = nodeIPv4Addr
 	transportIPv6Addr = nodeIPv6Addr
+	transportInterface = nodeInterface
 	if i.networkConfig.TransportIface != "" {
 		// Find the configured transport interface, and update its IP address in Node's annotation.
-		transportIPv4Addr, transportIPv6Addr, localIntf, err = getTransportIPNetDeviceByName(i.networkConfig.TransportIface, i.ovsBridge)
+		transportIPv4Addr, transportIPv6Addr, transportInterface, err = getTransportIPNetDeviceByName(i.networkConfig.TransportIface, i.ovsBridge)
 		if err != nil {
 			return fmt.Errorf("failed to get local IPNet device with transport interface %s: %v", i.networkConfig.TransportIface, err)
 		}
@@ -726,6 +802,22 @@ func (i *Initializer) initNodeLocalConfig() error {
 		if transportIPv6Addr != nil {
 			ips = append(ips, transportIPv6Addr.IP.String())
 		}
+		if err := i.patchNodeAnnotations(nodeName, types.NodeTransportAddressAnnotationKey, strings.Join(ips, ",")); err != nil {
+			return err
+		}
+	} else if len(i.networkConfig.TransportIfaceCIDRs) > 0 {
+		transportIPv4Addr, transportIPv6Addr, transportInterface, err = getIPNetDeviceByCIDRs(i.networkConfig.TransportIfaceCIDRs)
+		if err != nil {
+			return fmt.Errorf("failed to get local IPNet device with transport Address CIDR %s: %v", i.networkConfig.TransportIfaceCIDRs, err)
+		}
+		var ips []string
+		if transportIPv4Addr != nil {
+			ips = append(ips, transportIPv4Addr.IP.String())
+		}
+		if transportIPv6Addr != nil {
+			ips = append(ips, transportIPv6Addr.IP.String())
+		}
+		klog.InfoS("Updating Node transport addresses annotation")
 		if err := i.patchNodeAnnotations(nodeName, types.NodeTransportAddressAnnotationKey, strings.Join(ips, ",")); err != nil {
 			return err
 		}
@@ -741,72 +833,73 @@ func (i *Initializer) initNodeLocalConfig() error {
 	// OVS in noencap case on Windows Nodes. As a mixture of Linux and Windows nodes is possible, Linux Nodes' MAC
 	// addresses should be reported too to make them discoverable for Windows Nodes.
 	if i.networkConfig.TrafficEncapMode.SupportsNoEncap() {
-		klog.Infof("Updating Node MAC annotation")
-		if err := i.patchNodeAnnotations(nodeName, types.NodeMACAddressAnnotationKey, localIntf.HardwareAddr.String()); err != nil {
+		klog.InfoS("Updating Node MAC annotation")
+		if err := i.patchNodeAnnotations(nodeName, types.NodeMACAddressAnnotationKey, transportInterface.HardwareAddr.String()); err != nil {
 			return err
 		}
 	}
 
 	i.nodeConfig = &config.NodeConfig{
-		Name:                  nodeName,
-		OVSBridge:             i.ovsBridge,
-		DefaultTunName:        defaultTunInterfaceName,
-		NodeIPv4Addr:          nodeIPv4Addr,
-		NodeIPv6Addr:          nodeIPv6Addr,
-		NodeTransportIPv4Addr: transportIPv4Addr,
-		NodeTransportIPv6Addr: transportIPv6Addr,
-		UplinkNetConfig:       new(config.AdapterNetConfig),
-		NodeLocalInterfaceMTU: localIntf.MTU,
-		WireGuardConfig:       i.wireGuardConfig,
+		Name:                       nodeName,
+		Type:                       config.K8sNode,
+		OVSBridge:                  i.ovsBridge,
+		DefaultTunName:             defaultTunInterfaceName,
+		NodeIPv4Addr:               nodeIPv4Addr,
+		NodeIPv6Addr:               nodeIPv6Addr,
+		NodeTransportInterfaceName: transportInterface.Name,
+		NodeTransportIPv4Addr:      transportIPv4Addr,
+		NodeTransportIPv6Addr:      transportIPv6Addr,
+		UplinkNetConfig:            new(config.AdapterNetConfig),
+		NodeTransportInterfaceMTU:  transportInterface.MTU,
+		WireGuardConfig:            i.wireGuardConfig,
 	}
 
-	mtu, err := i.getNodeMTU(localIntf)
+	mtu, err := i.getNodeMTU(transportInterface)
 	if err != nil {
 		return err
 	}
 	i.nodeConfig.NodeMTU = mtu
-	klog.Infof("Setting Node MTU=%d", mtu)
+	klog.InfoS("Setting Node MTU", "MTU", mtu)
 
 	if i.networkConfig.TrafficEncapMode.IsNetworkPolicyOnly() {
 		return nil
 	}
 
-	// Parse all PodCIDRs first, so that we could support IPv4/IPv6 dual-stack configurations.
+	// Parse all PodCIDRs first, so that we can support IPv4/IPv6 dual-stack configurations.
 	if node.Spec.PodCIDRs != nil {
 		for _, podCIDR := range node.Spec.PodCIDRs {
 			_, localSubnet, err := net.ParseCIDR(podCIDR)
 			if err != nil {
-				klog.Errorf("Failed to parse subnet from CIDR string %s: %v", node.Spec.PodCIDR, err)
+				klog.ErrorS(err, "Failed to parse subnet from Pod CIDR string", "CIDR", podCIDR)
 				return err
 			}
 			if localSubnet.IP.To4() != nil {
 				if i.nodeConfig.PodIPv4CIDR != nil {
-					klog.Warningf("One IPv4 PodCIDR is already configured on this Node, ignore the IPv4 Subnet CIDR %s", localSubnet.String())
+					klog.InfoS("One IPv4 PodCIDR is already configured on this Node, ignoring the IPv4 Subnet CIDR", "subnet", localSubnet)
 				} else {
 					i.nodeConfig.PodIPv4CIDR = localSubnet
-					klog.V(2).Infof("Configure IPv4 Subnet CIDR %s on this Node", localSubnet.String())
+					klog.V(2).InfoS("Configured IPv4 Subnet CIDR on this Node", "subnet", localSubnet)
 				}
 				continue
 			}
 			if i.nodeConfig.PodIPv6CIDR != nil {
-				klog.Warningf("One IPv6 PodCIDR is already configured on this Node, ignore the IPv6 subnet CIDR %s", localSubnet.String())
+				klog.InfoS("One IPv6 PodCIDR is already configured on this Node, ignoring the IPv6 Subnet CIDR", "subnet", localSubnet)
 			} else {
 				i.nodeConfig.PodIPv6CIDR = localSubnet
-				klog.V(2).Infof("Configure IPv6 Subnet CIDR %s on this Node", localSubnet.String())
+				klog.V(2).InfoS("Configured IPv6 Subnet CIDR on this Node", "subnet", localSubnet)
 			}
 		}
 		return nil
 	}
 	// Spec.PodCIDR can be empty due to misconfiguration.
 	if node.Spec.PodCIDR == "" {
-		klog.Errorf("Spec.PodCIDR is empty for Node %s. Please make sure --allocate-node-cidrs is enabled "+
-			"for kube-controller-manager and --cluster-cidr specifies a sufficient CIDR range", nodeName)
-		return fmt.Errorf("CIDR string is empty for node %s", nodeName)
+		klog.ErrorS(nil, "Spec.PodCIDR is empty for Node. Please make sure --allocate-node-cidrs is enabled "+
+			"for kube-controller-manager and --cluster-cidr specifies a sufficient CIDR range", "nodeName", nodeName)
+		return fmt.Errorf("CIDR string is empty for Node %s", nodeName)
 	}
 	_, localSubnet, err := net.ParseCIDR(node.Spec.PodCIDR)
 	if err != nil {
-		klog.Errorf("Failed to parse subnet from CIDR string %s: %v", node.Spec.PodCIDR, err)
-		return err
+		return fmt.Errorf("failed to parse subnet from CIDR string %s: %w", node.Spec.PodCIDR, err)
 	}
 	if localSubnet.IP.To4() != nil {
 		i.nodeConfig.PodIPv4CIDR = localSubnet
@@ -849,7 +942,7 @@ func (i *Initializer) initializeIPSec() error {
 
 // initializeWireguard checks if preconditions are met for using WireGuard and initializes WireGuard client or cleans up.
 func (i *Initializer) initializeWireGuard() error {
-	i.wireGuardConfig.MTU = i.nodeConfig.NodeLocalInterfaceMTU - config.WireGuardOverhead
+	i.wireGuardConfig.MTU = i.nodeConfig.NodeTransportInterfaceMTU - config.WireGuardOverhead
 	wgClient, err := wireguard.New(i.client, i.nodeConfig, i.wireGuardConfig)
 	if err != nil {
 		return err
@@ -922,11 +1015,11 @@ func getRoundInfo(bridgeClient ovsconfig.OVSBridgeClient) types.RoundInfo {
 	return roundInfo
 }
 
-func (i *Initializer) getNodeMTU(localIntf *net.Interface) (int, error) {
+func (i *Initializer) getNodeMTU(transportInterface *net.Interface) (int, error) {
 	if i.mtu != 0 {
 		return i.mtu, nil
 	}
-	mtu := localIntf.MTU
+	mtu := transportInterface.MTU
 	// Make sure mtu is set on the interface.
 	if mtu <= 0 {
 		return 0, fmt.Errorf("Failed to fetch Node MTU : %v", mtu)
@@ -1001,10 +1094,90 @@ func (i *Initializer) patchNodeAnnotations(nodeName, key string, value interface
 		},
 	})
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		_, err := i.client.CoreV1().Nodes().Patch(context.TODO(), nodeName, apitypes.MergePatchType, patch, metav1.PatchOptions{})
+		_, err := i.client.CoreV1().Nodes().Patch(context.TODO(), nodeName, apitypes.MergePatchType, patch, metav1.PatchOptions{}, "status")
 		return err
 	}); err != nil {
 		klog.ErrorS(err, "Failed to patch Node annotation", "key", key, "value", value)
+		return err
+	}
+	return nil
+}
+
+// getNodeInterfaceFromIP returns the IPv4/IPv6 configuration, and the associated interface according the give nodeIPs.
+// When searching the Node interface, antrea-gw0 is ignored because it is configured with the same address as Node IP
+// with NetworkPolicyOnly mode on public cloud setup, e.g., AKS.
+func (i *Initializer) getNodeInterfaceFromIP(nodeIPs *utilip.DualStackIPs) (v4IPNet *net.IPNet, v6IPNet *net.IPNet, iface *net.Interface, err error) {
+	return getIPNetDeviceFromIP(nodeIPs, sets.NewString(i.hostGateway))
+}
+
+func (i *Initializer) initNodeLocalConfig() error {
+	nodeName, err := env.GetNodeName()
+	if err != nil {
+		return err
+	}
+	if i.nodeType == config.K8sNode {
+		if err := i.initK8sNodeLocalConfig(nodeName); err != nil {
+			return err
+		}
+
+		i.networkConfig.IPv4Enabled = config.IsIPv4Enabled(i.nodeConfig, i.networkConfig.TrafficEncapMode)
+		i.networkConfig.IPv6Enabled = config.IsIPv6Enabled(i.nodeConfig, i.networkConfig.TrafficEncapMode)
+		return nil
+	}
+	if err := i.initVMLocalConfig(nodeName); err != nil {
+		return err
+	}
+	// Only IPv4 is supported on a VM Node.
+	i.networkConfig.IPv4Enabled = true
+	return nil
+}
+
+func (i *Initializer) initVMLocalConfig(nodeName string) error {
+	i.nodeConfig = &config.NodeConfig{
+		Name:            nodeName,
+		Type:            config.ExternalNode,
+		OVSBridge:       i.ovsBridge,
+		UplinkNetConfig: new(config.AdapterNetConfig),
+	}
+	return nil
+}
+
+// prepareOVSBridge operates OVS bridge
+func (i *Initializer) prepareOVSBridge() error {
+	if i.nodeType == config.K8sNode {
+		return i.prepareOVSBridgeForK8sNode()
+	}
+	return i.prepareOVSBridgeForVM()
+}
+
+func (i *Initializer) prepareOVSBridgeForVM() error {
+	e := i.prepareOVSConfigForVM()
+	if e != nil {
+		klog.ErrorS(e, "Failed to prepareOVSConfigForVM")
+		return e
+	}
+	randMAC, err := util.RandomMAC()
+	if err != nil {
+		return err
+	}
+	return i.setOVSDatapath(randMAC)
+}
+
+// setOVSDatapath generates a static datapath id for OVS bridge so that the OFSwitch identifier is not
+// changed after the physical interface is attached on the switch.
+func (i *Initializer) setOVSDatapath(mac net.HardwareAddr) error {
+	otherConfig, oerr := i.ovsBridgeClient.GetOVSOtherConfig()
+	if oerr != nil {
+		klog.ErrorS(oerr, "Failed to read OVS bridge other_config")
+		return oerr
+	}
+	_, exists := otherConfig[ovsconfig.OVSOtherConfigDatapathIDKey]
+	if exists {
+		return nil
+	}
+	datapathID := "0000" + strings.Replace(mac.String(), ":", "", -1)
+	if err := i.ovsBridgeClient.SetDatapathID(datapathID); err != nil {
+		klog.ErrorS(err, "Failed to set OVS bridge datapath_id", "datapathID", datapathID)
 		return err
 	}
 	return nil

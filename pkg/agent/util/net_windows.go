@@ -19,7 +19,7 @@ package util
 
 import (
 	"bufio"
-	"encoding/binary"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -45,7 +45,11 @@ const (
 	commandRetryTimeout  = 5 * time.Second
 	commandRetryInterval = time.Second
 
-	DefaultMetric = 256
+	MetricDefault = 256
+	MetricHigh    = 50
+
+	// LocalVMSwitch is the VMSwitch name used in VM/BM Agent case, which is enabled with network adapter teaming.
+	LocalVMSwitch = "antrea-switch"
 )
 
 type Route struct {
@@ -53,6 +57,22 @@ type Route struct {
 	DestinationSubnet *net.IPNet
 	GatewayAddress    net.IP
 	RouteMetric       int
+}
+
+func (r Route) String() string {
+	return fmt.Sprintf("LinkIndex: %d, DestinationSubnet: %s, GatewayAddress: %s, RouteMetric: %d",
+		r.LinkIndex, r.DestinationSubnet, r.GatewayAddress, r.RouteMetric)
+}
+
+type Neighbor struct {
+	LinkIndex        int
+	IPAddress        net.IP
+	LinkLayerAddress net.HardwareAddr
+	State            string
+}
+
+func (n Neighbor) String() string {
+	return fmt.Sprintf("LinkIndex: %d, IPAddress: %s, LinkLayerAddress: %s", n.LinkIndex, n.IPAddress, n.LinkLayerAddress)
 }
 
 func GetNSPath(containerNetNS string) (string, error) {
@@ -155,28 +175,35 @@ func EnableIPForwarding(ifaceName string) error {
 	return err
 }
 
-// RemoveManagementInterface removes the management interface of the HNS Network, and then the physical interface can be
-// added to the OVS bridge. This function is called only if Hyper-V feature is installed on the host.
-func RemoveManagementInterface(networkName string) error {
-	var err error
-	var maxRetry = 3
-	var i = 0
-	cmd := fmt.Sprintf("Get-VMSwitch -Name %s  | Set-VMSwitch -AllowManagementOS $false ", networkName)
-	// Retry the operation here because an error is returned at the first invocation.
-	for i < maxRetry {
-		_, err = ps.RunCommand(cmd)
-		if err == nil {
-			return nil
-		}
-		i++
+func RenameVMNetworkAdapter(networkName string, macStr, newName string, renameNetAdapter bool) error {
+	cmd := fmt.Sprintf(`Get-VMNetworkAdapter -ManagementOS -ComputerName "$(hostname)" -SwitchName "%s" | ? MacAddress -EQ "%s" | Select-Object -Property Name | Format-Table -HideTableHeaders`, networkName, macStr)
+	stdout, err := ps.RunCommand(cmd)
+	if err != nil {
+		return err
 	}
-	return err
+	stdout = strings.TrimSpace(stdout)
+	if len(stdout) == 0 {
+		return fmt.Errorf("unable to find vmnetwork adapter configured with uplink MAC address %s", macStr)
+	}
+	vmNetworkAdapterName := stdout
+	cmd = fmt.Sprintf(`Get-VMNetworkAdapter -ManagementOS -ComputerName "$(hostname)" -Name "%s" | Rename-VMNetworkAdapter -NewName "%s"`, vmNetworkAdapterName, newName)
+	if _, err := ps.RunCommand(cmd); err != nil {
+		return err
+	}
+	if renameNetAdapter {
+		oriNetAdapterName := VirtualAdapterName(newName)
+		cmd = fmt.Sprintf(`Get-NetAdapter -Name "%s" | Rename-NetAdapter -NewName "%s"`, oriNetAdapterName, newName)
+		if _, err := ps.RunCommand(cmd); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// ConfigureMACAddress set specified MAC address on interface.
+// SetAdapterMACAddress sets specified MAC address on interface.
 func SetAdapterMACAddress(adapterName string, macConfig *net.HardwareAddr) error {
 	macAddr := strings.Replace(macConfig.String(), ":", "", -1)
-	cmd := fmt.Sprintf("Set-NetAdapterAdvancedProperty -Name %s -RegistryKeyword NetworkAddress -RegistryValue %s",
+	cmd := fmt.Sprintf(`Set-NetAdapterAdvancedProperty -Name "%s" -RegistryKeyword NetworkAddress -RegistryValue "%s"`,
 		adapterName, macAddr)
 	_, err := ps.RunCommand(cmd)
 	return err
@@ -358,16 +385,66 @@ func ConfigureLinkAddresses(idx int, ipNets []*net.IPNet) error {
 }
 
 // PrepareHNSNetwork creates HNS Network for containers.
-func PrepareHNSNetwork(subnetCIDR *net.IPNet, nodeIPNet *net.IPNet, uplinkAdapter *net.Interface) error {
+func PrepareHNSNetwork(subnetCIDR *net.IPNet, nodeIPNet *net.IPNet, uplinkAdapter *net.Interface, nodeGateway string, dnsServers string, routes []interface{}, newName string) error {
 	klog.InfoS("Creating HNSNetwork", "name", LocalHNSNetwork, "subnet", subnetCIDR, "nodeIP", nodeIPNet, "adapter", uplinkAdapter)
 	hnsNet, err := CreateHNSNetwork(LocalHNSNetwork, subnetCIDR, nodeIPNet, uplinkAdapter)
 	if err != nil {
 		return fmt.Errorf("error creating HNSNetwork: %v", err)
 	}
 
+	success := false
+	defer func() {
+		if !success {
+			hnsNet.Delete()
+		}
+	}()
+
+	adapter, ipFound, err := adapterIPExists(nodeIPNet.IP, uplinkAdapter.HardwareAddr, ContainerVNICPrefix)
+	if err != nil {
+		return err
+	}
+	vNicName, index := adapter.Name, adapter.Index
+	// By default, "ipFound" should be true after Windows creates the HNSNetwork. The following check is for some corner
+	// cases that Windows fails to move the physical adapter's IP address to the virtual network adapter, e.g., DHCP
+	// Server fails to allocate IP to new virtual network.
+	if !ipFound {
+		klog.InfoS("Moving uplink configuration to the management virtual network adapter", "adapter", vNicName)
+		if err := ConfigureInterfaceAddressWithDefaultGateway(vNicName, nodeIPNet, nodeGateway); err != nil {
+			klog.ErrorS(err, "Failed to configure IP and gateway on the management virtual network adapter", "adapter", vNicName, "ip", nodeIPNet.String())
+			return err
+		}
+		if dnsServers != "" {
+			if err := SetAdapterDNSServers(vNicName, dnsServers); err != nil {
+				klog.ErrorS(err, "Failed to configure DNS servers on the management virtual network adapter", "adapter", vNicName, "dnsServers", dnsServers)
+				return err
+			}
+		}
+		for _, route := range routes {
+			rt := route.(Route)
+			newRt := Route{
+				LinkIndex:         index,
+				DestinationSubnet: rt.DestinationSubnet,
+				GatewayAddress:    rt.GatewayAddress,
+				RouteMetric:       rt.RouteMetric,
+			}
+			if err := NewNetRoute(&newRt); err != nil {
+				return err
+			}
+		}
+		klog.InfoS("Moved uplink configuration to the management virtual network adapter", "adapter", vNicName)
+	}
+	if newName != "" {
+		// Rename the vnic created by Windows host with the given newName, then it can be used by OVS when creating bridge port.
+		uplinkMACStr := strings.Replace(uplinkAdapter.HardwareAddr.String(), ":", "", -1)
+		// Rename NetAdapter in the meanwhile, then the network adapter can be treated as a host network adapter other than
+		// a vm network adapter.
+		if err = RenameVMNetworkAdapter(LocalHNSNetwork, uplinkMACStr, newName, true); err != nil {
+			return err
+		}
+	}
+
 	// Enable OVS Extension on the HNS Network. If an error occurs, delete the HNS Network and return the error.
-	if err = enableHNSOnOVS(hnsNet); err != nil {
-		hnsNet.Delete()
+	if err = EnableHNSNetworkExtension(hnsNet.Id, OVSExtensionID); err != nil {
 		return err
 	}
 
@@ -375,14 +452,46 @@ func PrepareHNSNetwork(subnetCIDR *net.IPNet, nodeIPNet *net.IPNet, uplinkAdapte
 		return err
 	}
 
-	klog.Infof("Created HNSNetwork with name %s id %s", hnsNet.Name, hnsNet.Id)
+	success = true
+	klog.InfoS("Created HNSNetwork", "name", hnsNet.Name, "id", hnsNet.Id)
 	return nil
+}
+
+// adapterIPExists finds the network adapter configured with the provided IP, MAC and its name has the given prefix.
+// If "namePrefix" is empty, it returns the first network adapter with the provided IP and MAC.
+// It returns true if the IP is found on the adapter, otherwise it returns false.
+func adapterIPExists(ip net.IP, mac net.HardwareAddr, namePrefix string) (*net.Interface, bool, error) {
+	adapters, err := net.Interfaces()
+	if err != nil {
+		return nil, false, err
+	}
+	ipExists := false
+	for _, adapter := range adapters {
+		if bytes.Equal(adapter.HardwareAddr, mac) {
+			if namePrefix == "" || strings.Contains(adapter.Name, namePrefix) {
+				addrList, err := adapter.Addrs()
+				if err != nil {
+					return nil, false, err
+				}
+				for _, addr := range addrList {
+					if ipNet, ok := addr.(*net.IPNet); ok {
+						if ipNet.IP.Equal(ip) {
+							ipExists = true
+							break
+						}
+					}
+				}
+				return &adapter, ipExists, nil
+			}
+		}
+	}
+	return nil, false, fmt.Errorf("unable to find a network adapter with MAC %s, IP %s, and name prefix %s", mac.String(), ip.String(), namePrefix)
 }
 
 // EnableRSCOnVSwitch enables RSC in the vSwitch to reduce host CPU utilization and increase throughput for virtual
 // workloads by coalescing multiple TCP segments into fewer, but larger segments.
 func EnableRSCOnVSwitch(vSwitch string) error {
-	cmd := fmt.Sprintf("Get-VMSwitch -Name %s | Select-Object -Property SoftwareRscEnabled | Format-Table -HideTableHeaders", vSwitch)
+	cmd := fmt.Sprintf("Get-VMSwitch -ComputerName $(hostname) -Name %s | Select-Object -Property SoftwareRscEnabled | Format-Table -HideTableHeaders", vSwitch)
 	stdout, err := ps.RunCommand(cmd)
 	if err != nil {
 		return err
@@ -400,42 +509,13 @@ func EnableRSCOnVSwitch(vSwitch string) error {
 		klog.Infof("Receive Segment Coalescing (RSC) for vSwitch %s is already enabled", vSwitch)
 		return nil
 	}
-	cmd = fmt.Sprintf("Set-VMSwitch -Name %s -EnableSoftwareRsc $True", vSwitch)
+	cmd = fmt.Sprintf("Set-VMSwitch -ComputerName $(hostname) -Name %s -EnableSoftwareRsc $True", vSwitch)
 	_, err = ps.RunCommand(cmd)
 	if err != nil {
 		return err
 	}
 	klog.Infof("Enabled Receive Segment Coalescing (RSC) for vSwitch %s", vSwitch)
 	return nil
-}
-
-func enableHNSOnOVS(hnsNet *hcsshim.HNSNetwork) error {
-	// Release OS management for HNS Network if Hyper-V is enabled.
-	hypervEnabled, err := WindowsHyperVEnabled()
-	if err != nil {
-		return err
-	}
-	if hypervEnabled {
-		if err := RemoveManagementInterface(LocalHNSNetwork); err != nil {
-			klog.Errorf("Failed to remove the interface managed by OS for HNSNetwork %s", LocalHNSNetwork)
-			return err
-		}
-	}
-
-	// Enable the HNS Network with OVS extension.
-	if err := EnableHNSNetworkExtension(hnsNet.Id, OVSExtensionID); err != nil {
-		return err
-	}
-	return err
-}
-
-// GetLocalBroadcastIP returns the last IP address in a subnet. This IP is always working as the broadcast address in
-// the subnet on Windows, and an active route entry that uses it as the destination is added by default when a new IP is
-// configured on the interface.
-func GetLocalBroadcastIP(ipNet *net.IPNet) net.IP {
-	lastAddr := make(net.IP, len(ipNet.IP.To4()))
-	binary.BigEndian.PutUint32(lastAddr, binary.BigEndian.Uint32(ipNet.IP.To4())|^binary.BigEndian.Uint32(net.IP(ipNet.Mask).To4()))
-	return lastAddr
 }
 
 // GetDefaultGatewayByInterfaceIndex returns the default gateway configured on the specified interface.
@@ -463,7 +543,7 @@ func GetDNServersByInterfaceIndex(ifIndex int) (string, error) {
 
 // SetAdapterDNSServers configures DNSServers on network adapter.
 func SetAdapterDNSServers(adapterName, dnsServers string) error {
-	cmd := fmt.Sprintf("Set-DnsClientServerAddress -InterfaceAlias %s -ServerAddresses %s", adapterName, dnsServers)
+	cmd := fmt.Sprintf(`Set-DnsClientServerAddress -InterfaceAlias "%s" -ServerAddresses "%s"`, adapterName, dnsServers)
 	if _, err := ps.RunCommand(cmd); err != nil {
 		return err
 	}
@@ -523,14 +603,45 @@ func NewNetRoute(route *Route) error {
 }
 
 func RemoveNetRoute(route *Route) error {
-	cmd := fmt.Sprintf("Remove-NetRoute -InterfaceIndex %v -DestinationPrefix %v -NextHop  %v -Verbose -Confirm:$false",
-		route.LinkIndex, route.DestinationSubnet.String(), route.GatewayAddress.String())
+	cmd := fmt.Sprintf("Remove-NetRoute -InterfaceIndex %v -DestinationPrefix %v -Verbose -Confirm:$false",
+		route.LinkIndex, route.DestinationSubnet.String())
 	_, err := ps.RunCommand(cmd)
 	return err
 }
 
+func ReplaceNetRoute(route *Route) error {
+	rs, err := GetNetRoutes(route.LinkIndex, route.DestinationSubnet)
+	if err != nil {
+		return err
+	}
+
+	if len(rs) == 0 {
+		if err := NewNetRoute(route); err != nil {
+			return err
+		}
+		return nil
+	}
+	found := false
+	for _, r := range rs {
+		if r.GatewayAddress.Equal(route.GatewayAddress) {
+			found = true
+			break
+		}
+	}
+	if found {
+		return nil
+	}
+	if err := RemoveNetRoute(route); err != nil {
+		return err
+	}
+	if err := NewNetRoute(route); err != nil {
+		return err
+	}
+	return nil
+}
+
 func GetNetRoutes(linkIndex int, dstSubnet *net.IPNet) ([]Route, error) {
-	cmd := fmt.Sprintf("Get-NetRoute -InterfaceIndex %d -DestinationPrefix %s -erroraction Ignore | Format-Table -HideTableHeaders",
+	cmd := fmt.Sprintf("Get-NetRoute -InterfaceIndex %d -DestinationPrefix %s -ErrorAction Ignore | Format-Table -HideTableHeaders",
 		linkIndex, dstSubnet.String())
 	return getNetRoutes(cmd)
 }
@@ -542,23 +653,9 @@ func GetNetRoutesAll() ([]Route, error) {
 
 func getNetRoutes(cmd string) ([]Route, error) {
 	routesStr, _ := ps.RunCommand(cmd)
-	routes, err := parseRoutes(routesStr)
-	if err != nil {
-		return nil, err
-	}
-	return routes, nil
-}
-
-func parseRoutes(routesStr string) ([]Route, error) {
-	scanner := bufio.NewScanner(strings.NewReader(routesStr))
+	parsed := parseGetNetCmdResult(routesStr, 6)
 	var routes []Route
-	for scanner.Scan() {
-		items := strings.Fields(scanner.Text())
-		if len(items) < 6 {
-			// Skip if an empty line or something similar
-			continue
-		}
-
+	for _, items := range parsed {
 		idx, err := strconv.Atoi(items[0])
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse the LinkIndex '%s': %v", items[0], err)
@@ -583,8 +680,21 @@ func parseRoutes(routesStr string) ([]Route, error) {
 	return routes, nil
 }
 
-func CreateNetNatOnHost(subnetCIDR *net.IPNet) error {
-	netNatName := "antrea-nat"
+func parseGetNetCmdResult(result string, itemNum int) [][]string {
+	scanner := bufio.NewScanner(strings.NewReader(result))
+	parsed := [][]string{}
+	for scanner.Scan() {
+		items := strings.Fields(scanner.Text())
+		if len(items) < itemNum {
+			// Skip if an empty line or something similar
+			continue
+		}
+		parsed = append(parsed, items)
+	}
+	return parsed
+}
+
+func NewNetNat(netNatName string, subnetCIDR *net.IPNet) error {
 	cmd := fmt.Sprintf(`Get-NetNat -Name %s | Select-Object InternalIPInterfaceAddressPrefix | Format-Table -HideTableHeaders`, netNatName)
 	if internalNet, err := ps.RunCommand(cmd); err != nil {
 		if !strings.Contains(err.Error(), "No MSFT_NetNat objects found") {
@@ -596,7 +706,7 @@ func CreateNetNatOnHost(subnetCIDR *net.IPNet) error {
 			return nil
 		}
 		klog.InfoS("Removing the existing netnat", "name", netNatName, "internalIPInterfaceAddressPrefix", internalNet)
-		cmd = fmt.Sprintf("Remove-NetNat -Name %s", netNatName)
+		cmd = fmt.Sprintf("Remove-NetNat -Name %s -Confirm:$false", netNatName)
 		if _, err := ps.RunCommand(cmd); err != nil {
 			klog.ErrorS(err, "Failed to remove the existing netnat", "name", netNatName, "internalIPInterfaceAddressPrefix", internalNet)
 			return err
@@ -609,4 +719,430 @@ func CreateNetNatOnHost(subnetCIDR *net.IPNet) error {
 		return err
 	}
 	return nil
+}
+
+func ReplaceNetNatStaticMapping(netNatName string, externalIPAddr string, externalPort uint16, internalIPAddr string, internalPort uint16, proto string) error {
+	staticMappingStr, err := GetNetNatStaticMapping(netNatName, externalIPAddr, externalPort, proto)
+	if err != nil {
+		return err
+	}
+	parsed := parseGetNetCmdResult(staticMappingStr, 6)
+	if len(parsed) > 0 {
+		items := parsed[0]
+		if items[4] == internalIPAddr && items[5] == strconv.Itoa(int(internalPort)) {
+			return nil
+		}
+		firstCol := strings.Split(items[0], ";")
+		id, err := strconv.Atoi(firstCol[1])
+		if err != nil {
+			return err
+		}
+		if err := RemoveNetNatStaticMappingByID(netNatName, id); err != nil {
+			return err
+		}
+	}
+	return AddNetNatStaticMapping(netNatName, externalIPAddr, externalPort, internalIPAddr, internalPort, proto)
+}
+
+// GetNetNatStaticMapping checks if a NetNatStaticMapping exists.
+func GetNetNatStaticMapping(netNatName string, externalIPAddr string, externalPort uint16, proto string) (string, error) {
+	cmd := fmt.Sprintf("Get-NetNatStaticMapping -NatName %s", netNatName) +
+		fmt.Sprintf("|? ExternalIPAddress -EQ %s", externalIPAddr) +
+		fmt.Sprintf("|? ExternalPort -EQ %d", externalPort) +
+		fmt.Sprintf("|? Protocol -EQ %s", proto) +
+		"| Format-Table -HideTableHeaders"
+	staticMappingStr, err := ps.RunCommand(cmd)
+	if err != nil && !strings.Contains(err.Error(), "No MSFT_NetNatStaticMapping objects found") {
+		return "", err
+	}
+	return staticMappingStr, nil
+}
+
+// AddNetNatStaticMapping adds a static mapping to a NAT instance.
+func AddNetNatStaticMapping(netNatName string, externalIPAddr string, externalPort uint16, internalIPAddr string, internalPort uint16, proto string) error {
+	cmd := fmt.Sprintf("Add-NetNatStaticMapping -NatName %s -ExternalIPAddress %s -ExternalPort %d -InternalIPAddress %s -InternalPort %d -Protocol %s",
+		netNatName, externalIPAddr, externalPort, internalIPAddr, internalPort, proto)
+	_, err := ps.RunCommand(cmd)
+	return err
+}
+
+func RemoveNetNatStaticMapping(netNatName string, externalIPAddr string, externalPort uint16, proto string) error {
+	staticMappingStr, err := GetNetNatStaticMapping(netNatName, externalIPAddr, externalPort, proto)
+	if err != nil {
+		return err
+	}
+	parsed := parseGetNetCmdResult(staticMappingStr, 6)
+	if len(parsed) == 0 {
+		return nil
+	}
+
+	firstCol := strings.Split(parsed[0][0], ";")
+	id, err := strconv.Atoi(firstCol[1])
+	if err != nil {
+		return err
+	}
+	return RemoveNetNatStaticMappingByID(netNatName, id)
+}
+
+func RemoveNetNatStaticMappingByID(netNatName string, id int) error {
+	cmd := fmt.Sprintf("Remove-NetNatStaticMapping -NatName %s -StaticMappingID %d -Confirm:$false", netNatName, id)
+	_, err := ps.RunCommand(cmd)
+	return err
+}
+
+// GetNetNeighbor gets neighbor cache entries with Get-NetNeighbor.
+func GetNetNeighbor(neighbor *Neighbor) ([]Neighbor, error) {
+	cmd := fmt.Sprintf("Get-NetNeighbor -InterfaceIndex %d -IPAddress %s | Format-Table -HideTableHeaders", neighbor.LinkIndex, neighbor.IPAddress.String())
+	neighborsStr, err := ps.RunCommand(cmd)
+	if err != nil && !strings.Contains(err.Error(), "No matching MSFT_NetNeighbor objects") {
+		return nil, err
+	}
+
+	parsed := parseGetNetCmdResult(neighborsStr, 5)
+	var neighbors []Neighbor
+	for _, items := range parsed {
+		idx, err := strconv.Atoi(items[0])
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse the LinkIndex '%s': %v", items[0], err)
+		}
+		dstIP := net.ParseIP(items[1])
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse the DestinationIP '%s': %v", items[1], err)
+		}
+		// Get-NetRoute returns LinkLayerAddress like "AA-BB-CC-DD-EE-FF".
+		mac, err := net.ParseMAC(strings.ReplaceAll(items[2], "-", ":"))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse the Gateway MAC '%s': %v", items[2], err)
+		}
+		neighbor := Neighbor{
+			LinkIndex:        idx,
+			IPAddress:        dstIP,
+			LinkLayerAddress: mac,
+			State:            items[3],
+		}
+		neighbors = append(neighbors, neighbor)
+	}
+	return neighbors, nil
+}
+
+// NewNetNeighbor creates a new neighbor cache entry with New-NetNeighbor.
+func NewNetNeighbor(neighbor *Neighbor) error {
+	cmd := fmt.Sprintf("New-NetNeighbor -InterfaceIndex %d -IPAddress %s -LinkLayerAddress %s -State Permanent",
+		neighbor.LinkIndex, neighbor.IPAddress, neighbor.LinkLayerAddress)
+	_, err := ps.RunCommand(cmd)
+	return err
+}
+
+func RemoveNetNeighbor(neighbor *Neighbor) error {
+	cmd := fmt.Sprintf("Remove-NetNeighbor -InterfaceIndex %d -IPAddress %s -Confirm:$false",
+		neighbor.LinkIndex, neighbor.IPAddress)
+	_, err := ps.RunCommand(cmd)
+	return err
+}
+
+func ReplaceNetNeighbor(neighbor *Neighbor) error {
+	neighbors, err := GetNetNeighbor(neighbor)
+	if err != nil {
+		return err
+	}
+
+	if len(neighbors) == 0 {
+		if err := NewNetNeighbor(neighbor); err != nil {
+			return err
+		}
+		return nil
+	}
+	for _, n := range neighbors {
+		if n.LinkLayerAddress.String() == neighbor.LinkLayerAddress.String() && n.State == neighbor.State {
+			return nil
+		}
+	}
+	if err := RemoveNetNeighbor(neighbor); err != nil {
+		return err
+	}
+	return NewNetNeighbor(neighbor)
+}
+
+func VirtualAdapterName(name string) string {
+	return fmt.Sprintf("%s (%s)", ContainerVNICPrefix, name)
+}
+
+func MoveIFConfigurations(ips []*net.IPNet, routes []interface{}, mac net.HardwareAddr, mtu int, from string, to string) error {
+	toInterface, err := getAdapterByName(to)
+	if err != nil {
+		return err
+	}
+	isVirtual, err := IsVirtualAdapter(toInterface.Name)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get adapter", "ifName", toInterface.Name)
+		return err
+	}
+	if isVirtual {
+		// Enable the host interface after it is created by OVS.
+		if err := EnableHostInterface(toInterface.Name); err != nil {
+			klog.ErrorS(err, "Failed to enable interface", "ifName", toInterface.Name)
+			return err
+		}
+		// Update the host interface MAC address with uplink's.
+		if err := SetAdapterMACAddress(toInterface.Name, &mac); err != nil {
+			klog.ErrorS(err, "Failed to set mac address on interface", "ifName", toInterface.Name)
+			return err
+		}
+	}
+	// Copy the uplink interface's IP to the host interface.
+	if err := ConfigureLinkAddresses(toInterface.Index, ips); err != nil {
+		klog.ErrorS(err, "Failed to configure link address", "ifName", toInterface.Name)
+		return err
+	}
+	// Copy the uplink interface's Route to the host interface.
+	for _, route := range routes {
+		rt := route.(Route)
+		newRt := Route{
+			LinkIndex:         toInterface.Index,
+			DestinationSubnet: rt.DestinationSubnet,
+			GatewayAddress:    rt.GatewayAddress,
+			RouteMetric:       rt.RouteMetric,
+		}
+		if err := ReplaceNetRoute(&newRt); err != nil {
+			klog.ErrorS(err, "Failed to update route", "ifName", toInterface.Name)
+			return err
+		}
+	}
+	if !isVirtual {
+		// Remove the uplink interface from VMSwitch team members.
+		return delUplinkOnSwitch(LocalVMSwitch, toInterface.Name)
+	}
+	return nil
+}
+
+func GetNetRoutesOnAdapter(linkIndex int) (string, []interface{}, error) {
+	var gw string
+	cmd := fmt.Sprintf("Get-NetRoute -InterfaceIndex %d -ErrorAction Ignore | Format-Table -HideTableHeaders", linkIndex)
+	rs, err := getNetRoutes(cmd)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get routes")
+		return "", nil, err
+	}
+	var routes []interface{}
+	for _, r := range rs {
+		// Skip the routes automatically generated by Windows host when adding IP address on the network adapter,
+		if r.GatewayAddress != nil && r.GatewayAddress.IsUnspecified() {
+			continue
+		}
+		routes = append(routes, r)
+	}
+	return gw, routes, nil
+}
+
+// Returns the interface name for the default route.
+func GetInterfaceNameByDefaultRoute() (string, error) {
+	cmd := fmt.Sprintf(`Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Select-Object -ExpandProperty "InterfaceAlias"`)
+	out, err := ps.RunCommand(cmd)
+	if err != nil {
+		return "", err
+	}
+	out = strings.TrimSpace(out)
+	return out, err
+}
+
+func renameHostInterface(oriName string, newName string) error {
+	cmd := fmt.Sprintf(`Get-NetAdapter -Name "%s" | Rename-NetAdapter -NewName "%s"`, oriName, newName)
+	_, err := ps.RunCommand(cmd)
+	if err != nil {
+		klog.InfoS("Failed to rename adapter", "oriName", oriName, "error", err.Error())
+	}
+	return err
+}
+
+func GetVMSwitchInterfaceName() (string, error) {
+	cmd := fmt.Sprintf(`Get-VMSwitchTeam -Name "%s" | select  NetAdapterInterfaceDescription |  Format-Table -HideTableHeaders`, LocalVMSwitch)
+	out, err := ps.RunCommand(cmd)
+	if err != nil {
+		klog.ErrorS(err, "Failed to find switch with teaming enable.d", "switch", LocalVMSwitch)
+		return "", err
+	}
+	out = strings.TrimSpace(out)
+	// {Amazon Elastic Network Adapter #2} remove flower brackets
+	out = out[1 : len(out)-1]
+	cmd = fmt.Sprintf(`Get-NetAdapter -InterfaceDescription "%s" | select Name | Format-Table -HideTableHeaders`, out)
+	out, err = ps.RunCommand(cmd)
+	if err != nil {
+		klog.ErrorS(err, "Failed to find adapter", "InterfaceDescription", out)
+		return "", err
+	}
+	out = strings.TrimSpace(out)
+	return out, err
+}
+
+func VmSwitchExists() (bool, error) {
+	cmd := fmt.Sprintf(`Get-VMSwitch -Name "%s" -ComputerName $(hostname)`, LocalVMSwitch)
+	_, err := ps.RunCommand(cmd)
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(err.Error(), fmt.Sprintf(`unable to find a virtual switch with name "%s"`, LocalVMSwitch)) {
+		return false, nil
+	}
+	return false, err
+}
+
+// This function creates a virtual switch and enables openvswitch extension.
+// If switch exists and extension is enabled, then it will return with no error.
+// Other it will throw an error.
+
+// Case: Multiple interface
+// Case: If managed interface is changed across reboot/restart.
+// Example: Ethernet is initially managed by antrea, later user updates
+// externalentity to use Ethernet1. In this case, older configuration
+// needs to be deleted, i.e. delete older switch and create new switch
+// with new interface. These cases should be handled as part of
+// external entitity reconcilation
+
+func CreateVmSwitch(ifName string) error {
+	exists, err := VmSwitchExists()
+	if err != nil {
+		klog.ErrorS(err, "Failed to get VMSwitch")
+		return err
+	}
+	if !exists {
+		err := createVMSwitchWithTeaming(LocalVMSwitch, ifName)
+		if err != nil {
+			klog.ErrorS(err, "Failed to create VMSwitch")
+			return err
+		}
+		klog.InfoS("New VMSwitch created", "switch", LocalVMSwitch)
+	}
+
+	enabled, err := isOVSExtensionEnabled()
+	if err != nil {
+		klog.ErrorS(err, "Failed to find ovs extension")
+		return err
+	}
+	if !enabled {
+		klog.InfoS("Enabling Open vSwitch Extension", "switch", LocalVMSwitch)
+		err := enableOVSExtension()
+		if err != nil {
+			klog.ErrorS(err, "Failed to enable OVS extension on switch", "switch", LocalVMSwitch)
+			return err
+		}
+	}
+	return nil
+}
+
+func RemoveVmSwitch() (bool, error) {
+	exists, err := VmSwitchExists()
+	if exists {
+		cmd := fmt.Sprintf(`Remove-VMSwitch -Name "%s" -ComputerName $(hostname)`, LocalVMSwitch)
+		_, err := ps.RunCommand(cmd)
+		if err == nil {
+			return true, nil
+		}
+		if strings.Contains(err.Error(), fmt.Sprintf(`unable to find a virtual switch with name "%s"`, LocalVMSwitch)) {
+			return false, nil
+		}
+	}
+	return false, err
+}
+
+func getAdapterByName(ifName string) (*net.Interface, error) {
+	var adapter *net.Interface
+	var err error
+	adapter, err = net.InterfaceByName(ifName)
+	if err == nil {
+		return adapter, nil
+	}
+	if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "no such network interface" {
+		klog.ErrorS(err, "Failed to find network adapter", "ifName", ifName)
+	} else {
+		return nil, err
+	}
+	return nil, err
+}
+
+func delUplinkOnSwitch(switchName, ifName string) error {
+	cmd := fmt.Sprintf(`Get-VMSwitch -Name "%s" -ComputerName $(hostname)| remove-VMSwitchTeamMember -NetAdapterName "%s" -ComputerName $(hostname)`, switchName, ifName)
+	_, err := ps.RunCommand(cmd)
+	return err
+}
+
+// Creating switch with teaming, connection to vm is lost for few seconds
+// Enables ovs extension as well, to be called only once for a VM
+func createVMSwitchWithTeaming(switchName, ifName string) error {
+	cmd := fmt.Sprintf(`New-VMSwitch -Name "%s" -NetAdapterName "%s" -EnableEmbeddedTeaming $true -AllowManagementOS $true -ComputerName $(hostname)| Enable-VMSwitchExtension "Open vSwitch Extension"`, switchName, ifName)
+	cmdOut, err := ps.RunCommand(cmd)
+	klog.V(2).InfoS("New-VmSwitch created", "output", cmdOut)
+	return err
+}
+
+func enableOVSExtension() error {
+	cmd := fmt.Sprintf(`Get-VMSwitch -Name "%s" -ComputerName $(hostname)| Enable-VMSwitchExtension "Open vSwitch Extension"`, LocalVMSwitch)
+	_, err := ps.RunCommand(cmd)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+/*
+Id                  : 583CC151-73EC-4A6A-8B47-578297AD7623
+Name                : Open vSwitch Extension
+Vendor              : The Linux Foundation (R)
+Version             : 2.14.1.41988
+ExtensionType       : Forwarding
+ParentExtensionId   :
+ParentExtensionName :
+SwitchId            : 1cb724fe-0c01-42f2-a0e3-a1995676644a
+SwitchName          : sw-int
+Enabled             : False
+Running             : True
+CimSession          : CimSession: .
+ComputerName        : WIN2019
+IsDeleted           : False
+*/
+func parseOVSExtensionOutput(s string) bool {
+	scanner := bufio.NewScanner(strings.NewReader(s))
+	var forwardingExtension = false
+	for scanner.Scan() {
+		temp := strings.Fields(scanner.Text())
+		line := strings.Join(temp, "")
+		if strings.Contains(line, "Name") {
+			if strings.Contains(line, "OpenvSwitchExtension") {
+				klog.V(2).InfoS("Open vSwitch Extension is installed")
+				forwardingExtension = true
+			}
+		}
+		if forwardingExtension && strings.Contains(line, "Enabled") {
+			if strings.Contains(line, "True") {
+				klog.InfoS("Open vSwitch Extension is enabled")
+				return true
+			}
+			klog.InfoS("Open vSwitch Extension is disabled")
+			return false
+		}
+	}
+	return false
+}
+
+func isOVSExtensionEnabled() (bool, error) {
+	cmd := fmt.Sprintf(`Get-VMSwitchExtension -VMSwitchName "%s" -ComputerName $(hostname)`, LocalVMSwitch)
+	cmdOutput, err := ps.RunCommand(cmd)
+	if err == nil {
+		if strings.Contains(cmdOutput, "Open vSwitch Extension") {
+			ok := parseOVSExtensionOutput(cmdOutput)
+			if !ok {
+				return false, nil
+			} else {
+				return true, nil
+			}
+		} else {
+			klog.ErrorS(err, "Open vSwitch Extension driver is not installed")
+			return false, err
+		}
+
+	}
+	// Catch all the failures here and return appropriate message
+	if strings.Contains(err.Error(), fmt.Sprintf(`unable to find a virtual switch with name "%s"`, LocalVMSwitch)) {
+		return false, err
+	}
+	return false, err
 }

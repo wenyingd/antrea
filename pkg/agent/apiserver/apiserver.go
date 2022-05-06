@@ -84,10 +84,10 @@ func installHandlers(aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolic
 	s.Handler.NonGoRestfulMux.HandleFunc("/ovstracing", ovstracing.HandleFunc(aq))
 }
 
-func installAPIGroup(s *genericapiserver.GenericAPIServer, aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier) error {
+func installAPIGroup(s *genericapiserver.GenericAPIServer, aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier, v4Enabled, v6Enabled bool) error {
 	systemGroup := genericapiserver.NewDefaultAPIGroupInfo(systemv1beta1.GroupName, scheme, metav1.ParameterCodec, codecs)
 	systemStorage := map[string]rest.Storage{}
-	supportBundleStorage := supportbundle.NewAgentStorage(ovsctl.NewClient(aq.GetNodeConfig().OVSBridge), aq, npq)
+	supportBundleStorage := supportbundle.NewAgentStorage(ovsctl.NewClient(aq.GetNodeConfig().OVSBridge), aq, npq, v4Enabled, v6Enabled)
 	systemStorage["supportbundles"] = supportBundleStorage.SupportBundle
 	systemStorage["supportbundles/download"] = supportBundleStorage.Download
 	systemGroup.VersionedResourcesStorageMap["v1beta1"] = systemStorage
@@ -95,9 +95,9 @@ func installAPIGroup(s *genericapiserver.GenericAPIServer, aq agentquerier.Agent
 }
 
 // New creates an APIServer for running in antrea agent.
-func New(aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier, bindPort int,
-	enableMetrics bool, kubeconfig string, cipherSuites []uint16, tlsMinVersion uint16) (*agentAPIServer, error) {
-	cfg, err := newConfig(npq, bindPort, enableMetrics, kubeconfig)
+func New(aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier, bindAddress net.IP, bindPort int,
+	enableMetrics bool, kubeconfig string, cipherSuites []uint16, tlsMinVersion uint16, v4Enabled, v6Enabled bool) (*agentAPIServer, error) {
+	cfg, err := newConfig(npq, bindAddress, bindPort, enableMetrics, kubeconfig)
 	if err != nil {
 		return nil, err
 	}
@@ -107,19 +107,19 @@ func New(aq agentquerier.AgentQuerier, npq querier.AgentNetworkPolicyInfoQuerier
 	}
 	s.SecureServingInfo.CipherSuites = cipherSuites
 	s.SecureServingInfo.MinTLSVersion = tlsMinVersion
-	if err := installAPIGroup(s, aq, npq); err != nil {
+	if err := installAPIGroup(s, aq, npq, v4Enabled, v6Enabled); err != nil {
 		return nil, err
 	}
 	installHandlers(aq, npq, s)
 	return &agentAPIServer{GenericAPIServer: s}, nil
 }
 
-func newConfig(npq querier.AgentNetworkPolicyInfoQuerier, bindPort int, enableMetrics bool, kubeconfig string) (*genericapiserver.CompletedConfig, error) {
+func newConfig(npq querier.AgentNetworkPolicyInfoQuerier, bindAddress net.IP, bindPort int, enableMetrics bool, kubeconfig string) (*genericapiserver.CompletedConfig, error) {
 	secureServing := genericoptions.NewSecureServingOptions().WithLoopback()
 	authentication := genericoptions.NewDelegatingAuthenticationOptions()
 	authorization := genericoptions.NewDelegatingAuthorizationOptions().WithAlwaysAllowPaths("/healthz", "/livez", "/readyz")
 
-	// kubeconfig file is useful when antrea-agent isn't not running as a pod
+	// kubeconfig file is useful when antrea-agent isn't running as a Pod.
 	if len(kubeconfig) > 0 {
 		authentication.RemoteKubeConfigFile = kubeconfig
 		authorization.RemoteKubeConfigFile = kubeconfig
@@ -128,7 +128,7 @@ func newConfig(npq querier.AgentNetworkPolicyInfoQuerier, bindPort int, enableMe
 	// Set the PairName but leave certificate directory blank to generate in-memory by default.
 	secureServing.ServerCert.CertDirectory = ""
 	secureServing.ServerCert.PairName = Name
-	secureServing.BindAddress = net.IPv4zero
+	secureServing.BindAddress = bindAddress
 	secureServing.BindPort = bindPort
 
 	if err := secureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback}); err != nil {

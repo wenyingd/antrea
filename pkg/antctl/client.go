@@ -32,6 +32,7 @@ import (
 	"antrea.io/antrea/pkg/antctl/runtime"
 	"antrea.io/antrea/pkg/apis"
 	controllerapiserver "antrea.io/antrea/pkg/apiserver"
+	flowaggregatorapiserver "antrea.io/antrea/pkg/flowaggregator/apiserver"
 )
 
 // requestOption describes options to issue requests.
@@ -70,12 +71,9 @@ func newClient(codec serializer.CodecFactory) AntctlClient {
 // It will return error if the stating of the file failed or the kubeconfig is malformed.
 // If the default kubeconfig not exists, it will try to use an in-cluster config.
 func (c *client) resolveKubeconfig(opt *requestOption) (*rest.Config, error) {
-	kubeconfig, err := runtime.ResolveKubeconfig(opt.kubeconfig)
-	if err != nil {
-		return nil, err
-	}
-	kubeconfig.NegotiatedSerializer = c.codec
+	var kubeconfig *rest.Config
 	if runtime.InPod {
+		kubeconfig = &rest.Config{}
 		kubeconfig.Insecure = true
 		kubeconfig.CAFile = ""
 		kubeconfig.CAData = nil
@@ -85,8 +83,17 @@ func (c *client) resolveKubeconfig(opt *requestOption) (*rest.Config, error) {
 		} else if runtime.Mode == runtime.ModeController {
 			kubeconfig.Host = net.JoinHostPort("127.0.0.1", fmt.Sprint(apis.AntreaControllerAPIPort))
 			kubeconfig.BearerTokenFile = controllerapiserver.TokenPath
+		} else if runtime.Mode == runtime.ModeFlowAggregator {
+			kubeconfig.Host = net.JoinHostPort("127.0.0.1", fmt.Sprint(apis.FlowAggregatorAPIPort))
+			kubeconfig.BearerTokenFile = flowaggregatorapiserver.TokenPath
+		}
+	} else {
+		var err error
+		if kubeconfig, err = runtime.ResolveKubeconfig(opt.kubeconfig); err != nil {
+			return nil, err
 		}
 	}
+	kubeconfig.NegotiatedSerializer = c.codec
 	return kubeconfig, nil
 }
 
@@ -94,6 +101,8 @@ func (c *client) request(opt *requestOption) (io.Reader, error) {
 	var e *endpoint
 	if runtime.Mode == runtime.ModeAgent {
 		e = opt.commandDefinition.agentEndpoint
+	} else if runtime.Mode == runtime.ModeFlowAggregator {
+		e = opt.commandDefinition.flowAggregatorEndpoint
 	} else {
 		e = opt.commandDefinition.controllerEndpoint
 	}

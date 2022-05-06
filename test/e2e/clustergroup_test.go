@@ -17,8 +17,10 @@ package e2e
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
@@ -94,7 +96,7 @@ func testInvalidCGServiceRefWithPodSelector(t *testing.T) {
 	invalidErr := fmt.Errorf("clustergroup created with serviceReference and podSelector")
 	cgName := "svcref-pod-selector"
 	pSel := &metav1.LabelSelector{MatchLabels: map[string]string{"pod": "x"}}
-	svcRef := &crdv1alpha3.ServiceReference{
+	svcRef := &crdv1alpha1.NamespacedName{
 		Namespace: "y",
 		Name:      "test-svc",
 	}
@@ -117,7 +119,7 @@ func testInvalidCGServiceRefWithNSSelector(t *testing.T) {
 	invalidErr := fmt.Errorf("clustergroup created with serviceReference and namespaceSelector")
 	cgName := "svcref-ns-selector"
 	nSel := &metav1.LabelSelector{MatchLabels: map[string]string{"ns": "y"}}
-	svcRef := &crdv1alpha3.ServiceReference{
+	svcRef := &crdv1alpha1.NamespacedName{
 		Namespace: "y",
 		Name:      "test-svc",
 	}
@@ -141,7 +143,7 @@ func testInvalidCGServiceRefWithIPBlock(t *testing.T) {
 	cgName := "ipb-svcref"
 	cidr := "10.0.0.10/32"
 	ipb := []crdv1alpha1.IPBlock{{CIDR: cidr}}
-	svcRef := &crdv1alpha3.ServiceReference{
+	svcRef := &crdv1alpha1.NamespacedName{
 		Namespace: "y",
 		Name:      "test-svc",
 	}
@@ -204,7 +206,7 @@ func testInvalidCGChildGroupWithPodSelector(t *testing.T) {
 func testInvalidCGChildGroupWithServiceReference(t *testing.T) {
 	invalidErr := fmt.Errorf("clustergroup created with childGroups and ServiceReference")
 	cgName := "child-group-svcref"
-	svcRef := &crdv1alpha3.ServiceReference{
+	svcRef := &crdv1alpha1.NamespacedName{
 		Namespace: "y",
 		Name:      "test-svc",
 	}
@@ -266,6 +268,71 @@ func testInvalidCGMaxNestedLevel(t *testing.T) {
 	if err := k8sUtils.DeleteV1Alpha3CG(cgName2); err != nil {
 		failOnError(err, t)
 	}
+}
+
+func getRealizationStatus(cg *crdv1alpha3.ClusterGroup) v1.ConditionStatus {
+	conds := cg.Status.Conditions
+	for _, cond := range conds {
+		if cond.Type == crdv1alpha3.GroupMembersComputed && cond.Status == v1.ConditionTrue {
+			return v1.ConditionTrue
+		}
+	}
+	return v1.ConditionFalse
+}
+
+func testClusterGroupRealizationStatus(t *testing.T) {
+	invalidErr1 := fmt.Errorf("clustergroup with child groups should only be considered realized when all its child groups are realized")
+	invalidErr2 := fmt.Errorf("clustergroup with selectors or serviceRef should be realized once processed")
+	childCG1Returned, _ := k8sUtils.GetV1Alpha3CG(testChildCGName)
+	// test-child-cg should be considered realized as soon as its synced.
+	if getRealizationStatus(childCG1Returned) != v1.ConditionTrue {
+		failOnError(invalidErr2, t)
+	}
+	cgParent := &crdv1alpha3.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent-cg"},
+		Spec: crdv1alpha3.GroupSpec{
+			ChildGroups: []crdv1alpha3.ClusterGroupReference{
+				crdv1alpha3.ClusterGroupReference(testChildCGName),
+				crdv1alpha3.ClusterGroupReference("child-cg-2"),
+			},
+		},
+	}
+	if _, err := k8sUtils.CreateOrUpdateV1Alpha3CG(cgParent); err != nil {
+		// Above creation of CG must succeed as it is a valid spec.
+		failOnError(err, t)
+	}
+	time.Sleep(networkPolicyDelay / 2)
+	cgParentReturned, _ := k8sUtils.GetV1Alpha3CG("parent-cg")
+	// cgParent should not be considered realized yet since child-cg-2 is not yet created.
+	if getRealizationStatus(cgParentReturned) != v1.ConditionFalse {
+		failOnError(invalidErr1, t)
+	}
+	cgChild2 := &crdv1alpha3.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child-cg-2",
+		},
+		Spec: crdv1alpha3.GroupSpec{
+			IPBlocks: []crdv1alpha1.IPBlock{
+				{CIDR: "192.168.2.0/24"},
+			},
+		},
+	}
+	if _, err := k8sUtils.CreateOrUpdateV1Alpha3CG(cgChild2); err != nil {
+		// Above creation of CG must succeed as it is a valid spec.
+		failOnError(err, t)
+	}
+	time.Sleep(networkPolicyDelay / 2)
+	childCG2Returned, _ := k8sUtils.GetV1Alpha3CG("child-cg-2")
+	// child-cg-2 should be considered realized as soon as its synced.
+	if getRealizationStatus(childCG2Returned) != v1.ConditionTrue {
+		failOnError(invalidErr2, t)
+	}
+	cgParentReturned, _ = k8sUtils.GetV1Alpha3CG("parent-cg")
+	// cgParent should now be considered realized.
+	if getRealizationStatus(cgParentReturned) != v1.ConditionTrue {
+		failOnError(invalidErr1, t)
+	}
+
 }
 
 func testClusterGroupConversionV1A2AndV1A3(t *testing.T) {
@@ -337,6 +404,7 @@ func TestClusterGroup(t *testing.T) {
 		t.Run("Case=ChildGroupWithPodSelectorDenied", func(t *testing.T) { testInvalidCGChildGroupWithPodSelector(t) })
 		t.Run("Case=ChildGroupWithPodServiceReferenceDenied", func(t *testing.T) { testInvalidCGChildGroupWithServiceReference(t) })
 		t.Run("Case=ChildGroupExceedMaxNestedLevel", func(t *testing.T) { testInvalidCGMaxNestedLevel(t) })
+		t.Run("Case=ClusterGroupRealizationStatusWithChildGroups", func(t *testing.T) { testClusterGroupRealizationStatus(t) })
 		cleanupChildCGForTest(t)
 	})
 	t.Run("TestGroupClusterGroupConversion", func(t *testing.T) {

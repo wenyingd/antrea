@@ -77,14 +77,6 @@ type ExternalEntityList struct {
 	Items []ExternalEntity `json:"items,omitempty"`
 }
 
-// ServiceReference represent reference to a v1.Service.
-type ServiceReference struct {
-	// Name of the Service
-	Name string `json:"name,omitempty"`
-	// Namespace of the Service
-	Namespace string `json:"namespace,omitempty"`
-}
-
 // ClusterGroupReference represent reference to a ClusterGroup.
 type ClusterGroupReference string
 
@@ -131,7 +123,7 @@ type GroupSpec struct {
 	// Select backend Pods of the referred Service.
 	// Cannot be set with any other selector or ipBlock.
 	// +optional
-	ServiceReference *ServiceReference `json:"serviceReference,omitempty"`
+	ServiceReference *v1alpha1.NamespacedName `json:"serviceReference,omitempty"`
 	// Select ExternalEntities from all Namespaces as workloads
 	// in AppliedTo/To/From fields. If set with NamespaceSelector,
 	// ExternalEntities are matched from Namespaces matched by the
@@ -292,4 +284,108 @@ type ExternalIPPoolList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 
 	Items []ExternalIPPool `json:"items"`
+}
+
+// +genclient
+// +genclient:nonNamespaced
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// IPPool defines one or multiple IP sets that can be used for flexible IPAM feature. For instance, the IPs can be
+// allocated to Pods according to IP pool specified in Deployment annotation.
+type IPPool struct {
+	metav1.TypeMeta `json:",inline"`
+	// Standard metadata of the object.
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	// Specification of the IPPool.
+	Spec IPPoolSpec `json:"spec"`
+
+	// Most recently observed status of the pool.
+	Status IPPoolStatus `json:"status"`
+}
+
+type IPVersion int
+
+const (
+	IPv4 = IPVersion(4)
+	IPv6 = IPVersion(6)
+)
+
+type IPPoolSpec struct {
+	// IP Version for this IP pool - either 4 or 6
+	IPVersion IPVersion `json:"ipVersion"`
+	// List IP ranges, along with subnet definition.
+	IPRanges []SubnetIPRange `json:"ipRanges"`
+}
+
+// SubnetInfo specifies subnet attributes for IP Range
+type SubnetInfo struct {
+	// Gateway IP for this subnet, eg. 10.10.1.1
+	Gateway string `json:"gateway"`
+	// Prefix length for the subnet, eg. 24
+	PrefixLength int32 `json:"prefixLength"`
+	// VLAN ID for this subnet. Default is 0. Valid value is 0~4094.
+	VLAN uint16 `json:"vlan,omitempty"`
+}
+
+// SubnetIPRange is a set of contiguous IP addresses, represented by a CIDR or a pair of start and end IPs,
+// along with subnet definition.
+type SubnetIPRange struct {
+	IPRange    `json:",inline"`
+	SubnetInfo `json:",inline"`
+}
+
+type IPPoolStatus struct {
+	IPAddresses []IPAddressState `json:"ipAddresses,omitempty"`
+	// TODO: add usage statistics
+}
+
+type IPAddressPhase string
+
+const (
+	IPAddressPhaseAllocated    IPAddressPhase = "Allocated"
+	IPAddressPhasePreallocated IPAddressPhase = "Preallocated"
+	IPAddressPhaseReserved     IPAddressPhase = "Reserved"
+)
+
+type IPAddressState struct {
+	// IP Address this entry is tracking
+	IPAddress string `json:"ipAddress"`
+	// Allocation state - either Allocated or Preallocated
+	Phase IPAddressPhase `json:"phase"`
+	// Owner this IP Address is allocated to
+	Owner IPAddressOwner `json:"owner"`
+	// TODO: add usage statistics (consistent with ExternalIPPool status)
+}
+
+type IPAddressOwner struct {
+	Pod         *PodOwner         `json:"pod,omitempty"`
+	StatefulSet *StatefulSetOwner `json:"statefulSet,omitempty"`
+}
+
+// Pod owner
+type PodOwner struct {
+	Name        string `json:"name"`
+	Namespace   string `json:"namespace"`
+	ContainerID string `json:"containerID"`
+	// Network interface name. Used when the IP is allocated for a secondary network interface
+	// of the Pod.
+	IFName string `json:"ifName,omitempty"`
+}
+
+// StatefulSet owner
+type StatefulSetOwner struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	Index     int    `json:"index"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type IPPoolList struct {
+	metav1.TypeMeta `json:",inline"`
+	// +optional
+	metav1.ListMeta `json:"metadata,omitempty"`
+
+	Items []IPPool `json:"items"`
 }

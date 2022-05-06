@@ -82,7 +82,7 @@ func testBenchmarkBandwidthIntraNode(t *testing.T, data *TestData) {
 		t.Fatalf("Error when getting the perftest server Pod's IP: %v", err)
 	}
 	podBIP := podBIPs.ipv4.String()
-	stdout, _, err := data.runCommandFromPod(testNamespace, "perftest-a", "perftool", []string{"bash", "-c", fmt.Sprintf("iperf3 -c %s|grep sender|awk '{print $7,$8}'", podBIP)})
+	stdout, _, err := data.RunCommandFromPod(testNamespace, "perftest-a", "perftool", []string{"bash", "-c", fmt.Sprintf("iperf3 -c %s|grep sender|awk '{print $7,$8}'", podBIP)})
 	if err != nil {
 		t.Fatalf("Error when running iperf3 client: %v", err)
 	}
@@ -91,7 +91,7 @@ func testBenchmarkBandwidthIntraNode(t *testing.T, data *TestData) {
 }
 
 func benchmarkBandwidthService(t *testing.T, endpointNode, clientNode string, data *TestData) {
-	svc, err := data.createService("perftest-b", iperfPort, iperfPort, map[string]string{"antrea-e2e": "perftest-b"}, false, v1.ServiceTypeClusterIP, nil)
+	svc, err := data.CreateService("perftest-b", testNamespace, iperfPort, iperfPort, map[string]string{"antrea-e2e": "perftest-b"}, false, false, v1.ServiceTypeClusterIP, nil)
 	if err != nil {
 		t.Fatalf("Error when creating perftest service: %v", err)
 	}
@@ -107,7 +107,7 @@ func benchmarkBandwidthService(t *testing.T, endpointNode, clientNode string, da
 	if err := data.podWaitForRunning(defaultTimeout, "perftest-b", testNamespace); err != nil {
 		t.Fatalf("Error when getting the perftest server Pod's IP: %v", err)
 	}
-	stdout, stderr, err := data.runCommandFromPod(testNamespace, "perftest-a", perftoolContainerName, []string{"bash", "-c", fmt.Sprintf("iperf3 -c %s|grep sender|awk '{print $7,$8}'", svc.Spec.ClusterIP)})
+	stdout, stderr, err := data.RunCommandFromPod(testNamespace, "perftest-a", perftoolContainerName, []string{"bash", "-c", fmt.Sprintf("iperf3 -c %s|grep sender|awk '{print $7,$8}'", svc.Spec.ClusterIP)})
 	if err != nil {
 		t.Fatalf("Error when running iperf3 client: %v, stderr: %s", err, stderr)
 	}
@@ -128,13 +128,11 @@ func testBenchmarkBandwidthServiceRemoteAccess(t *testing.T, data *TestData) {
 }
 
 func testPodTrafficShaping(t *testing.T, data *TestData) {
-	// TODO: tc configuration succeeded, however it didn't take effect, need to understand the reason.
-	skipIfProviderIs(t, "kind", "tc does not work with Kind")
 	// Test is flaky on dual-stack clusters: https://github.com/antrea-io/antrea/issues/1543.
 	// So we disable it except for IPv4 single-stack clusters for now.
 	skipIfIPv6Cluster(t)
 	nodeName := controlPlaneNodeName()
-	skipIfMissingKernelModule(t, nodeName, []string{"ifb", "sch_tbf", "sch_ingress"})
+	skipIfMissingKernelModule(t, data, nodeName, []string{"ifb", "sch_tbf", "sch_ingress"})
 
 	tests := []struct {
 		name string
@@ -167,7 +165,7 @@ func testPodTrafficShaping(t *testing.T, data *TestData) {
 			}); err != nil {
 				t.Fatalf("Error when creating the perftest client Pod: %v", err)
 			}
-			defer deletePodWrapper(t, data, clientPodName)
+			defer deletePodWrapper(t, data, testNamespace, clientPodName)
 			if err := data.podWaitForRunning(defaultTimeout, clientPodName, testNamespace); err != nil {
 				t.Fatalf("Error when waiting for the perftest client Pod: %v", err)
 			}
@@ -178,14 +176,14 @@ func testPodTrafficShaping(t *testing.T, data *TestData) {
 			}); err != nil {
 				t.Fatalf("Error when creating the perftest server Pod: %v", err)
 			}
-			defer deletePodWrapper(t, data, serverPodName)
+			defer deletePodWrapper(t, data, testNamespace, serverPodName)
 			podIPs, err := data.podWaitForIPs(defaultTimeout, serverPodName, testNamespace)
 			if err != nil {
 				t.Fatalf("Error when getting the perftest server Pod's IP: %v", err)
 			}
 
 			runIperf := func(cmd []string) {
-				stdout, _, err := data.runCommandFromPod(testNamespace, clientPodName, "perftool", cmd)
+				stdout, _, err := data.RunCommandFromPod(testNamespace, clientPodName, "perftool", cmd)
 				if err != nil {
 					t.Fatalf("Error when running iperf3 client: %v", err)
 				}

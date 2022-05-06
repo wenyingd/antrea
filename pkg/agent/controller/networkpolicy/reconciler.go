@@ -21,19 +21,19 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/openflow"
+	proxytypes "antrea.io/antrea/pkg/agent/proxy/types"
 	"antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 	"antrea.io/antrea/pkg/util/ip"
+	"antrea.io/antrea/pkg/util/k8s"
 )
 
 var (
@@ -152,15 +152,20 @@ type lastRealized struct {
 	// the fqdn selector of this policy rule. It must be empty for policy rule
 	// that is not egress and does not have toFQDN field.
 	fqdnIPAddresses sets.String
+	// groupIDAddresses tracks the last realized set of groupIDs resolved for
+	// the toServices of this policy rule. It must be empty for policy rule
+	// that is not egress and does not have toServices field.
+	groupIDAddresses sets.Int64
 }
 
 func newLastRealized(rule *CompletedRule) *lastRealized {
 	return &lastRealized{
-		ofIDs:           map[servicesKey]uint32{},
-		CompletedRule:   rule,
-		podOFPorts:      map[servicesKey]sets.Int32{},
-		podIPs:          nil,
-		fqdnIPAddresses: nil,
+		ofIDs:            map[servicesKey]uint32{},
+		CompletedRule:    rule,
+		podOFPorts:       map[servicesKey]sets.Int32{},
+		podIPs:           nil,
+		fqdnIPAddresses:  nil,
+		groupIDAddresses: nil,
 	}
 }
 
@@ -190,7 +195,7 @@ type reconciler struct {
 	idAllocator *idAllocator
 
 	// priorityAssigners provides interfaces to manage OF priorities for each OVS table.
-	priorityAssigners map[binding.TableIDType]*tablePriorityAssigner
+	priorityAssigners map[uint8]*tablePriorityAssigner
 	// ipv4Enabled tells if IPv4 is supported on this Node or not.
 	ipv4Enabled bool
 	// ipv6Enabled tells is IPv6 is supported on this Node or not.
@@ -200,6 +205,10 @@ type reconciler struct {
 	// reconciler to register FQDN policy rules and query the IP addresses corresponded
 	// to a FQDN.
 	fqdnController *fqdnController
+
+	// groupCounters is a list of GroupCounter for v4 and v6 env. reconciler uses these
+	// GroupCounters to get the groupIDs of a specific Service.
+	groupCounters []proxytypes.GroupCounter
 }
 
 // newReconciler returns a new *reconciler.
@@ -207,16 +216,22 @@ func newReconciler(ofClient openflow.Client,
 	ifaceStore interfacestore.InterfaceStore,
 	idAllocator *idAllocator,
 	fqdnController *fqdnController,
+	groupCounters []proxytypes.GroupCounter,
+	v4Enabled bool,
+	v6Enabled bool,
+	antreaPolicyEnabled bool,
 ) *reconciler {
-	priorityAssigners := map[binding.TableIDType]*tablePriorityAssigner{}
-	for _, table := range openflow.GetAntreaPolicyBaselineTierTables() {
-		priorityAssigners[table] = &tablePriorityAssigner{
-			assigner: newPriorityAssigner(true),
+	priorityAssigners := map[uint8]*tablePriorityAssigner{}
+	if antreaPolicyEnabled {
+		for _, table := range openflow.GetAntreaPolicyBaselineTierTables() {
+			priorityAssigners[table.GetID()] = &tablePriorityAssigner{
+				assigner: newPriorityAssigner(true),
+			}
 		}
-	}
-	for _, table := range openflow.GetAntreaPolicyMultiTierTables() {
-		priorityAssigners[table] = &tablePriorityAssigner{
-			assigner: newPriorityAssigner(false),
+		for _, table := range openflow.GetAntreaPolicyMultiTierTables() {
+			priorityAssigners[table.GetID()] = &tablePriorityAssigner{
+				assigner: newPriorityAssigner(false),
+			}
 		}
 	}
 	reconciler := &reconciler{
@@ -226,11 +241,12 @@ func newReconciler(ofClient openflow.Client,
 		idAllocator:       idAllocator,
 		priorityAssigners: priorityAssigners,
 		fqdnController:    fqdnController,
+		groupCounters:     groupCounters,
 	}
 	// Check if ofClient is nil or not to be compatible with unit tests.
 	if ofClient != nil {
-		reconciler.ipv4Enabled = ofClient.IsIPv4Enabled()
-		reconciler.ipv6Enabled = ofClient.IsIPv6Enabled()
+		reconciler.ipv4Enabled = v4Enabled
+		reconciler.ipv6Enabled = v6Enabled
 	}
 	return reconciler
 }
@@ -238,9 +254,7 @@ func newReconciler(ofClient openflow.Client,
 // RunIDAllocatorWorker runs the worker that deletes the rules from the cache in
 // idAllocator.
 func (r *reconciler) RunIDAllocatorWorker(stopCh <-chan struct{}) {
-	defer r.idAllocator.deleteQueue.ShutDown()
-	go wait.Until(r.idAllocator.worker, time.Second, stopCh)
-	<-stopCh
+	r.idAllocator.runWorker(stopCh)
 }
 
 // Reconcile checks whether the provided rule have been enforced or not, and
@@ -279,28 +293,28 @@ func (r *reconciler) Reconcile(rule *CompletedRule) error {
 // getOFRuleTable retreives the OpenFlow table to install the CompletedRule.
 // The decision is made based on whether the rule is created for a CNP/ANP, and
 // the Tier of that NetworkPolicy.
-func (r *reconciler) getOFRuleTable(rule *CompletedRule) binding.TableIDType {
+func (r *reconciler) getOFRuleTable(rule *CompletedRule) uint8 {
 	if !rule.isAntreaNetworkPolicyRule() {
 		if rule.Direction == v1beta2.DirectionIn {
-			return openflow.IngressRuleTable
+			return openflow.IngressRuleTable.GetID()
 		}
-		return openflow.EgressRuleTable
+		return openflow.EgressRuleTable.GetID()
 	}
-	var ruleTables []binding.TableIDType
+	var ruleTables []*openflow.Table
 	if rule.Direction == v1beta2.DirectionIn {
 		ruleTables = openflow.GetAntreaPolicyIngressTables()
 	} else {
 		ruleTables = openflow.GetAntreaPolicyEgressTables()
 	}
 	if *rule.TierPriority != baselineTierPriority {
-		return ruleTables[0]
+		return ruleTables[0].GetID()
 	}
-	return ruleTables[1]
+	return ruleTables[1].GetID()
 }
 
 // getOFPriority retrieves the OFPriority for the input CompletedRule to be installed,
 // and re-arranges installed priorities on OVS if necessary.
-func (r *reconciler) getOFPriority(rule *CompletedRule, table binding.TableIDType, pa *tablePriorityAssigner) (*uint16, bool, error) {
+func (r *reconciler) getOFPriority(rule *CompletedRule, tableID uint8, pa *tablePriorityAssigner) (*uint16, bool, error) {
 	if !rule.isAntreaNetworkPolicyRule() {
 		klog.V(2).Infof("Assigning default priority for k8s NetworkPolicy.")
 		return nil, true, nil
@@ -326,7 +340,7 @@ func (r *reconciler) getOFPriority(rule *CompletedRule, table binding.TableIDTyp
 		}
 		// Re-assign installed priorities on OVS
 		if len(priorityUpdates) > 0 {
-			err := r.ofClient.ReassignFlowPriorities(priorityUpdates, table)
+			err := r.ofClient.ReassignFlowPriorities(priorityUpdates, tableID)
 			if err != nil {
 				revertFunc()
 				return nil, registered, err
@@ -344,7 +358,7 @@ func (r *reconciler) getOFPriority(rule *CompletedRule, table binding.TableIDTyp
 func (r *reconciler) BatchReconcile(rules []*CompletedRule) error {
 	var rulesToInstall []*CompletedRule
 	var priorities []*uint16
-	prioritiesByTable := map[binding.TableIDType][]*uint16{}
+	prioritiesByTable := map[uint8][]*uint16{}
 	for _, rule := range rules {
 		if _, exists := r.lastRealizeds.Load(rule.ID); exists {
 			klog.Errorf("rule %s already realized during the initialization phase", rule.ID)
@@ -382,7 +396,7 @@ func (r *reconciler) BatchReconcile(rules []*CompletedRule) error {
 // registerOFPriorities constructs a Priority type for each CompletedRule in the input list,
 // and registers those Priorities with appropriate tablePriorityAssigner based on Tier.
 func (r *reconciler) registerOFPriorities(rules []*CompletedRule) error {
-	prioritiesToRegister := map[binding.TableIDType][]types.Priority{}
+	prioritiesToRegister := map[uint8][]types.Priority{}
 	for _, rule := range rules {
 		if rule.isAntreaNetworkPolicyRule() {
 			ruleTable := r.getOFRuleTable(rule)
@@ -403,7 +417,7 @@ func (r *reconciler) registerOFPriorities(rules []*CompletedRule) error {
 }
 
 // add converts CompletedRule to PolicyRule(s) and invokes installOFRule to install them.
-func (r *reconciler) add(rule *CompletedRule, ofPriority *uint16, table binding.TableIDType) error {
+func (r *reconciler) add(rule *CompletedRule, ofPriority *uint16, table uint8) error {
 	klog.V(2).Infof("Adding new rule %v", rule)
 	ofRuleByServicesMap, lastRealized := r.computeOFRulesForAdd(rule, ofPriority, table)
 	for svcKey, ofRule := range ofRuleByServicesMap {
@@ -416,6 +430,7 @@ func (r *reconciler) add(rule *CompletedRule, ofPriority *uint16, table binding.
 			if r.fqdnController != nil {
 				lastRealized.fqdnIPAddresses = nil
 			}
+			lastRealized.groupIDAddresses = nil
 			return err
 		}
 		// Record ofID only if its Openflow is installed successfully.
@@ -424,7 +439,7 @@ func (r *reconciler) add(rule *CompletedRule, ofPriority *uint16, table binding.
 	return nil
 }
 
-func (r *reconciler) computeOFRulesForAdd(rule *CompletedRule, ofPriority *uint16, table binding.TableIDType) (
+func (r *reconciler) computeOFRulesForAdd(rule *CompletedRule, ofPriority *uint16, table uint8) (
 	map[servicesKey]*types.PolicyRule, *lastRealized) {
 	lastRealized := newLastRealized(rule)
 	// TODO: Handle the case that the following processing fails or partially succeeds.
@@ -489,7 +504,7 @@ func (r *reconciler) computeOFRulesForAdd(rule *CompletedRule, ofPriority *uint1
 		// isolated, so we create a PolicyRule with the original services if it doesn't exist.
 		// If there are IPBlocks or Pods that cannot resolve any named port, they will share
 		// this PolicyRule. Antrea policies do not need this default isolation.
-		if !rule.isAntreaNetworkPolicyRule() || len(rule.To.IPBlocks) > 0 || len(rule.To.FQDNs) > 0 {
+		if !rule.isAntreaNetworkPolicyRule() || len(rule.To.IPBlocks) > 0 || len(rule.To.FQDNs) > 0 || len(rule.To.ToServices) > 0 {
 			svcKey := normalizeServices(rule.Services)
 			ofRule, exists := ofRuleByServicesMap[svcKey]
 			// Create a new Openflow rule if the group doesn't exist.
@@ -524,6 +539,21 @@ func (r *reconciler) computeOFRulesForAdd(rule *CompletedRule, ofPriority *uint1
 				ofRule.To = append(ofRule.To, addresses...)
 				// If the rule installation fails, this will be reset
 				lastRealized.fqdnIPAddresses = addressSet
+			}
+			if len(rule.To.ToServices) > 0 {
+				var addresses []types.Address
+				addressSet := sets.NewInt64()
+				for _, svcRef := range rule.To.ToServices {
+					for _, groupCounter := range r.groupCounters {
+						for _, groupID := range groupCounter.GetAllGroupIDs(k8s.NamespacedName(svcRef.Namespace, svcRef.Name)) {
+							addresses = append(addresses, openflow.NewServiceGroupIDAddress(groupID))
+							addressSet.Insert(int64(groupID))
+						}
+					}
+				}
+				ofRule.To = append(ofRule.To, addresses...)
+				// If the rule installation fails, this will be reset.
+				lastRealized.groupIDAddresses = addressSet
 			}
 		}
 	}
@@ -570,7 +600,7 @@ func (r *reconciler) batchAdd(rules []*CompletedRule, ofPriorities []*uint16) er
 
 // update calculates the difference of Addresses between oldRule and newRule,
 // and invokes Openflow client's methods to reconcile them.
-func (r *reconciler) update(lastRealized *lastRealized, newRule *CompletedRule, ofPriority *uint16, table binding.TableIDType) error {
+func (r *reconciler) update(lastRealized *lastRealized, newRule *CompletedRule, ofPriority *uint16, table uint8) error {
 	klog.V(2).Infof("Updating existing rule %v", newRule)
 	// staleOFIDs tracks servicesKey that are no long needed.
 	// Firstly fill it with the last realized ofIDs.
@@ -674,8 +704,8 @@ func (r *reconciler) update(lastRealized *lastRealized, newRule *CompletedRule, 
 				}
 				lastRealized.ofIDs[svcKey] = ofRule.FlowID
 			} else {
-				addedTo := groupMembersToOFAddresses(members.Difference(prevMembersByServicesMap[svcKey]))
-				deletedTo := groupMembersToOFAddresses(prevMembersByServicesMap[svcKey].Difference(members))
+				addedTo := ipsToOFAddresses(members.IPDifference(prevMembersByServicesMap[svcKey]))
+				deletedTo := ipsToOFAddresses(prevMembersByServicesMap[svcKey].IPDifference(members))
 				originalFQDNAddressSet, newFQDNAddressSet := sets.NewString(), sets.NewString()
 				if r.fqdnController != nil {
 					if lastRealized.fqdnIPAddresses != nil {
@@ -696,6 +726,27 @@ func (r *reconciler) update(lastRealized *lastRealized, newRule *CompletedRule, 
 						}
 					}
 				}
+				originalGroupIDAddressSet, newGroupIDAddressSet := sets.NewInt64(), sets.NewInt64()
+				if lastRealized.groupIDAddresses != nil {
+					originalGroupIDAddressSet = lastRealized.groupIDAddresses
+				}
+				if len(newRule.To.ToServices) > 0 {
+					for _, svcRef := range newRule.To.ToServices {
+						for _, groupCounter := range r.groupCounters {
+							for _, groupID := range groupCounter.GetAllGroupIDs(k8s.NamespacedName(svcRef.Namespace, svcRef.Name)) {
+								newGroupIDAddressSet.Insert(int64(groupID))
+							}
+						}
+					}
+					addedGroupIDAddress := newGroupIDAddressSet.Difference(originalGroupIDAddressSet)
+					removedGroupIDAddress := originalGroupIDAddressSet.Difference(newGroupIDAddressSet)
+					for a := range addedGroupIDAddress {
+						addedTo = append(addedTo, openflow.NewServiceGroupIDAddress(binding.GroupIDType(a)))
+					}
+					for r := range removedGroupIDAddress {
+						deletedTo = append(deletedTo, openflow.NewServiceGroupIDAddress(binding.GroupIDType(r)))
+					}
+				}
 				if err := r.updateOFRule(ofID, addedFrom, addedTo, deletedFrom, deletedTo, ofPriority); err != nil {
 					return err
 				}
@@ -703,6 +754,8 @@ func (r *reconciler) update(lastRealized *lastRealized, newRule *CompletedRule, 
 					// Update the FQDN address set if rule installation succeeds.
 					lastRealized.fqdnIPAddresses = newFQDNAddressSet
 				}
+				// Update the groupID address set if rule installation succeeds.
+				lastRealized.groupIDAddresses = newGroupIDAddressSet
 				// Delete valid servicesKey from staleOFIDs.
 				delete(staleOFIDs, svcKey)
 			}
@@ -758,7 +811,7 @@ func (r *reconciler) updateOFRule(ofID uint32, addedFrom []types.Address, addedT
 	return nil
 }
 
-func (r *reconciler) uninstallOFRule(ofID uint32, table binding.TableIDType) error {
+func (r *reconciler) uninstallOFRule(ofID uint32, table uint8) error {
 	klog.V(2).Infof("Uninstalling ofRule %d", ofID)
 	stalePriorities, err := r.ofClient.UninstallPolicyRuleFlows(ofID)
 	if err != nil {
@@ -820,20 +873,22 @@ func (r *reconciler) GetRuleByFlowID(ruleFlowID uint32) (*types.PolicyRule, bool
 func (r *reconciler) getOFPorts(members v1beta2.GroupMemberSet) sets.Int32 {
 	ofPorts := sets.NewInt32()
 	for _, m := range members {
-		var entityName, ns string
+		var ifaces []*interfacestore.InterfaceConfig
+		var name, ns string
 		if m.Pod != nil {
-			entityName, ns = m.Pod.Name, m.Pod.Namespace
+			name, ns = m.Pod.Name, m.Pod.Namespace
+			ifaces = r.ifaceStore.GetContainerInterfacesByPod(name, ns)
 		} else if m.ExternalEntity != nil {
-			entityName, ns = m.ExternalEntity.Name, m.ExternalEntity.Namespace
+			name, ns = m.ExternalEntity.Name, m.ExternalEntity.Namespace
+			ifaces = r.ifaceStore.GetInterfacesByEntity(name, ns)
 		}
-		ifaces := r.ifaceStore.GetInterfacesByEntity(entityName, ns)
 		if len(ifaces) == 0 {
 			// This might be because the container has been deleted during realization or hasn't been set up yet.
-			klog.Infof("Can't find interface for %s/%s, skipping", ns, entityName)
+			klog.Infof("Can't find interface for %s/%s, skipping", ns, name)
 			continue
 		}
 		for _, iface := range ifaces {
-			klog.V(2).Infof("Got OFPort %v for %s/%s", iface.OFPort, ns, entityName)
+			klog.V(2).Infof("Got OFPort %v for %s/%s", iface.OFPort, ns, name)
 			ofPorts.Insert(iface.OFPort)
 		}
 	}
@@ -843,22 +898,24 @@ func (r *reconciler) getOFPorts(members v1beta2.GroupMemberSet) sets.Int32 {
 func (r *reconciler) getIPs(members v1beta2.GroupMemberSet) sets.String {
 	ips := sets.NewString()
 	for _, m := range members {
-		var entityName, ns string
+		var ifaces []*interfacestore.InterfaceConfig
+		var name, ns string
 		if m.Pod != nil {
-			entityName, ns = m.Pod.Name, m.Pod.Namespace
+			name, ns = m.Pod.Name, m.Pod.Namespace
+			ifaces = r.ifaceStore.GetContainerInterfacesByPod(name, ns)
 		} else if m.ExternalEntity != nil {
-			entityName, ns = m.ExternalEntity.Name, m.ExternalEntity.Namespace
+			name, ns = m.ExternalEntity.Name, m.ExternalEntity.Namespace
+			ifaces = r.ifaceStore.GetInterfacesByEntity(name, ns)
 		}
-		ifaces := r.ifaceStore.GetInterfacesByEntity(entityName, ns)
 		if len(ifaces) == 0 {
 			// This might be because the container has been deleted during realization or hasn't been set up yet.
-			klog.Infof("Can't find interface for %s/%s, skipping", ns, entityName)
+			klog.Infof("Can't find interface for %s/%s, skipping", ns, name)
 			continue
 		}
 		for _, iface := range ifaces {
 			for _, ipAddr := range iface.IPs {
 				if ipAddr != nil {
-					klog.V(2).Infof("Got IP %v for %s/%s", iface.IPs, ns, entityName)
+					klog.V(2).Infof("Got IP %v for %s/%s", iface.IPs, ns, name)
 					ips.Insert(ipAddr.String())
 				}
 			}

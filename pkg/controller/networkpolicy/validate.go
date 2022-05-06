@@ -17,20 +17,24 @@ package networkpolicy
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
 
 	admv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apiserver/pkg/authentication/serviceaccount"
 	"k8s.io/klog/v2"
 
 	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
 	crdv1alpha2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
 	"antrea.io/antrea/pkg/controller/networkpolicy/store"
+	"antrea.io/antrea/pkg/features"
 	"antrea.io/antrea/pkg/util/env"
 )
 
@@ -395,6 +399,10 @@ func (v *antreaPolicyValidator) createValidate(curObj interface{}, userInfo auth
 	if !allowed {
 		return reason, allowed
 	}
+	reason, allowed = v.validateTierForPassAction(tier, ingress, egress)
+	if !allowed {
+		return reason, allowed
+	}
 	if ruleNameUnique := v.validateRuleName(ingress, egress); !ruleNameUnique {
 		return "rules names must be unique within the policy", false
 	}
@@ -410,7 +418,6 @@ func (v *antreaPolicyValidator) createValidate(curObj interface{}, userInfo auth
 	if !allowed {
 		return reason, allowed
 	}
-
 	if err := v.validatePort(ingress, egress); err != nil {
 		return err.Error(), false
 	}
@@ -455,6 +462,40 @@ func (v *antreaPolicyValidator) validateAppliedTo(ingress, egress []crdv1alpha1.
 	if numAppliedToInRules > 0 && (numAppliedToInRules != len(ingress)+len(egress)) {
 		return "appliedTo field should either be set in all rules or in none of them", false
 	}
+
+	checkAppliedTo := func(appliedTo []crdv1alpha1.NetworkPolicyPeer) (string, bool) {
+		for _, eachAppliedTo := range appliedTo {
+			appliedToFieldsNum := numFieldsSetInPeer(eachAppliedTo)
+			if eachAppliedTo.Group != "" && appliedToFieldsNum > 1 {
+				return "group cannot be set with other peers in appliedTo", false
+			}
+			if eachAppliedTo.ServiceAccount != nil && appliedToFieldsNum > 1 {
+				return "serviceAccount cannot be set with other peers in appliedTo", false
+			}
+			if reason, allowed := checkSelectorsLabels(eachAppliedTo.PodSelector, eachAppliedTo.NamespaceSelector, eachAppliedTo.ExternalEntitySelector); !allowed {
+				return reason, allowed
+			}
+		}
+		return "", true
+	}
+
+	reason, allowed := checkAppliedTo(specAppliedTo)
+	if !allowed {
+		return reason, allowed
+	}
+
+	for _, eachIngress := range ingress {
+		reason, allowed = checkAppliedTo(eachIngress.AppliedTo)
+		if !allowed {
+			return reason, allowed
+		}
+	}
+	for _, eachEgress := range egress {
+		reason, allowed = checkAppliedTo(eachEgress.AppliedTo)
+		if !allowed {
+			return reason, allowed
+		}
+	}
 	return "", true
 }
 
@@ -466,11 +507,18 @@ func (v *antreaPolicyValidator) validatePeers(ingress, egress []crdv1alpha1.Rule
 			if peer.NamespaceSelector != nil && peer.Namespaces != nil {
 				return "namespaces and namespaceSelector cannot be set at the same time for a single NetworkPolicyPeer", false
 			}
-			if peer.Group == "" {
-				continue
-			}
-			if peer.PodSelector != nil || peer.IPBlock != nil || peer.NamespaceSelector != nil {
+			peerFieldsNum := numFieldsSetInPeer(peer)
+			if peer.Group != "" && peerFieldsNum > 1 {
 				return "group cannot be set with other peers in rules", false
+			}
+			if peer.ServiceAccount != nil && peerFieldsNum > 1 {
+				return "serviceAccount cannot be set with other peers in rules", false
+			}
+			if peer.NodeSelector != nil && peerFieldsNum > 1 {
+				return "nodeSelector cannot be set with other peers in rules", false
+			}
+			if reason, allowed := checkSelectorsLabels(peer.PodSelector, peer.NamespaceSelector, peer.ExternalEntitySelector, peer.NodeSelector); !allowed {
+				return reason, allowed
 			}
 		}
 		return "", true
@@ -482,9 +530,54 @@ func (v *antreaPolicyValidator) validatePeers(ingress, egress []crdv1alpha1.Rule
 		}
 	}
 	for _, rule := range egress {
+		if rule.ToServices != nil {
+			if !features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
+				return fmt.Sprintf("`toServices` can only be used when AntreaProxy is enabled"), false
+			}
+			if (rule.To != nil && len(rule.To) > 0) || rule.Ports != nil || rule.Protocols != nil {
+				return fmt.Sprintf("`toServices` can't be used with `to`, `ports` or `protocols`"), false
+			}
+		}
 		msg, isValid := checkPeers(rule.To)
 		if !isValid {
 			return msg, false
+		}
+	}
+	return "", true
+}
+
+// numFieldsSetInPeer returns the number of fields in use of a peer.
+func numFieldsSetInPeer(peer crdv1alpha1.NetworkPolicyPeer) int {
+	num := 0
+	v := reflect.ValueOf(peer)
+	for i := 0; i < v.NumField(); i++ {
+		if !v.Field(i).IsZero() {
+			num++
+		}
+	}
+	return num
+}
+
+// checkSelectorsLabels validates labels used in all selectors passed in.
+func checkSelectorsLabels(selectors ...*metav1.LabelSelector) (string, bool) {
+	validateLabels := func(labels map[string]string) (string, bool) {
+		for k, v := range labels {
+			err := validation.IsQualifiedName(k)
+			if err != nil {
+				return fmt.Sprintf("Invalid label key: %s: %s", k, strings.Join(err, "; ")), false
+			}
+			err = validation.IsValidLabelValue(v)
+			if err != nil {
+				return fmt.Sprintf("Invalid label value: %s: %s", v, strings.Join(err, "; ")), false
+			}
+		}
+		return "", true
+	}
+	for _, selector := range selectors {
+		if selector != nil {
+			if reason, allowed := validateLabels(selector.MatchLabels); !allowed {
+				return reason, allowed
+			}
 		}
 	}
 	return "", true
@@ -500,6 +593,24 @@ func (v *antreaPolicyValidator) validateTierForPolicy(tier string) (string, bool
 	if ok := v.tierExists(tier); !ok {
 		reason := fmt.Sprintf("tier %s does not exist", tier)
 		return reason, false
+	}
+	return "", true
+}
+
+// validateTierForPassAction validates that rules with pass action are not created in the Baseline Tier.
+func (v *antreaPolicyValidator) validateTierForPassAction(tier string, ingress, egress []crdv1alpha1.Rule) (string, bool) {
+	if strings.ToLower(tier) != baselineTierName {
+		return "", true
+	}
+	for _, rule := range ingress {
+		if *rule.Action == crdv1alpha1.RuleActionPass {
+			return fmt.Sprintf("`Pass` action should not be set for Baseline Tier policy rules"), false
+		}
+	}
+	for _, rule := range egress {
+		if *rule.Action == crdv1alpha1.RuleActionPass {
+			return fmt.Sprintf("`Pass` action should not be set for Baseline Tier policy rules"), false
+		}
 	}
 	return "", true
 }
@@ -552,6 +663,10 @@ func (v *antreaPolicyValidator) updateValidate(curObj, oldObj interface{}, userI
 	}
 	if err := v.validatePort(ingress, egress); err != nil {
 		return err.Error(), false
+	}
+	reason, allowed = v.validateTierForPassAction(tier, ingress, egress)
+	if !allowed {
+		return reason, allowed
 	}
 	return v.validateTierForPolicy(tier)
 }
@@ -625,6 +740,9 @@ func validateAntreaGroupSpec(s crdv1alpha2.GroupSpec) (string, bool) {
 	}
 	selector, serviceRef, ipBlock, ipBlocks, childGroups := 0, 0, 0, 0, 0
 	if s.NamespaceSelector != nil || s.ExternalEntitySelector != nil || s.PodSelector != nil {
+		if reason, allowed := checkSelectorsLabels(s.PodSelector, s.NamespaceSelector, s.ExternalEntitySelector); !allowed {
+			return reason, allowed
+		}
 		selector = 1
 	}
 	if s.IPBlock != nil {

@@ -16,6 +16,7 @@ package apiserver
 
 import (
 	"context"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,16 +55,12 @@ import (
 	"antrea.io/antrea/pkg/apiserver/registry/system/supportbundle"
 	"antrea.io/antrea/pkg/apiserver/storage"
 	"antrea.io/antrea/pkg/controller/egress"
+	"antrea.io/antrea/pkg/controller/externalippool"
+	"antrea.io/antrea/pkg/controller/ipam"
 	controllernetworkpolicy "antrea.io/antrea/pkg/controller/networkpolicy"
 	"antrea.io/antrea/pkg/controller/querier"
 	"antrea.io/antrea/pkg/controller/stats"
 	"antrea.io/antrea/pkg/features"
-	legacycontrolplane "antrea.io/antrea/pkg/legacyapis/controlplane"
-	legacycpinstall "antrea.io/antrea/pkg/legacyapis/controlplane/install"
-	legacyapistats "antrea.io/antrea/pkg/legacyapis/stats"
-	legacystatsinstall "antrea.io/antrea/pkg/legacyapis/stats/install"
-	legacysysteminstall "antrea.io/antrea/pkg/legacyapis/system/install"
-	legacysystem "antrea.io/antrea/pkg/legacyapis/system/v1beta1"
 )
 
 var (
@@ -72,6 +69,9 @@ var (
 	// Codecs provides methods for retrieving codecs and serializers for specific
 	// versions and content types.
 	Codecs = serializer.NewCodecFactory(Scheme)
+	// ParameterCodec defines methods for serializing and deserializing url values
+	// to versioned API objects and back.
+	parameterCodec = runtime.NewParameterCodec(Scheme)
 	// #nosec G101: false positive triggered by variable name which includes "token"
 	TokenPath = "/var/run/antrea/apiserver/loopback-client-token"
 )
@@ -80,10 +80,6 @@ func init() {
 	cpinstall.Install(Scheme)
 	systeminstall.Install(Scheme)
 	statsinstall.Install(Scheme)
-
-	legacycpinstall.Install(Scheme)
-	legacysysteminstall.Install(Scheme)
-	legacystatsinstall.Install(Scheme)
 
 	// We need to add the options to empty v1, see sample-apiserver/pkg/apiserver/apiserver.go.
 	metav1.AddToGroupVersion(Scheme, schema.GroupVersion{Version: "v1"})
@@ -100,6 +96,7 @@ type ExtraConfig struct {
 	endpointQuerier               controllernetworkpolicy.EndpointQuerier
 	networkPolicyController       *controllernetworkpolicy.NetworkPolicyController
 	egressController              *egress.EgressController
+	externalIPPoolController      *externalippool.ExternalIPPoolController
 	caCertController              *certificate.CACertController
 	statsAggregator               *stats.Aggregator
 	networkPolicyStatusController *controllernetworkpolicy.StatusController
@@ -175,7 +172,7 @@ func installAPIGroup(s *APIServer, c completedConfig) error {
 	groupAssociationStorage := groupassociation.NewREST(c.extraConfig.networkPolicyController)
 	nodeStatsSummaryStorage := nodestatssummary.NewREST(c.extraConfig.statsAggregator)
 	egressGroupStorage := egressgroup.NewREST(c.extraConfig.egressGroupStore)
-	cpGroup := genericapiserver.NewDefaultAPIGroupInfo(controlplane.GroupName, Scheme, metav1.ParameterCodec, Codecs)
+	cpGroup := genericapiserver.NewDefaultAPIGroupInfo(controlplane.GroupName, Scheme, parameterCodec, Codecs)
 	cpv1beta2Storage := map[string]rest.Storage{}
 	cpv1beta2Storage["addressgroups"] = addressGroupStorage
 	cpv1beta2Storage["appliedtogroups"] = appliedToGroupStorage
@@ -203,27 +200,6 @@ func installAPIGroup(s *APIServer, c completedConfig) error {
 	statsGroup.VersionedResourcesStorageMap["v1alpha1"] = statsStorage
 
 	groups := []*genericapiserver.APIGroupInfo{&cpGroup, &systemGroup, &statsGroup}
-
-	// legacy groups
-	legacyCPGroup := genericapiserver.NewDefaultAPIGroupInfo(legacycontrolplane.GroupName, Scheme, metav1.ParameterCodec, Codecs)
-	legacyCPv1beta2Storage := map[string]rest.Storage{}
-	legacyCPv1beta2Storage["addressgroups"] = addressGroupStorage
-	legacyCPv1beta2Storage["appliedtogroups"] = appliedToGroupStorage
-	legacyCPv1beta2Storage["networkpolicies"] = networkPolicyStorage
-	legacyCPv1beta2Storage["networkpolicies/status"] = networkPolicyStatusStorage
-	legacyCPv1beta2Storage["nodestatssummaries"] = nodeStatsSummaryStorage
-	legacyCPv1beta2Storage["groupassociations"] = groupAssociationStorage
-	legacyCPv1beta2Storage["clustergroupmembers"] = clusterGroupMembershipStorage
-	legacyCPGroup.VersionedResourcesStorageMap["v1beta2"] = legacyCPv1beta2Storage
-
-	legacySystemGroup := genericapiserver.NewDefaultAPIGroupInfo(legacysystem.GroupName, Scheme, metav1.ParameterCodec, Codecs)
-	legacySystemGroup.VersionedResourcesStorageMap["v1beta1"] = systemStorage
-
-	legacyStatsGroup := genericapiserver.NewDefaultAPIGroupInfo(legacyapistats.GroupName, Scheme, metav1.ParameterCodec, Codecs)
-	legacyStatsGroup.VersionedResourcesStorageMap["v1alpha1"] = statsStorage
-
-	// legacy API groups
-	groups = append(groups, &legacyCPGroup, &legacySystemGroup, &legacyStatsGroup)
 
 	for _, apiGroupInfo := range groups {
 		if err := s.GenericAPIServer.InstallAPIGroup(apiGroupInfo); err != nil {
@@ -263,6 +239,9 @@ func CleanupDeprecatedAPIServices(aggregatorClient clientset.Interface) error {
 	deprecatedAPIServices := []string{
 		"v1beta1.networking.antrea.tanzu.vmware.com",
 		"v1beta1.controlplane.antrea.tanzu.vmware.com",
+		"v1alpha1.stats.antrea.tanzu.vmware.com",
+		"v1beta1.system.antrea.tanzu.vmware.com",
+		"v1beta2.controlplane.antrea.tanzu.vmware.com",
 	}
 	for _, as := range deprecatedAPIServices {
 		err := aggregatorClient.ApiregistrationV1().APIServices().Delete(context.TODO(), as, metav1.DeleteOptions{})
@@ -306,8 +285,44 @@ func installHandlers(c *ExtraConfig, s *genericapiserver.GenericAPIServer) {
 		})
 	}
 
+	if features.DefaultFeatureGate.Enabled(features.Egress) || features.DefaultFeatureGate.Enabled(features.ServiceExternalIP) {
+		s.Handler.NonGoRestfulMux.HandleFunc("/validate/externalippool", webhook.HandlerForValidateFunc(c.externalIPPoolController.ValidateExternalIPPool))
+	}
+
 	if features.DefaultFeatureGate.Enabled(features.Egress) {
-		s.Handler.NonGoRestfulMux.HandleFunc("/validate/externalippool", webhook.HandlerForValidateFunc(c.egressController.ValidateExternalIPPool))
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/egress", webhook.HandlerForValidateFunc(c.egressController.ValidateEgress))
+	}
+
+	if features.DefaultFeatureGate.Enabled(features.AntreaIPAM) {
+		s.Handler.NonGoRestfulMux.HandleFunc("/validate/ippool", webhook.HandlerForValidateFunc(ipam.ValidateIPPool))
+	}
+}
+
+func DefaultCAConfig() *certificate.CAConfig {
+	return &certificate.CAConfig{
+		CAConfigMapName: certificate.AntreaCAConfigMapName,
+		APIServiceNames: []string{
+			"v1alpha1.stats.antrea.io",
+			"v1beta1.system.antrea.io",
+			"v1beta2.controlplane.antrea.io",
+		},
+		ValidatingWebhooks: []string{
+			"crdvalidator.antrea.io",
+		},
+		MutationWebhooks: []string{
+			"crdmutator.antrea.io",
+		},
+		OptionalMutationWebhooks: []string{
+			"labelsmutator.antrea.io",
+		},
+		CRDsWithConversionWebhooks: []string{
+			"clustergroups.crd.antrea.io",
+		},
+		CertDir:           "/var/run/antrea/antrea-controller-tls",
+		SelfSignedCertDir: "/var/run/antrea/antrea-controller-self-signed",
+		CertReadyTimeout:  2 * time.Minute,
+		MaxRotateDuration: time.Hour * (24 * 365),
+		ServiceName:       certificate.AntreaServiceName,
+		PairName:          "antrea-controller",
 	}
 }

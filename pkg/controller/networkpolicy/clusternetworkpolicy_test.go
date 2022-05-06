@@ -51,12 +51,36 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 		},
 	}
 
+	svcA := v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "svcA",
+			Namespace: "nsA",
+		},
+		Spec: v1.ServiceSpec{
+			Ports: []v1.ServicePort{
+				{
+					Port:       80,
+					TargetPort: int80,
+				},
+			},
+		},
+	}
+
+	saA := v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "saA",
+			Namespace: nsA.Name,
+		},
+	}
+
 	allowAction := crdv1alpha1.RuleActionAllow
 	dropAction := crdv1alpha1.RuleActionDrop
 	protocolTCP := controlplane.ProtocolTCP
 	selectorA := metav1.LabelSelector{MatchLabels: map[string]string{"foo1": "bar1"}}
 	selectorB := metav1.LabelSelector{MatchLabels: map[string]string{"foo2": "bar2"}}
 	selectorC := metav1.LabelSelector{MatchLabels: map[string]string{"foo3": "bar3"}}
+	selectorD := metav1.LabelSelector{MatchLabels: map[string]string{"internal.antrea.io/service-account": saA.Name}}
+
 	labelSelectorA, _ := metav1.LabelSelectorAsSelector(&selectorA)
 	labelSelectorB, _ := metav1.LabelSelectorAsSelector(&selectorB)
 	cgA := crdv1alpha3.ClusterGroup{
@@ -129,7 +153,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -143,7 +167,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionOut,
 						To: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -155,7 +179,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expectedAppliedToGroups: 1,
 			expectedAddressGroups:   1,
@@ -213,7 +237,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -227,7 +251,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", nil, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -239,7 +263,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expectedAppliedToGroups: 1,
 			expectedAddressGroups:   2,
@@ -298,7 +322,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -312,7 +336,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", nil, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -324,7 +348,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expectedAppliedToGroups: 1,
 			expectedAddressGroups:   2,
@@ -371,7 +395,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -384,7 +408,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expectedAppliedToGroups: 1,
 			expectedAddressGroups:   1,
@@ -450,9 +474,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 				Rules: []controlplane.NetworkPolicyRule{
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -465,9 +489,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", nil, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -480,8 +504,8 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 				},
 				AppliedToGroups: []string{
-					getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName),
-					getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName),
 				},
 				AppliedToPerRule: true,
 			},
@@ -569,7 +593,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expectedAppliedToGroups: 1,
 			expectedAddressGroups:   1,
@@ -637,7 +661,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Direction:       controlplane.DirectionIn,
 						AppliedToGroups: []string{cgA.Name},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -652,7 +676,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 						Direction:       controlplane.DirectionOut,
 						AppliedToGroups: []string{cgA.Name},
 						To: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -726,9 +750,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 				Rules: []controlplane.NetworkPolicyRule{
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("nsA", nil, nil, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", nil, nil, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("nsA", nil, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", nil, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -741,9 +765,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("nsB", nil, nil, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsB", nil, nil, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("nsB", nil, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsB", nil, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -756,9 +780,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", nil, &metav1.LabelSelector{}, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &metav1.LabelSelector{}, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", nil, &selectorA, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorA, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -771,9 +795,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 				},
 				AppliedToGroups: []string{
-					getNormalizedUID(toGroupSelector("nsA", nil, nil, nil).NormalizedName),
-					getNormalizedUID(toGroupSelector("nsB", nil, nil, nil).NormalizedName),
-					getNormalizedUID(toGroupSelector("", nil, &metav1.LabelSelector{}, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("nsA", nil, nil, nil, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("nsB", nil, nil, nil, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("", nil, &metav1.LabelSelector{}, nil, nil).NormalizedName),
 				},
 				AppliedToPerRule:      true,
 				PerNamespaceSelectors: []labels.Selector{labels.Everything()},
@@ -846,9 +870,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 				Rules: []controlplane.NetworkPolicyRule{
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("nsA", &selectorA, nil, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorA, nil, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("nsA", &selectorA, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorA, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -861,9 +885,9 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 					{
 						Direction:       controlplane.DirectionIn,
-						AppliedToGroups: []string{getNormalizedUID(toGroupSelector("nsB", nil, nil, nil).NormalizedName)},
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsB", nil, nil, nil, nil).NormalizedName)},
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("nsB", nil, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsB", nil, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -876,14 +900,359 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 					},
 				},
 				AppliedToGroups: []string{
-					getNormalizedUID(toGroupSelector("nsA", &selectorA, nil, nil).NormalizedName),
-					getNormalizedUID(toGroupSelector("nsB", nil, nil, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorA, nil, nil, nil).NormalizedName),
+					getNormalizedUID(antreatypes.NewGroupSelector("nsB", nil, nil, nil, nil).NormalizedName),
 				},
 				AppliedToPerRule:      true,
 				PerNamespaceSelectors: []labels.Selector{labelSelectorA, labelSelectorB},
 			},
 			expectedAppliedToGroups: 2,
 			expectedAddressGroups:   2,
+		},
+		{
+			name: "rule-with-to-service",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpK", UID: "uidK"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{PodSelector: &selectorA},
+					},
+					Priority: p10,
+					Egress: []crdv1alpha1.Rule{
+						{
+							ToServices: []crdv1alpha1.NamespacedName{
+								{
+									Namespace: "nsA",
+									Name:      "svcA",
+								},
+							},
+							Action: &dropAction,
+						},
+					},
+				},
+			},
+			expectedPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidK",
+				Name: "uidK",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpK",
+					UID:  "uidK",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							ToServices: []controlplane.ServiceReference{
+								{
+									Namespace: "nsA",
+									Name:      "svcA",
+								},
+							},
+						},
+						Priority: 0,
+						Action:   &dropAction,
+					},
+				},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
+			},
+			expectedAppliedToGroups: 1,
+			expectedAddressGroups:   0,
+		},
+		{
+			name: "applied-to-with-service-account-namespaced-name",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpL", UID: "uidL"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{
+							ServiceAccount: &crdv1alpha1.NamespacedName{
+								Name:      saA.Name,
+								Namespace: saA.Namespace,
+							},
+						},
+					},
+					Priority: p10,
+					Egress: []crdv1alpha1.Rule{
+						{
+							ToServices: []crdv1alpha1.NamespacedName{
+								{
+									Namespace: "nsA",
+									Name:      "svcA",
+								},
+							},
+							Action: &dropAction,
+						},
+					},
+				},
+			},
+			expectedPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidL",
+				Name: "uidL",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpL",
+					UID:  "uidL",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							ToServices: []controlplane.ServiceReference{
+								{
+									Namespace: "nsA",
+									Name:      "svcA",
+								},
+							},
+						},
+						Priority: 0,
+						Action:   &dropAction,
+					},
+				},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName)},
+			},
+			expectedAppliedToGroups: 1,
+			expectedAddressGroups:   0,
+		},
+		{
+			name: "rule-with-service-account-namespaced-name",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpP", UID: "uidP"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{
+							PodSelector: &selectorA,
+						},
+					},
+					Priority: p10,
+					Egress: []crdv1alpha1.Rule{
+						{
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									ServiceAccount: &crdv1alpha1.NamespacedName{
+										Name:      saA.Name,
+										Namespace: saA.Namespace,
+									},
+								},
+							},
+							Action: &dropAction,
+						},
+					},
+				},
+			},
+			expectedPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidP",
+				Name: "uidP",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpP",
+					UID:  "uidP",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName)},
+						},
+						Priority: 0,
+						Action:   &dropAction,
+					},
+				},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
+			},
+			expectedAppliedToGroups: 1,
+			expectedAddressGroups:   1,
+		},
+		{
+			name: "rule-applied-to-with-service-account-namespaced-name",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpQ", UID: "uidQ"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					Priority: p10,
+					Egress: []crdv1alpha1.Rule{
+						{
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									PodSelector: &selectorA,
+								},
+							},
+							Action: &dropAction,
+							AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									ServiceAccount: &crdv1alpha1.NamespacedName{
+										Name:      saA.Name,
+										Namespace: saA.Namespace,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidQ",
+				Name: "uidQ",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpQ",
+					UID:  "uidQ",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
+						},
+						Priority:        0,
+						Action:          &dropAction,
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName)},
+					},
+				},
+				AppliedToGroups:  []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName)},
+				AppliedToPerRule: true,
+			},
+			expectedAppliedToGroups: 1,
+			expectedAddressGroups:   1,
+		},
+		{
+			name: "service-account-per-namespace-rule",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpR", UID: "uidR"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{
+							ServiceAccount: &crdv1alpha1.NamespacedName{
+								Name:      saA.Name,
+								Namespace: saA.Namespace,
+							},
+						},
+					},
+					Priority: p10,
+					Egress: []crdv1alpha1.Rule{
+						{
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									Namespaces: &crdv1alpha1.PeerNamespaces{
+										Match: crdv1alpha1.NamespaceMatchSelf,
+									},
+								},
+							},
+							Action: &dropAction,
+						},
+						{
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									NamespaceSelector: &selectorB,
+								},
+							},
+							Action: &allowAction,
+						},
+					},
+				},
+			},
+			expectedPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidR",
+				Name: "uidR",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpR",
+					UID:  "uidR",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", nil, nil, nil, nil).NormalizedName)},
+						},
+						Priority:        0,
+						Action:          &dropAction,
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName)},
+					},
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorB, nil, nil).NormalizedName)},
+						},
+						Priority:        1,
+						Action:          &allowAction,
+						AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName)},
+					},
+				},
+				AppliedToGroups: []string{
+					getNormalizedUID(antreatypes.NewGroupSelector("nsA", &selectorD, nil, nil, nil).NormalizedName),
+				},
+				AppliedToPerRule:      true,
+				PerNamespaceSelectors: []labels.Selector{},
+			},
+			expectedAppliedToGroups: 1,
+			expectedAddressGroups:   2,
+		},
+		{
+			name: "rule-with-node-selector",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpL", UID: "uidL"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{PodSelector: &selectorA},
+					},
+					Priority: p10,
+					Egress: []crdv1alpha1.Rule{
+						{
+							Ports: []crdv1alpha1.NetworkPolicyPort{
+								{
+									Port: &int81,
+								},
+							},
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									NodeSelector: &selectorB,
+								},
+							},
+							Action: &dropAction,
+						},
+					},
+				},
+			},
+			expectedPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidL",
+				Name: "uidL",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpL",
+					UID:  "uidL",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, nil, nil, &selectorB).NormalizedName)},
+						},
+						Services: []controlplane.Service{
+							{
+								Protocol: &protocolTCP,
+								Port:     &int81,
+							},
+						},
+						Priority: 0,
+						Action:   &dropAction,
+					},
+				},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
+			},
+			expectedAppliedToGroups: 1,
+			expectedAddressGroups:   1,
 		},
 	}
 	for _, tt := range tests {
@@ -893,6 +1262,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 			c.cgStore.Add(&cgA)
 			c.namespaceStore.Add(&nsA)
 			c.namespaceStore.Add(&nsB)
+			c.serviceStore.Add(&svcA)
 			if tt.inputPolicy.Spec.Tier != "" {
 				c.tierStore.Add(&tierA)
 			}
@@ -907,6 +1277,7 @@ func TestProcessClusterNetworkPolicy(t *testing.T) {
 			assert.ElementsMatch(t, tt.expectedPolicy.PerNamespaceSelectors, actualPolicy.PerNamespaceSelectors)
 			assert.ElementsMatch(t, tt.expectedPolicy.AppliedToGroups, actualPolicy.AppliedToGroups)
 			assert.Equal(t, tt.expectedAppliedToGroups, len(c.appliedToGroupStore.List()))
+			assert.Equal(t, tt.expectedAddressGroups, len(c.addressGroupStore.List()))
 		})
 	}
 }
@@ -933,7 +1304,7 @@ func TestAddCNP(t *testing.T) {
 	selectorC := metav1.LabelSelector{MatchLabels: map[string]string{"foo3": "bar3"}}
 	selectorAll := metav1.LabelSelector{}
 	matchAllPeerEgress := matchAllPeer
-	matchAllPeerEgress.AddressGroups = []string{getNormalizedUID(toGroupSelector("", nil, &selectorAll, nil).NormalizedName)}
+	matchAllPeerEgress.AddressGroups = []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorAll, nil, nil).NormalizedName)}
 	tests := []struct {
 		name               string
 		inputPolicy        *crdv1alpha1.ClusterNetworkPolicy
@@ -983,7 +1354,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -995,7 +1366,7 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   1,
@@ -1041,7 +1412,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1053,7 +1424,7 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   1,
@@ -1100,7 +1471,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1112,7 +1483,7 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   1,
@@ -1159,7 +1530,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1171,7 +1542,7 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   1,
@@ -1233,7 +1604,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1247,7 +1618,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionOut,
 						To: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1259,7 +1630,7 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   1,
@@ -1317,7 +1688,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1331,7 +1702,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", nil, &selectorC, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, &selectorC, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1343,7 +1714,7 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   2,
@@ -1390,7 +1761,7 @@ func TestAddCNP(t *testing.T) {
 					{
 						Direction: controlplane.DirectionIn,
 						From: controlplane.NetworkPolicyPeer{
-							AddressGroups: []string{getNormalizedUID(toGroupSelector("", &selectorB, nil, nil).NormalizedName)},
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorB, nil, nil, nil).NormalizedName)},
 						},
 						Services: []controlplane.Service{
 							{
@@ -1403,10 +1774,185 @@ func TestAddCNP(t *testing.T) {
 						Action:   &allowAction,
 					},
 				},
-				AppliedToGroups: []string{getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
 			},
 			expAppliedToGroups: 1,
 			expAddressGroups:   1,
+		},
+		{
+			name: "rules-with-node-selector",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpI", UID: "uidI"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{PodSelector: &selectorA},
+					},
+					Priority: p10,
+					Ingress: []crdv1alpha1.Rule{
+						{
+							Ports: []crdv1alpha1.NetworkPolicyPort{
+								{
+									Port: &int80,
+								},
+							},
+							From: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									NodeSelector: &selectorB,
+								},
+							},
+							Action: &allowAction,
+						},
+					},
+					Egress: []crdv1alpha1.Rule{
+						{
+							Ports: []crdv1alpha1.NetworkPolicyPort{
+								{
+									Port: &int81,
+								},
+							},
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									NodeSelector: &selectorA,
+								},
+							},
+							Action: &allowAction,
+						},
+					},
+				},
+			},
+			expPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidI",
+				Name: "uidI",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpI",
+					UID:  "uidI",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionIn,
+						From: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, nil, nil, &selectorB).NormalizedName)},
+						},
+						Services: []controlplane.Service{
+							{
+								Protocol: &protocolTCP,
+								Port:     &int80,
+							},
+						},
+						Priority: 0,
+						Action:   &allowAction,
+					},
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, nil, nil, &selectorA).NormalizedName)},
+						},
+						Services: []controlplane.Service{
+							{
+								Protocol: &protocolTCP,
+								Port:     &int81,
+							},
+						},
+						Priority: 0,
+						Action:   &allowAction,
+					},
+				},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
+			},
+			expAppliedToGroups: 1,
+			expAddressGroups:   2,
+		},
+		{
+			name: "rules-with-icmp-protocol",
+			inputPolicy: &crdv1alpha1.ClusterNetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{Name: "cnpJ", UID: "uidJ"},
+				Spec: crdv1alpha1.ClusterNetworkPolicySpec{
+					AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+						{PodSelector: &selectorA},
+					},
+					Priority: p10,
+					Ingress: []crdv1alpha1.Rule{
+						{
+							Protocols: []crdv1alpha1.NetworkPolicyProtocol{
+								{
+									ICMP: &crdv1alpha1.ICMPProtocol{
+										ICMPType: &icmpType8,
+										ICMPCode: &icmpCode0,
+									},
+								},
+							},
+							From: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									NodeSelector: &selectorB,
+								},
+							},
+							Action: &allowAction,
+						},
+					},
+					Egress: []crdv1alpha1.Rule{
+						{
+							Protocols: []crdv1alpha1.NetworkPolicyProtocol{
+								{
+									ICMP: &crdv1alpha1.ICMPProtocol{},
+								},
+							},
+							To: []crdv1alpha1.NetworkPolicyPeer{
+								{
+									NodeSelector: &selectorA,
+								},
+							},
+							Action: &allowAction,
+						},
+					},
+				},
+			},
+			expPolicy: &antreatypes.NetworkPolicy{
+				UID:  "uidJ",
+				Name: "uidJ",
+				SourceRef: &controlplane.NetworkPolicyReference{
+					Type: controlplane.AntreaClusterNetworkPolicy,
+					Name: "cnpJ",
+					UID:  "uidJ",
+				},
+				Priority:     &p10,
+				TierPriority: &DefaultTierPriority,
+				Rules: []controlplane.NetworkPolicyRule{
+					{
+						Direction: controlplane.DirectionIn,
+						From: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, nil, nil, &selectorB).NormalizedName)},
+						},
+						Services: []controlplane.Service{
+							{
+								Protocol: &protocolICMP,
+								ICMPType: &icmpType8,
+								ICMPCode: &icmpCode0,
+							},
+						},
+						Priority: 0,
+						Action:   &allowAction,
+					},
+					{
+						Direction: controlplane.DirectionOut,
+						To: controlplane.NetworkPolicyPeer{
+							AddressGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", nil, nil, nil, &selectorA).NormalizedName)},
+						},
+						Services: []controlplane.Service{
+							{
+								Protocol: &protocolICMP,
+							},
+						},
+						Priority: 0,
+						Action:   &allowAction,
+					},
+				},
+				AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)},
+			},
+			expAppliedToGroups: 1,
+			expAddressGroups:   2,
 		},
 	}
 	for _, tt := range tests {
@@ -1427,15 +1973,15 @@ func TestAddCNP(t *testing.T) {
 	for _, tt := range tests {
 		npc.addCNP(tt.inputPolicy)
 	}
-	assert.Equal(t, 7, npc.GetNetworkPolicyNum(), "number of NetworkPolicies do not match")
-	assert.Equal(t, 3, npc.GetAddressGroupNum(), "number of AddressGroups do not match")
+	assert.Equal(t, 9, npc.GetNetworkPolicyNum(), "number of NetworkPolicies do not match")
+	assert.Equal(t, 5, npc.GetAddressGroupNum(), "number of AddressGroups do not match")
 	assert.Equal(t, 1, npc.GetAppliedToGroupNum(), "number of AppliedToGroups do not match")
 }
 
 func TestDeleteCNP(t *testing.T) {
 	selectorA := metav1.LabelSelector{MatchLabels: map[string]string{"foo1": "bar1"}}
 	cnpObj := getCNP()
-	apgID := getNormalizedUID(toGroupSelector("", &selectorA, nil, nil).NormalizedName)
+	apgID := getNormalizedUID(antreatypes.NewGroupSelector("", &selectorA, nil, nil, nil).NormalizedName)
 	_, npc := newController()
 	npc.addCNP(cnpObj)
 	npc.deleteCNP(cnpObj)
@@ -1515,11 +2061,27 @@ func TestProcessRefCG(t *testing.T) {
 			NamespaceSelector: &selectorA,
 		},
 	}
+	cgNested1 := crdv1alpha3.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "cgD", UID: "uidD"},
+		Spec: crdv1alpha3.GroupSpec{
+			ChildGroups: []crdv1alpha3.ClusterGroupReference{"cgB"},
+		},
+	}
+	cgNested2 := crdv1alpha3.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "cgE", UID: "uidE"},
+		Spec: crdv1alpha3.GroupSpec{
+			ChildGroups: []crdv1alpha3.ClusterGroupReference{"cgA", "cgB"},
+		},
+	}
 	_, npc := newController()
 	npc.addClusterGroup(&cgA)
 	npc.addClusterGroup(&cgB)
+	npc.addClusterGroup(&cgNested1)
+	npc.addClusterGroup(&cgNested2)
 	npc.cgStore.Add(&cgA)
 	npc.cgStore.Add(&cgB)
+	npc.cgStore.Add(&cgNested1)
+	npc.cgStore.Add(&cgNested2)
 	tests := []struct {
 		name        string
 		inputCG     string
@@ -1548,6 +2110,28 @@ func TestProcessRefCG(t *testing.T) {
 			name:       "cg-with-ipblock",
 			inputCG:    cgB.Name,
 			expectedAG: "",
+			expectedIPB: []controlplane.IPBlock{
+				{
+					CIDR:   *cidrIPNet,
+					Except: []controlplane.IPNet{},
+				},
+			},
+		},
+		{
+			name:       "nested-cg-with-ipblock",
+			inputCG:    cgNested1.Name,
+			expectedAG: "",
+			expectedIPB: []controlplane.IPBlock{
+				{
+					CIDR:   *cidrIPNet,
+					Except: []controlplane.IPNet{},
+				},
+			},
+		},
+		{
+			name:       "nested-cg-with-ipblock-and-selector",
+			inputCG:    cgNested2.Name,
+			expectedAG: cgNested2.Name,
 			expectedIPB: []controlplane.IPBlock{
 				{
 					CIDR:   *cidrIPNet,

@@ -17,7 +17,6 @@ package noderoute
 import (
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/containernetworking/plugins/pkg/ip"
@@ -42,6 +41,7 @@ import (
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	utilip "antrea.io/antrea/pkg/util/ip"
 	"antrea.io/antrea/pkg/util/k8s"
+	"antrea.io/antrea/pkg/util/runtime"
 )
 
 const (
@@ -71,12 +71,14 @@ type Controller struct {
 	nodeInformer     coreinformers.NodeInformer
 	nodeLister       corelisters.NodeLister
 	nodeListerSynced cache.InformerSynced
+	svcLister        corelisters.ServiceLister
 	queue            workqueue.RateLimitingInterface
 	// installedNodes records routes and flows installation states of Nodes.
 	// The key is the host name of the Node, the value is the nodeRouteInfo of the Node.
 	// A node will be in the map after its flows and routes are installed successfully.
 	installedNodes  cache.Indexer
 	wireGuardClient wireguard.Interface
+	proxyAll        bool
 }
 
 // NewNodeRouteController instantiates a new Controller object which will process Node events
@@ -91,8 +93,10 @@ func NewNodeRouteController(
 	networkConfig *config.NetworkConfig,
 	nodeConfig *config.NodeConfig,
 	wireguardClient wireguard.Interface,
+	proxyAll bool,
 ) *Controller {
 	nodeInformer := informerFactory.Core().V1().Nodes()
+	svcLister := informerFactory.Core().V1().Services()
 	controller := &Controller{
 		kubeClient:       kubeClient,
 		ovsBridgeClient:  ovsBridgeClient,
@@ -104,9 +108,11 @@ func NewNodeRouteController(
 		nodeInformer:     nodeInformer,
 		nodeLister:       nodeInformer.Lister(),
 		nodeListerSynced: nodeInformer.Informer().HasSynced,
+		svcLister:        svcLister.Lister(),
 		queue:            workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "noderoute"),
 		installedNodes:   cache.NewIndexer(nodeRouteInfoKeyFunc, cache.Indexers{nodeRouteInfoPodCIDRIndexName: nodeRouteInfoPodCIDRIndexFunc}),
 		wireGuardClient:  wireguardClient,
+		proxyAll:         proxyAll,
 	}
 	nodeInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
@@ -190,8 +196,27 @@ func (c *Controller) removeStaleGatewayRoutes() error {
 		desiredPodCIDRs = append(desiredPodCIDRs, podCIDRs...)
 	}
 
+	// TODO: This is not the best place to keep the ClusterIP Service routes.
+	desiredClusterIPSvcIPs := map[string]bool{}
+	if c.proxyAll && runtime.IsWindowsPlatform() {
+		// The route for virtual IP -> antrea-gw0 should be always kept.
+		desiredClusterIPSvcIPs[config.VirtualServiceIPv4.String()] = true
+
+		svcs, err := c.svcLister.List(labels.Everything())
+		for _, svc := range svcs {
+			for _, ip := range svc.Spec.ClusterIPs {
+				desiredClusterIPSvcIPs[ip] = true
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("error when listing ClusterIP Service IPs: %v", err)
+		}
+	}
+
 	// routeClient will remove orphaned routes whose destinations are not in desiredPodCIDRs.
-	if err := c.routeClient.Reconcile(desiredPodCIDRs); err != nil {
+	// If proxyAll enabled, it will also remove routes that are for Windows ClusterIP Services
+	// which no longer exist.
+	if err := c.routeClient.Reconcile(desiredPodCIDRs, desiredClusterIPSvcIPs); err != nil {
 		return err
 	}
 	return nil
@@ -506,7 +531,7 @@ func (c *Controller) addNodeRoute(nodeName string, node *corev1.Node) error {
 
 		peerPodCIDRAddr, peerPodCIDR, err := net.ParseCIDR(podCIDR)
 		if err != nil {
-			klog.Errorf("Failed to parse PodCIDR %s for Node %s", node.Spec.PodCIDR, nodeName)
+			klog.Errorf("Failed to parse PodCIDR %s for Node %s", podCIDR, nodeName)
 			return nil
 		}
 		peerGatewayIP := ip.NextIP(peerPodCIDRAddr)
@@ -523,8 +548,8 @@ func (c *Controller) addNodeRoute(nodeName string, node *corev1.Node) error {
 
 	var ipsecTunOFPort uint32
 	if c.networkConfig.TrafficEncryptionMode == config.TrafficEncryptionModeIPSec {
-		// Create a separate tunnel port for the Node, as OVS IPSec monitor needs to
-		// read PSK and remote IP from the Node's tunnel interface to create IPSec
+		// Create a separate tunnel port for the Node, as OVS IPsec monitor needs to
+		// read PSK and remote IP from the Node's tunnel interface to create IPsec
 		// security policies.
 		peerNodeIP := peerNodeIPs.IPv4
 		if peerNodeIP == nil {
@@ -596,7 +621,7 @@ func getPodCIDRsOnNode(node *corev1.Node) []string {
 	return []string{node.Spec.PodCIDR}
 }
 
-// createIPSecTunnelPort creates an IPSec tunnel port for the remote Node if the
+// createIPSecTunnelPort creates an IPsec tunnel port for the remote Node if the
 // tunnel does not exist, and returns the ofport number.
 func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int32, error) {
 	portName := util.GenerateNodeTunnelInterfaceName(nodeName)
@@ -606,15 +631,15 @@ func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int3
 	// tunnel port for which the configuration has changed, return error to requeue the Node.
 	if exists {
 		if !c.compareInterfaceConfig(interfaceConfig, nodeIP, portName) {
-			klog.InfoS("IPSec tunnel interface config doesn't match the cached one, deleting the stale IPSec tunnel port", "node", nodeName, "interface", interfaceConfig.InterfaceName)
+			klog.InfoS("IPsec tunnel interface config doesn't match the cached one, deleting the stale IPsec tunnel port", "node", nodeName, "interface", interfaceConfig.InterfaceName)
 			if err := c.ovsBridgeClient.DeletePort(interfaceConfig.PortUUID); err != nil {
-				return 0, fmt.Errorf("fail to delete the stale IPSec tunnel port %s: %v", interfaceConfig.InterfaceName, err)
+				return 0, fmt.Errorf("fail to delete the stale IPsec tunnel port %s: %v", interfaceConfig.InterfaceName, err)
 			}
 			c.interfaceStore.DeleteInterface(interfaceConfig)
 			exists = false
 		} else {
 			if interfaceConfig.OFPort != 0 {
-				klog.V(2).InfoS("Found cached IPSec tunnel interface", "node", nodeName, "interface", interfaceConfig.InterfaceName, "port", interfaceConfig.OFPort)
+				klog.V(2).InfoS("Found cached IPsec tunnel interface", "node", nodeName, "interface", interfaceConfig.InterfaceName, "port", interfaceConfig.OFPort)
 				return interfaceConfig.OFPort, nil
 			}
 		}
@@ -631,9 +656,9 @@ func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int3
 			c.networkConfig.IPSecPSK,
 			ovsExternalIDs)
 		if err != nil {
-			return 0, fmt.Errorf("failed to create IPSec tunnel port for Node %s", nodeName)
+			return 0, fmt.Errorf("failed to create IPsec tunnel port for Node %s", nodeName)
 		}
-		klog.Infof("Created IPSec tunnel port %s for Node %s", portName, nodeName)
+		klog.Infof("Created IPsec tunnel port %s for Node %s", portName, nodeName)
 
 		ovsPortConfig := &interfacestore.OVSPortConfig{PortUUID: portUUID}
 		interfaceConfig = interfacestore.NewIPSecTunnelInterface(
@@ -646,18 +671,18 @@ func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int3
 		c.interfaceStore.AddInterface(interfaceConfig)
 	}
 	// GetOFPort will wait for up to 1 second for OVSDB to report the OFPort number.
-	ofPort, err := c.ovsBridgeClient.GetOFPort(interfaceConfig.InterfaceName)
+	ofPort, err := c.ovsBridgeClient.GetOFPort(interfaceConfig.InterfaceName, false)
 	if err != nil {
 		// Could be a temporary OVSDB connection failure or timeout.
 		// Let NodeRouteController retry at errors.
-		return 0, fmt.Errorf("failed to get of_port of IPSec tunnel port for Node %s", nodeName)
+		return 0, fmt.Errorf("failed to get of_port of IPsec tunnel port for Node %s", nodeName)
 	}
 	interfaceConfig.OFPort = ofPort
 	return ofPort, nil
 }
 
 // ParseTunnelInterfaceConfig initializes and returns an InterfaceConfig struct
-// for a tunnel interface. It reads tunnel type, remote IP, IPSec PSK from the
+// for a tunnel interface. It reads tunnel type, remote IP, IPsec PSK from the
 // OVS interface options, and NodeName from the OVS port external_ids.
 // nil is returned, if the OVS port and interface configurations are not valid
 // for a tunnel interface.
@@ -739,24 +764,15 @@ func getNodeMAC(node *corev1.Node) (net.HardwareAddr, error) {
 }
 
 func (c *Controller) getNodeTransportAddrs(node *corev1.Node) (*utilip.DualStackIPs, error) {
-	var transportAddrs = new(utilip.DualStackIPs)
-	if c.networkConfig.TransportIface != "" {
-		transportAddrsStr := node.Annotations[types.NodeTransportAddressAnnotationKey]
-		if transportAddrsStr != "" {
-			for _, addr := range strings.Split(transportAddrsStr, ",") {
-				peerNodeAddr := net.ParseIP(addr)
-				if peerNodeAddr == nil {
-					return nil, fmt.Errorf("invalid annotation for transport-address on Node %s: %s", node.Name, transportAddrsStr)
-				}
-				if peerNodeAddr.To4() == nil {
-					transportAddrs.IPv6 = peerNodeAddr
-				} else {
-					transportAddrs.IPv4 = peerNodeAddr
-				}
-			}
+	if c.networkConfig.TransportIface != "" || len(c.networkConfig.TransportIfaceCIDRs) > 0 {
+		transportAddrs, err := k8s.GetNodeAddrsFromAnnotations(node, types.NodeTransportAddressAnnotationKey)
+		if err != nil {
+			return nil, err
+		}
+		if transportAddrs != nil {
 			return transportAddrs, nil
 		}
-		klog.InfoS("Transport address is not found, using NodeIP instead")
+		klog.InfoS("Transport address is not found, using NodeIP instead", "node", node.Name)
 	}
 	// Use NodeIP if the transport IP address is not set or not found.
 	peerNodeIPs, err := k8s.GetNodeAddrs(node)

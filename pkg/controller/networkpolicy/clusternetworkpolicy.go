@@ -15,6 +15,8 @@
 package networkpolicy
 
 import (
+	"reflect"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -24,8 +26,10 @@ import (
 
 	"antrea.io/antrea/pkg/apis/controlplane"
 	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	"antrea.io/antrea/pkg/controller/grouping"
 	"antrea.io/antrea/pkg/controller/networkpolicy/store"
 	antreatypes "antrea.io/antrea/pkg/controller/types"
+	"antrea.io/antrea/pkg/util/k8s"
 	utilsets "antrea.io/antrea/pkg/util/sets"
 )
 
@@ -54,7 +58,7 @@ func (n *NetworkPolicyController) updateCNP(old, cur interface{}) {
 	// enqueue task to internal NetworkPolicy Workqueue.
 	curInternalNP := n.processClusterNetworkPolicy(curCNP)
 	klog.V(2).Infof("Updating existing internal NetworkPolicy %s for %s", curInternalNP.Name, curInternalNP.SourceRef.ToString())
-	// Retrieve old crdv1alpha1.NetworkPolicy object.
+	// Retrieve old crdv1alpha1.ClusterNetworkPolicy object.
 	oldCNP := old.(*crdv1alpha1.ClusterNetworkPolicy)
 	// Old and current NetworkPolicy share the same key.
 	key := internalNetworkPolicyKeyFunc(oldCNP)
@@ -126,12 +130,14 @@ func (n *NetworkPolicyController) deleteCNP(old interface{}) {
 	n.deleteDereferencedAddressGroups(oldInternalNP)
 }
 
-// reprocessCNP is triggered by Namespace ADD/UPDATE/DELETE events when they impact the
-// per-namespace rules of a CNP.
-func (n *NetworkPolicyController) reprocessCNP(cnp *crdv1alpha1.ClusterNetworkPolicy) {
+// reprocessCNP is triggered when a CNP may be impacted by non-ClusterNetworkPolicy events, including Namespace events
+// (for per-namespace rules) and ClusterGroup events (for ClusterGroup reference).
+func (n *NetworkPolicyController) reprocessCNP(cnp *crdv1alpha1.ClusterNetworkPolicy, enqueueAppliedToGroup bool) {
 	key := internalNetworkPolicyKeyFunc(cnp)
 	n.internalNetworkPolicyMutex.Lock()
 	oldInternalNPObj, exist, _ := n.internalNetworkPolicyStore.Get(key)
+	// The internal NetworkPolicy may haven't been created yet. It's fine to skip processing this CNP as addCNP will
+	// create it eventually.
 	if !exist {
 		klog.V(2).Infof("Cannot find the original internal NetworkPolicy, skip reprocessCNP")
 		n.internalNetworkPolicyMutex.Unlock()
@@ -145,6 +151,11 @@ func (n *NetworkPolicyController) reprocessCNP(cnp *crdv1alpha1.ClusterNetworkPo
 	curInternalNP.SpanMeta = oldInternalNP.SpanMeta
 	n.internalNetworkPolicyStore.Update(curInternalNP)
 	n.internalNetworkPolicyMutex.Unlock()
+	if enqueueAppliedToGroup {
+		for _, atg := range curInternalNP.AppliedToGroups {
+			n.enqueueAppliedToGroup(atg)
+		}
+	}
 	// Enqueue addressGroup keys to update their Node span.
 	for _, rule := range curInternalNP.Rules {
 		for _, addrGroupName := range rule.From.AddressGroups {
@@ -196,7 +207,7 @@ func (n *NetworkPolicyController) addNamespace(obj interface{}) {
 	affectedACNPs := n.filterPerNamespaceRuleACNPsByNSLabels(namespace.Labels)
 	for cnpName := range affectedACNPs {
 		if cnp, err := n.cnpLister.Get(cnpName); err == nil {
-			n.reprocessCNP(cnp)
+			n.reprocessCNP(cnp, false)
 		}
 	}
 }
@@ -213,7 +224,7 @@ func (n *NetworkPolicyController) updateNamespace(oldObj, curObj interface{}) {
 	affectedACNPs := utilsets.SymmetricDifferenceString(affectedACNPsByOldLabels, affectedACNPsByCurLabels)
 	for cnpName := range affectedACNPs {
 		if cnp, err := n.cnpLister.Get(cnpName); err == nil {
-			n.reprocessCNP(cnp)
+			n.reprocessCNP(cnp, false)
 		}
 	}
 }
@@ -243,8 +254,83 @@ func (n *NetworkPolicyController) deleteNamespace(old interface{}) {
 			klog.Errorf("Error getting Antrea ClusterNetworkPolicy %s", cnpName)
 			continue
 		}
-		n.reprocessCNP(cnp)
+		n.reprocessCNP(cnp, false)
 	}
+}
+
+func (c *NetworkPolicyController) filterAGsFromNodeLabels(node *v1.Node) sets.String {
+	ags := sets.NewString()
+	addressGroupObjs, _ := c.addressGroupStore.GetByIndex(store.IsNodeAddressGroupIndex, "true")
+	for _, addressGroupObj := range addressGroupObjs {
+		addressGroup := addressGroupObj.(*antreatypes.AddressGroup)
+		nodeSelector := addressGroup.Selector.NodeSelector
+		if nodeSelector.Matches(labels.Set(node.GetLabels())) {
+			ags.Insert(addressGroup.Name)
+		}
+	}
+	return ags
+}
+
+func (c *NetworkPolicyController) addNode(obj interface{}) {
+	node := obj.(*v1.Node)
+	affectedAGs := c.filterAGsFromNodeLabels(node)
+	for key := range affectedAGs {
+		c.enqueueAddressGroup(key)
+	}
+	klog.V(2).InfoS("Processed Node CREATE event", "nodeName", node.Name, "affectedAGs", affectedAGs.Len())
+}
+
+func (c *NetworkPolicyController) deleteNode(obj interface{}) {
+	node, ok := obj.(*v1.Node)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.ErrorS(nil, "Processed Node DELETE event error", "obj", obj)
+			return
+		}
+		node, ok = tombstone.Obj.(*v1.Node)
+		if !ok {
+			klog.ErrorS(nil, "Processed Node DELETE event error", "obj", tombstone.Obj)
+			return
+		}
+	}
+	// enqueue affected address group
+	affectedAGs := c.filterAGsFromNodeLabels(node)
+	for key := range affectedAGs {
+		c.enqueueAddressGroup(key)
+	}
+	klog.V(2).InfoS("Processed Node DELETE event", "nodeName", node.Name, "affectedAGs", affectedAGs.Len())
+}
+
+func nodeIPChanged(oldNode, newNode *v1.Node) (changed bool) {
+	oldIPs, _ := k8s.GetNodeAllAddrs(oldNode)
+	newIPs, _ := k8s.GetNodeAllAddrs(newNode)
+	return !oldIPs.Equal(newIPs)
+}
+
+func (c *NetworkPolicyController) updateNode(oldObj, newObj interface{}) {
+	node := newObj.(*v1.Node)
+	oldNode := oldObj.(*v1.Node)
+	ipChanged := nodeIPChanged(oldNode, node)
+	labelsChanged := !reflect.DeepEqual(node.GetLabels(), oldNode.GetLabels())
+	if !labelsChanged && !ipChanged {
+		klog.V(2).InfoS("Processed Node UPDATE event, labels and IPs not changed", "nodeName", node.Name)
+		return
+	}
+
+	affectedAGs := c.filterAGsFromNodeLabels(node)
+	if labelsChanged {
+		oldAGs := c.filterAGsFromNodeLabels(oldNode)
+		if ipChanged {
+			affectedAGs = utilsets.MergeString(affectedAGs, oldAGs)
+		} else {
+			affectedAGs = utilsets.SymmetricDifferenceString(affectedAGs, oldAGs)
+		}
+	}
+	for ag := range affectedAGs {
+		c.enqueueAddressGroup(ag)
+	}
+	klog.V(2).InfoS("Processed Node UPDATE event", "nodeName", node.Name, "affectedAGs", affectedAGs.Len())
 }
 
 // processClusterNetworkPolicy creates an internal NetworkPolicy instance
@@ -255,7 +341,7 @@ func (n *NetworkPolicyController) deleteNamespace(old interface{}) {
 // of an UPDATE event.
 func (n *NetworkPolicyController) processClusterNetworkPolicy(cnp *crdv1alpha1.ClusterNetworkPolicy) *antreatypes.NetworkPolicy {
 	hasPerNamespaceRule := hasPerNamespaceRule(cnp)
-	// If one of the ACNP rule is a per-namespace rule (a peer in that rule has namspaces.Match set
+	// If one of the ACNP rule is a per-namespace rule (a peer in that rule has namespaces.Match set
 	// to Self), the policy will need to be converted to appliedTo per rule policy, as the appliedTo
 	// will be different for rules created for each namespace.
 	appliedToPerRule := len(cnp.Spec.AppliedTo) == 0 || hasPerNamespaceRule
@@ -271,24 +357,31 @@ func (n *NetworkPolicyController) processClusterNetworkPolicy(cnp *crdv1alpha1.C
 	// If appliedTo is set at spec level and the ACNP has per-namespace rules, then each appliedTo needs
 	// to be split into appliedToGroups for each of its affected Namespace.
 	var clusterAppliedToAffectedNS []string
-	// atgForNamespace is the appliedToGroups splitted by Namespaces.
+	// atgForNamespace is the appliedToGroups split by Namespaces.
 	var atgForNamespace []string
 	if hasPerNamespaceRule && len(cnp.Spec.AppliedTo) > 0 {
 		for _, at := range cnp.Spec.AppliedTo {
-			affectedNS, selectors := n.getAffectedNamespacesForAppliedTo(at)
-			affectedNamespaceSelectors = append(affectedNamespaceSelectors, selectors...)
-			for _, ns := range affectedNS {
-				atg := n.createAppliedToGroup(ns, at.PodSelector, nil, at.ExternalEntitySelector)
+			if at.ServiceAccount != nil {
+				atg := n.createAppliedToGroup(at.ServiceAccount.Namespace, serviceAccountNameToPodSelector(at.ServiceAccount.Name), nil, nil)
 				atgNamesSet.Insert(atg)
-				clusterAppliedToAffectedNS = append(clusterAppliedToAffectedNS, ns)
+				clusterAppliedToAffectedNS = append(clusterAppliedToAffectedNS, at.ServiceAccount.Namespace)
 				atgForNamespace = append(atgForNamespace, atg)
+			} else {
+				affectedNS, selectors := n.getAffectedNamespacesForAppliedTo(at)
+				affectedNamespaceSelectors = append(affectedNamespaceSelectors, selectors...)
+				for _, ns := range affectedNS {
+					atg := n.createAppliedToGroup(ns, at.PodSelector, nil, at.ExternalEntitySelector)
+					atgNamesSet.Insert(atg)
+					clusterAppliedToAffectedNS = append(clusterAppliedToAffectedNS, ns)
+					atgForNamespace = append(atgForNamespace, atg)
+				}
 			}
 		}
 	}
 	var rules []controlplane.NetworkPolicyRule
 	processRules := func(cnpRules []crdv1alpha1.Rule, direction controlplane.Direction) {
 		for idx, cnpRule := range cnpRules {
-			services, namedPortExists := toAntreaServicesForCRD(cnpRule.Ports)
+			services, namedPortExists := toAntreaServicesForCRD(cnpRule.Ports, cnpRule.Protocols)
 			clusterPeers, perNSPeers := splitPeersByScope(cnpRule, direction)
 			addRule := func(peer *controlplane.NetworkPolicyPeer, dir controlplane.Direction, ruleAppliedTos []string) {
 				rule := controlplane.NetworkPolicyRule{
@@ -318,7 +411,11 @@ func (n *NetworkPolicyController) processClusterNetworkPolicy(cnp *crdv1alpha1.C
 				}
 				ruleATGNames := n.processClusterAppliedTo(ruleAppliedTos, atgNamesSet)
 				klog.V(4).Infof("Adding a new cluster-level rule with appliedTos %v for %s", ruleATGNames, cnp.Name)
-				addRule(n.toAntreaPeerForCRD(clusterPeers, cnp, direction, namedPortExists), direction, ruleATGNames)
+				if cnpRule.ToServices != nil {
+					addRule(n.svcRefToPeerForCRD(cnpRule.ToServices, ""), direction, ruleATGNames)
+				} else {
+					addRule(n.toAntreaPeerForCRD(clusterPeers, cnp, direction, namedPortExists), direction, ruleATGNames)
+				}
 			}
 			if len(perNSPeers) > 0 {
 				if len(cnp.Spec.AppliedTo) > 0 {
@@ -330,13 +427,20 @@ func (n *NetworkPolicyController) processClusterNetworkPolicy(cnp *crdv1alpha1.C
 				} else {
 					// Create a rule for each affected Namespace of appliedTo at rule level
 					for _, at := range cnpRule.AppliedTo {
-						affectedNS, selectors := n.getAffectedNamespacesForAppliedTo(at)
-						affectedNamespaceSelectors = append(affectedNamespaceSelectors, selectors...)
-						for _, ns := range affectedNS {
-							atg := n.createAppliedToGroup(ns, at.PodSelector, nil, at.ExternalEntitySelector)
+						if at.ServiceAccount != nil {
+							atg := n.createAppliedToGroup(at.ServiceAccount.Namespace, serviceAccountNameToPodSelector(at.ServiceAccount.Name), nil, nil)
 							atgNamesSet.Insert(atg)
 							klog.V(4).Infof("Adding a new per-namespace rule with appliedTo %v for rule %d of %s", atg, idx, cnp.Name)
-							addRule(n.toNamespacedPeerForCRD(perNSPeers, ns), direction, []string{atg})
+							addRule(n.toNamespacedPeerForCRD(perNSPeers, at.ServiceAccount.Namespace), direction, []string{atg})
+						} else {
+							affectedNS, selectors := n.getAffectedNamespacesForAppliedTo(at)
+							affectedNamespaceSelectors = append(affectedNamespaceSelectors, selectors...)
+							for _, ns := range affectedNS {
+								atg := n.createAppliedToGroup(ns, at.PodSelector, nil, at.ExternalEntitySelector)
+								atgNamesSet.Insert(atg)
+								klog.V(4).Infof("Adding a new per-namespace rule with appliedTo %v for rule %d of %s", atg, idx, cnp.Name)
+								addRule(n.toNamespacedPeerForCRD(perNSPeers, ns), direction, []string{atg})
+							}
 						}
 					}
 				}
@@ -371,6 +475,14 @@ func (n *NetworkPolicyController) processClusterNetworkPolicy(cnp *crdv1alpha1.C
 	return internalNetworkPolicy
 }
 
+// serviceAccountNameToPodSelector returns a PodSelector which could be used to
+// select Pods based on their ServiceAccountName.
+func serviceAccountNameToPodSelector(saName string) *metav1.LabelSelector {
+	return &metav1.LabelSelector{
+		MatchLabels: map[string]string{grouping.CustomLabelKeyPrefix + grouping.CustomLabelKeyServiceAccount: saName},
+	}
+}
+
 // hasPerNamespaceRule returns true if there is at least one per-namespace rule
 func hasPerNamespaceRule(cnp *crdv1alpha1.ClusterNetworkPolicy) bool {
 	for _, ingress := range cnp.Spec.Ingress {
@@ -398,6 +510,8 @@ func (n *NetworkPolicyController) processClusterAppliedTo(appliedTo []crdv1alpha
 		var atg string
 		if at.Group != "" {
 			atg = n.processAppliedToGroupForCG(at.Group)
+		} else if at.ServiceAccount != nil {
+			atg = n.createAppliedToGroup(at.ServiceAccount.Namespace, serviceAccountNameToPodSelector(at.ServiceAccount.Name), nil, nil)
 		} else {
 			atg = n.createAppliedToGroup("", at.PodSelector, at.NamespaceSelector, at.ExternalEntitySelector)
 		}
@@ -479,6 +593,31 @@ func getUniqueNSSelectors(selectors []labels.Selector) []labels.Selector {
 	return selectors[:i]
 }
 
+// processInternalGroupForRule examines the internal group (and its childGroups if applicable)
+// to determine whether an addressGroup needs to be created, and returns any ipBlocks contained
+// by the internal Group as well.
+func (n *NetworkPolicyController) processInternalGroupForRule(group *antreatypes.Group) (bool, []controlplane.IPBlock) {
+	if len(group.IPBlocks) > 0 {
+		return false, group.IPBlocks
+	} else if len(group.ChildGroups) == 0 {
+		return true, nil
+	}
+	var ipBlocks []controlplane.IPBlock
+	createAddrGroup := false
+	for _, childName := range group.ChildGroups {
+		childGroup, found, _ := n.internalGroupStore.Get(childName)
+		if found {
+			child := childGroup.(*antreatypes.Group)
+			createChildAG, ipb := n.processInternalGroupForRule(child)
+			if createChildAG {
+				createAddrGroup = true
+			}
+			ipBlocks = append(ipBlocks, ipb...)
+		}
+	}
+	return createAddrGroup, ipBlocks
+}
+
 // processRefCG processes the ClusterGroup reference present in the rule and returns the
 // NetworkPolicyPeer with the corresponding AddressGroup or IPBlock.
 func (n *NetworkPolicyController) processRefCG(g string) (string, []controlplane.IPBlock) {
@@ -498,12 +637,17 @@ func (n *NetworkPolicyController) processRefCG(g string) (string, []controlplane
 		return "", nil
 	}
 	intGrp := ig.(*antreatypes.Group)
-	if len(intGrp.IPBlocks) > 0 {
-		return "", intGrp.IPBlocks
+	// The ClusterGroup referred in the rule might have childGroups defined using selectors
+	// or ipBlocks (or both). An addressGroup needs to be created as long as there is at least
+	// one childGroup defined by selectors, or the ClusterGroup itself is defined by selectors.
+	// In case of updates, the original addressGroup created will be de-referenced and cleaned
+	// up if the ClusterGroup becomes ipBlocks-only.
+	createAddrGroup, ipb := n.processInternalGroupForRule(intGrp)
+	if createAddrGroup {
+		agKey := n.createAddressGroupForClusterGroupCRD(intGrp)
+		return agKey, ipb
 	}
-	agKey := n.createAddressGroupForClusterGroupCRD(intGrp)
-	// Return if addressGroup was created or found.
-	return agKey, nil
+	return "", ipb
 }
 
 func (n *NetworkPolicyController) processAppliedToGroupForCG(g string) string {

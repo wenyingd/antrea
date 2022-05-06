@@ -33,19 +33,21 @@ import (
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	"antrea.io/antrea/pkg/apis/crd/v1alpha1"
 	"antrea.io/antrea/pkg/features"
+	"antrea.io/antrea/pkg/util/k8s"
 )
 
 type testcase struct {
 	name            string
 	tf              *v1alpha1.Traceflow
 	expectedPhase   v1alpha1.TraceflowPhase
+	expectedReasons []string
 	expectedResults []v1alpha1.NodeResult
 	expectedPktCap  *v1alpha1.Packet
 	// required IP version, skip if not match, default is 0 (no restrict)
-	ipVersion  int
-	skipReason string
+	ipVersion int
 	// Source Pod to run ping for live-traffic Traceflow.
-	srcPod string
+	srcPod       string
+	skipIfNeeded func(t *testing.T)
 }
 
 // TestTraceflow is the top-level test which contains all subtests for
@@ -282,6 +284,7 @@ func testTraceflowIntraNodeANP(t *testing.T, data *TestData) {
 func testTraceflowIntraNode(t *testing.T, data *TestData) {
 	node1 := nodeName(0)
 
+	agentPod, _ := data.getAntreaPodOnNode(node1)
 	node1Pods, node1IPs, node1CleanupFn := createTestBusyboxPods(t, data, 3, testNamespace, node1)
 	defer node1CleanupFn()
 	var pod0IPv4Str, pod1IPv4Str, dstPodIPv4Str, dstPodIPv6Str string
@@ -333,6 +336,7 @@ func testTraceflowIntraNode(t *testing.T, data *TestData) {
 		t.Fatal(err)
 	}
 
+	expectedTTL := int32(64)
 	testcases := []testcase{
 		{
 			name:      "intraNodeTraceflowIPv4",
@@ -550,7 +554,50 @@ func testTraceflowIntraNode(t *testing.T, data *TestData) {
 					},
 				},
 			},
-			expectedPhase: v1alpha1.Failed,
+			expectedPhase:   v1alpha1.Failed,
+			expectedReasons: []string{fmt.Sprintf("Node: %s, error: failed to get the destination Pod: pods \"%s\" not found", node1, "non-existing-pod")},
+		},
+		{
+			name:      "nonExistingSrcPodIPv4",
+			ipVersion: 4,
+			tf: &v1alpha1.Traceflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: randName(fmt.Sprintf("%s-%s-to-%s-%s-", testNamespace, "non-existing-pod", testNamespace, node1Pods[1])),
+				},
+				Spec: v1alpha1.TraceflowSpec{
+					Source: v1alpha1.Source{
+						Namespace: testNamespace,
+						Pod:       "non-existing-pod",
+					},
+					Destination: v1alpha1.Destination{
+						Namespace: testNamespace,
+						Pod:       node1Pods[1],
+					},
+				},
+			},
+			expectedPhase:   v1alpha1.Failed,
+			expectedReasons: []string{fmt.Sprintf("Invalid Traceflow request, err: %+v", fmt.Errorf("requested source Pod %s not found", k8s.NamespacedName(testNamespace, "non-existing-pod")))},
+		},
+		{
+			name:      "hostNetworkSrcPodIPv4",
+			ipVersion: 4,
+			tf: &v1alpha1.Traceflow{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: randName(fmt.Sprintf("%s-%s-to-%s-%s-", antreaNamespace, agentPod, testNamespace, node1Pods[1])),
+				},
+				Spec: v1alpha1.TraceflowSpec{
+					Source: v1alpha1.Source{
+						Namespace: antreaNamespace,
+						Pod:       agentPod,
+					},
+					Destination: v1alpha1.Destination{
+						Namespace: testNamespace,
+						Pod:       node1Pods[1],
+					},
+				},
+			},
+			expectedPhase:   v1alpha1.Failed,
+			expectedReasons: []string{fmt.Sprintf("Invalid Traceflow request, err: %+v", fmt.Errorf("using hostNetwork Pod as source in non-live-traffic Traceflow is not supported"))},
 		},
 		{
 			name:      "intraNodeICMPDstIPLiveTraceflowIPv4",
@@ -597,7 +644,7 @@ func testTraceflowIntraNode(t *testing.T, data *TestData) {
 				SrcIP:    pod0IPv4Str,
 				DstIP:    dstPodIPv4Str,
 				Length:   84, // default ping packet length.
-				IPHeader: v1alpha1.IPHeader{Protocol: 1, TTL: 64, Flags: 2},
+				IPHeader: v1alpha1.IPHeader{Protocol: 1, TTL: expectedTTL, Flags: 2},
 				TransportHeader: v1alpha1.TransportHeader{
 					ICMP: &v1alpha1.ICMPEchoRequestHeader{},
 				},
@@ -649,7 +696,7 @@ func testTraceflowIntraNode(t *testing.T, data *TestData) {
 				SrcIP:    pod0IPv4Str,
 				DstIP:    pod1IPv4Str,
 				Length:   84, // default ping packet length.
-				IPHeader: v1alpha1.IPHeader{Protocol: 1, TTL: 64, Flags: 2},
+				IPHeader: v1alpha1.IPHeader{Protocol: 1, TTL: expectedTTL, Flags: 2},
 				TransportHeader: v1alpha1.TransportHeader{
 					ICMP: &v1alpha1.ICMPEchoRequestHeader{},
 				},
@@ -876,7 +923,8 @@ func testTraceflowIntraNode(t *testing.T, data *TestData) {
 					},
 				},
 			},
-			expectedPhase: v1alpha1.Failed,
+			expectedPhase:   v1alpha1.Failed,
+			expectedReasons: []string{fmt.Sprintf("Node: %s, error: failed to get the destination Pod: pods \"%s\" not found", node1, "non-existing-pod")},
 		},
 		{
 			name:      "intraNodeICMPDstIPLiveTraceflowIPv6",
@@ -1036,20 +1084,12 @@ func testTraceflowIntraNode(t *testing.T, data *TestData) {
 
 // testTraceflowInterNode verifies if traceflow can trace inter nodes traffic with some NetworkPolicies set.
 func testTraceflowInterNode(t *testing.T, data *TestData) {
-	encapMode, err := data.GetEncapMode()
-	if err != nil {
-		t.Fatalf("Failed to retrieve encap mode: %v", err)
-	}
-	if encapMode != config.TrafficEncapModeNoEncap {
-		// https://github.com/antrea-io/antrea/issues/897
-		skipIfProviderIs(t, "kind", "Skipping inter-Node Traceflow test for Kind because of #897")
-	}
-
 	node1 := nodeName(0)
 	node2 := nodeName(1)
 
 	node1Pods, _, node1CleanupFn := createTestBusyboxPods(t, data, 1, testNamespace, node1)
 	node2Pods, node2IPs, node2CleanupFn := createTestBusyboxPods(t, data, 2, testNamespace, node2)
+	gatewayIPv4, gatewayIPv6 := nodeGatewayIPs(1)
 	defer node1CleanupFn()
 	defer node2CleanupFn()
 	var dstPodIPv4Str, dstPodIPv6Str string
@@ -1063,7 +1103,7 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 	// Create Service backend Pod. The "hairpin" testcases require the Service to have a single backend Pod,
 	// and no more, in order to be deterministic.
 	nginxPodName := "nginx"
-	require.NoError(t, data.createNginxPodOnNode(nginxPodName, testNamespace, node2))
+	require.NoError(t, data.createNginxPodOnNode(nginxPodName, testNamespace, node2, false))
 	nginxIP, err := data.podWaitForIPs(defaultTimeout, nginxPodName, testNamespace)
 	require.NoError(t, err)
 
@@ -1071,14 +1111,14 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 	if nginxIP.ipv4 != nil {
 		nginxIPv4Str = nginxIP.ipv4.String()
 		ipv4Protocol := corev1.IPv4Protocol
-		svcIPv4, err := data.createNginxClusterIPService("nginx-ipv4", false, &ipv4Protocol)
+		svcIPv4, err := data.createNginxClusterIPService("nginx-ipv4", testNamespace, false, &ipv4Protocol)
 		require.NoError(t, err)
 		svcIPv4Name = svcIPv4.Name
 	}
 	if nginxIP.ipv6 != nil {
 		nginxIPv6Str = nginxIP.ipv6.String()
 		ipv6Protocol := corev1.IPv6Protocol
-		svcIPv6, err := data.createNginxClusterIPService("nginx-ipv6", false, &ipv6Protocol)
+		svcIPv6, err := data.createNginxClusterIPService("nginx-ipv6", testNamespace, false, &ipv6Protocol)
 		require.NoError(t, err)
 		svcIPv6Name = svcIPv6.Name
 	}
@@ -1307,7 +1347,10 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 			},
 		},
 		{
-			name:      "serviceTraceflowIPv4",
+			name: "serviceTraceflowIPv4",
+			skipIfNeeded: func(t *testing.T) {
+				skipIfProxyDisabled(t)
+			},
 			ipVersion: 4,
 			tf: &v1alpha1.Traceflow{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1379,7 +1422,10 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 			},
 		},
 		{
-			name:      "hairpinServiceTraceflowIPv4",
+			name: "hairpinServiceTraceflowIPv4",
+			skipIfNeeded: func(t *testing.T) {
+				skipIfProxyDisabled(t)
+			},
 			ipVersion: 4,
 			tf: &v1alpha1.Traceflow{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1419,7 +1465,7 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 						{
 							Component:       v1alpha1.ComponentLB,
 							Pod:             fmt.Sprintf("%s/%s", testNamespace, nginxPodName),
-							TranslatedSrcIP: "169.254.169.252",
+							TranslatedSrcIP: gatewayIPv4,
 							TranslatedDstIP: nginxIPv4Str,
 							Action:          v1alpha1.ActionForwarded,
 						},
@@ -1561,9 +1607,11 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 			},
 		},
 		{
-			name:       "interNodeUDPDstIPTraceflowIPv6",
-			skipReason: "IPv6 testbed issue prevents running this test, we suspect an ESX datapath issue",
-			ipVersion:  6,
+			name: "interNodeUDPDstIPTraceflowIPv6",
+			skipIfNeeded: func(t *testing.T) {
+				t.Skip("IPv6 testbed issue prevents running this test, we suspect an ESX datapath issue")
+			},
+			ipVersion: 6,
 			tf: &v1alpha1.Traceflow{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: randName(fmt.Sprintf("%s-%s-to-%s-", testNamespace, node1Pods[0], strings.ReplaceAll(dstPodIPv6Str, ":", "--"))),
@@ -1797,7 +1845,7 @@ func testTraceflowInterNode(t *testing.T, data *TestData) {
 						{
 							Component:       v1alpha1.ComponentLB,
 							Pod:             fmt.Sprintf("%s/%s", testNamespace, nginxPodName),
-							TranslatedSrcIP: "fc00::aabb:ccdd:eeff",
+							TranslatedSrcIP: gatewayIPv6,
 							TranslatedDstIP: nginxIPv6Str,
 							Action:          v1alpha1.ActionForwarded,
 						},
@@ -2085,8 +2133,8 @@ func runTestTraceflow(t *testing.T, data *TestData, tc testcase) {
 	case 6:
 		skipIfNotIPv6Cluster(t)
 	}
-	if tc.skipReason != "" {
-		t.Skip(tc.skipReason)
+	if tc.skipIfNeeded != nil {
+		tc.skipIfNeeded(t)
 	}
 	if _, err := data.crdClient.CrdV1alpha1().Traceflows().Create(context.TODO(), tc.tf, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("Error when creating traceflow: %v", err)
@@ -2111,13 +2159,13 @@ func runTestTraceflow(t *testing.T, data *TestData, tc testcase) {
 			}
 		} else {
 			dstPod := tc.tf.Spec.Destination.Pod
-			podIPs := waitForPodIPs(t, data, []podInfo{{dstPod, "linux", ""}})
+			podIPs := waitForPodIPs(t, data, []podInfo{{dstPod, "linux", "", ""}})
 			dstPodIPs = podIPs[dstPod]
 		}
 		// Give a little time for Nodes to install OVS flows.
 		time.Sleep(time.Second * 2)
 		// Send an ICMP echo packet from the source Pod to the destination.
-		if err := data.runPingCommandFromTestPod(podInfo{srcPod, "linux", ""}, testNamespace, dstPodIPs, busyboxContainerName, 2, 0); err != nil {
+		if err := data.runPingCommandFromTestPod(podInfo{srcPod, "linux", "", ""}, testNamespace, dstPodIPs, busyboxContainerName, 2, 0); err != nil {
 			t.Logf("Ping '%s' -> '%v' failed: ERROR (%v)", srcPod, *dstPodIPs, err)
 		}
 	}
@@ -2125,35 +2173,39 @@ func runTestTraceflow(t *testing.T, data *TestData, tc testcase) {
 	tf, err := data.waitForTraceflow(t, tc.tf.Name, tc.expectedPhase)
 	if err != nil {
 		t.Fatalf("Error: Get Traceflow failed: %v", err)
-		return
+	}
+	if tc.expectedPhase == v1alpha1.Failed {
+		isReasonMatch := false
+		for _, expectedReason := range tc.expectedReasons {
+			if tf.Status.Reason == expectedReason {
+				isReasonMatch = true
+			}
+		}
+		if !isReasonMatch {
+			t.Fatalf("Error: Traceflow Error Reason should be %v, but got %s", tc.expectedReasons, tf.Status.Reason)
+		}
 	}
 	if len(tf.Status.Results) != len(tc.expectedResults) {
 		t.Fatalf("Error: Traceflow Results should be %v, but got %v", tc.expectedResults, tf.Status.Results)
-		return
 	}
 	if len(tc.expectedResults) == 1 {
 		if err = compareObservations(tc.expectedResults[0], tf.Status.Results[0]); err != nil {
 			t.Fatal(err)
-			return
 		}
 	} else if len(tc.expectedResults) > 0 {
 		if tf.Status.Results[0].Observations[0].Component == v1alpha1.ComponentSpoofGuard {
 			if err = compareObservations(tc.expectedResults[0], tf.Status.Results[0]); err != nil {
 				t.Fatal(err)
-				return
 			}
 			if err = compareObservations(tc.expectedResults[1], tf.Status.Results[1]); err != nil {
 				t.Fatal(err)
-				return
 			}
 		} else {
 			if err = compareObservations(tc.expectedResults[0], tf.Status.Results[1]); err != nil {
 				t.Fatal(err)
-				return
 			}
 			if err = compareObservations(tc.expectedResults[1], tf.Status.Results[0]); err != nil {
 				t.Fatal(err)
-				return
 			}
 		}
 	}
