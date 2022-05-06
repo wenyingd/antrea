@@ -295,10 +295,10 @@ func (i *Initializer) setInterfaceMTU(iface string, mtu int) error {
 	return i.ovsBridgeClient.SetInterfaceMTU(iface, mtu)
 }
 
-func (i *Initializer) prepareOVSBridgeForVM() error {
-	randMAC, err := util.RandomMAC()
-	if err != nil {
-		return err
-	}
-	return i.setOVSDatapath(randMAC)
+func (i *Initializer) prepareOVSConfigForVM() error {
+	return nil
+}
+
+func (i *Initializer) installVmOpenFlows() error {
+	return nil
 }
