@@ -183,6 +183,8 @@ type TestOptions struct {
 	enableAntreaIPAM    bool
 	coverageDir         string
 	skipCases           string
+	linVMs              string
+	winVMs              string
 }
 
 var testOptions TestOptions

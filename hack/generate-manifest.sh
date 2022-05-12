@@ -46,6 +46,7 @@ Generate a YAML manifest for Antrea using Helm and print it to stdout.
         --help, -h                    Print this message and exit
         --multicast                   Generates a manifest for multicast.
         --multicast-interfaces        Multicast interface names (default is empty)
+        --enable-nodeport             Configure antrea-controller service as nodeport
 
 In 'release' mode, environment variables IMG_NAME and IMG_TAG must be set.
 
@@ -87,6 +88,7 @@ WHEREABOUTS=false
 FLEXIBLE_IPAM=false
 MULTICAST=false
 MULTICAST_INTERFACES=""
+ENABLE_NODEPORT=false
 
 while [[ $# -gt 0 ]]
 do
@@ -192,6 +194,10 @@ case $key in
     --multicast-interfaces)
     MULTICAST_INTERFACES="$2"
     shift 2
+    ;;
+    --enable-nodeport)
+    ENABLE_NODEPORT=true
+    shift
     ;;
     -h|--help)
     print_usage
@@ -369,6 +375,10 @@ fi
 
 if $WHEREABOUTS; then
     HELM_VALUES+=("whereabouts.enable=true")
+fi
+
+if $ENABLE_NODEPORT; then
+    HELM_VALUES+=("nodeport.enable=true" "nodeport.port=32767")
 fi
 
 if [ "$MODE" == "dev" ]; then
