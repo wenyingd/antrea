@@ -173,7 +173,7 @@ docker-tidy: $(DOCKER_CACHE)
 	@chmod -R 0755 $<
 	@chmod 0644 go.sum plugins/octant/go.sum
 
-ANTCTL_BINARIES := antctl-darwin antctl-linux antctl-windows
+ANTCTL_BINARIES := antctl-linux antctl-windows
 $(ANTCTL_BINARIES): antctl-%:
 	@GOOS=$* $(GO) build -o $(BINDIR)/$@ $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antctl
 	@if [[ $@ != *windows ]]; then \
