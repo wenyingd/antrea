@@ -32,7 +32,7 @@ Build the antrea base image.
         --no-cache              Do not use the local build cache nor the cached image from the registry
         --download-cni-binaries Download CNI binaries from internet. You can also download the
                                 binaries manually and put them in the current directory.
-                                Currently cni-plugins-*.tgz and whereabouts-*.tgz are required.
+                                Currently cni-plugins-*.tgz is required.
         --ipsec                 Build with IPsec support Default is false."
 
 function print_usage {
@@ -46,7 +46,7 @@ PLATFORM=""
 DISTRO="ubuntu"
 DOWNLOAD_CNI_BINARIES=false
 IPSEC=false
-SUPPORT_DISTROS=("ubuntu" "ubi")
+SUPPORT_DISTROS=("ubuntu" "ubi" "debian")
 
 while [[ $# -gt 0 ]]
 do
@@ -184,6 +184,7 @@ function docker_build_and_push() {
     else
         cache_args="$cache_args --cache-from type=registry,ref=$image-cache:$BUILD_TAG,mode=max"
     fi
+    docker buildx build $PLATFORM_ARG -o type=docker -t antrea/cni-binaries:$CNI_BINARIES_VERSION $cache_args $build_args -f Dockerfile --target cni-binaries .
     docker buildx build $PLATFORM_ARG -o type=docker -t $image:$BUILD_TAG $cache_args $build_args -f $dockerfile .
 
     if $PUSH; then
@@ -196,6 +197,8 @@ if [ "$DISTRO" == "ubuntu" ]; then
     docker_build_and_push "antrea/base-ubuntu" Dockerfile
 elif [ "$DISTRO" == "ubi" ]; then
     docker_build_and_push "antrea/base-ubi" Dockerfile.ubi
+elif [ "$DISTRO" == "debian" ]; then
+    docker_build_and_push "antrea/base-debian" Dockerfile.debian
 fi
 
 popd > /dev/null

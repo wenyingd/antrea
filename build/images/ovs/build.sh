@@ -44,7 +44,7 @@ IPSEC=false
 PLATFORM=""
 DISTRO="ubuntu"
 DOWNLOAD_OVS=false
-SUPPORT_DISTROS=("ubuntu" "ubi" "windows")
+SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "windows")
 
 while [[ $# -gt 0 ]]
 do
@@ -188,6 +188,8 @@ if [ "$DISTRO" == "ubuntu" ]; then
     docker_build_and_push "antrea/openvswitch" "Dockerfile"
 elif [ "$DISTRO" == "ubi" ]; then
     docker_build_and_push "antrea/openvswitch-ubi" "Dockerfile.ubi"
+elif [ "$DISTRO" == "debian" ]; then
+    docker_build_and_push "antrea/openvswitch-debian" "Dockerfile.debian"
 elif [ "$DISTRO" == "windows" ]; then
     image="antrea/windows-ovs"
     build_args="--build-arg OVS_VERSION=$OVS_VERSION"
