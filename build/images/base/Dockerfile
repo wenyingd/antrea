@@ -13,9 +13,16 @@
 # limitations under the License.
 
 ARG BUILD_TAG
-FROM ubuntu:22.04 as cni-binaries
+FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/ubuntu:22.04 as cni-binaries
 
 ARG CNI_BINARIES_VERSION
+ARG DOWNLOAD_CNI_BINARIES=false
+
+COPY cni-plugins-*.tgz /tmp
+
+RUN echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy main restricted universe" > /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy-security main restricted" >> /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy-updates main restricted" >> /etc/apt/sources.list
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends wget ca-certificates
@@ -25,15 +32,19 @@ ENV CNI_PLUGINS="./host-local ./loopback ./portmap ./bandwidth"
 
 # Download containernetworking plugin binaries for the correct architecture
 RUN set -eux; \
-    dpkgArch="$(dpkg --print-architecture)"; \
-    case "${dpkgArch##*-}" in \
-         amd64) pluginsArch='amd64' ;; \
-	 armhf) pluginsArch='arm' ;; \
-	 arm64) pluginsArch='arm64' ;; \
-         *) pluginsArch=''; echo >&2; echo >&2 "unsupported architecture '$dpkgArch'"; echo >&2 ; exit 1 ;; \
-    esac; \
     mkdir -p /opt/cni/bin; \
-    wget -q -O - https://github.com/containernetworking/plugins/releases/download/$CNI_BINARIES_VERSION/cni-plugins-linux-${pluginsArch}-$CNI_BINARIES_VERSION.tgz | tar xz -C /opt/cni/bin $CNI_PLUGINS
+    if ${DOWNLOAD_CNI_BINARIES}; then \
+        dpkgArch="$(dpkg --print-architecture)"; \
+        case "${dpkgArch##*-}" in \
+            amd64) pluginsArch='amd64' ;; \
+        armhf) pluginsArch='arm' ;; \
+        arm64) pluginsArch='arm64' ;; \
+            *) pluginsArch=''; echo >&2; echo >&2 "unsupported architecture '$dpkgArch'"; echo >&2 ; exit 1 ;; \
+        esac; \
+        wget -q -O - https://github.com/containernetworking/plugins/releases/download/$CNI_BINARIES_VERSION/cni-plugins-linux-${pluginsArch}-$CNI_BINARIES_VERSION.tgz | tar xz -C /opt/cni/bin $CNI_PLUGINS; \
+    else \
+        tar -zxvf /tmp/cni-plugins-*.tgz -C /opt/cni/bin $CNI_PLUGINS; \
+    fi
 
 FROM antrea/openvswitch:${BUILD_TAG}
 
@@ -42,20 +53,19 @@ ARG SURICATA_VERSION
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="An Ubuntu based Docker base image for Antrea."
 
+RUN echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy main restricted universe" > /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy-security main restricted" >> /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy-updates main restricted" >> /etc/apt/sources.list
+
 USER root
 
-# See https://github.com/kubernetes-sigs/iptables-wrappers
-# /iptables-wrapper-installer.sh will have permissions of 600.
-# --chmod=700 doesn't work with older versions of Docker and requires DOCKER_BUILDKIT=1, so we use
-# chmod in the RUN command below instead.
-ADD https://raw.githubusercontent.com/kubernetes-sigs/iptables-wrappers/9e6ce59c864623ea71a6f7d59c35fcb13a919b87/iptables-wrapper-installer.sh /iptables-wrapper-installer.sh
+COPY iptables-wrapper-installer.sh /iptables-wrapper-installer.sh
 
 RUN apt-get update && apt-get install -y --no-install-recommends ipset jq inotify-tools gpg-agent software-properties-common && \
     # ethtool is for commercial release Antrea to toggle Geneve checksum offload.
     apt-get install -y --no-install-recommends ethtool && \
     add-apt-repository ppa:oisf/suricata-${SURICATA_VERSION} && apt-get update && apt-get install -y suricata && \
     apt-get remove -y gpg-agent software-properties-common && apt-get autoremove -y && rm -rf /var/cache/apt/* /var/lib/apt/lists/* && \
-    chmod +x /iptables-wrapper-installer.sh && \
     /iptables-wrapper-installer.sh
 
 COPY --from=cni-binaries /opt/cni/bin /opt/cni/bin

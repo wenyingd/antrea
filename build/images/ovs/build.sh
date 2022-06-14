@@ -29,13 +29,22 @@ Build the antrea openvswitch image.
         --push                  Push the built image to the registry
         --platform <PLATFORM>   Target platform for the image if server is multi-platform capable
         --distro <distro>       Target distribution. If distro is 'windows', platform should be empty. The script uses 'windows/amd64' automatically
-        --no-cache              Do not use the local build cache nor the cached image from the registry"
+        --no-cache              Do not use the local build cache nor the cached image from the registry
+        --download-ovs          Download OVS source code tarball from internet. Default is false.
+        --ipsec                 Build with IPsec support. Default is false."
+
+function print_usage {
+    echoerr "$_usage"
+}
 
 PULL=false
 PUSH=false
 NO_CACHE=false
+IPSEC=false
 PLATFORM=""
 DISTRO="ubuntu"
+DOWNLOAD_OVS=false
+SUPPORT_DISTROS=("ubuntu" "ubi" "windows")
 
 while [[ $# -gt 0 ]]
 do
@@ -60,6 +69,14 @@ case $key in
     ;;
     --no-cache)
     NO_CACHE=true
+    shift
+    ;;
+    --download-ovs)
+    DOWNLOAD_OVS=true
+    shift
+    ;;
+    --ipsec)
+    IPSEC=true
     shift
     ;;
     -h|--help)
@@ -102,11 +119,34 @@ if [ "$PLATFORM" != "" ]; then
     PLATFORM_ARG="--platform $PLATFORM"
 fi
 
+DISTRO_VALID=false
+for dist in "${SUPPORT_DISTROS[@]}"; do
+    if [ "$DISTRO" == "$dist" ]; then
+        DISTRO_VALID=true
+        break
+    fi
+done
+
+if ! $DISTRO_VALID; then
+    echoerr "Invalid distribution $DISTRO"
+    exit 1
+fi
+
 pushd $THIS_DIR > /dev/null
 
 OVS_VERSION=$(head -n 1 ${OVS_VERSION_FILE})
 
 BUILD_TAG=$(../build-tag.sh)
+if [ "$IPSEC" == "true" ]; then
+    BUILD_TAG="${BUILD_TAG}-ipsec"
+fi
+
+if $DOWNLOAD_OVS; then
+    curl -LO https://www.openvswitch.org/releases/openvswitch-$OVS_VERSION.tar.gz
+elif [ ! -f openvswitch-$OVS_VERSION.tar.gz ]; then
+    echoerr "openvswitch-$OVS_VERSION.tar.gz not found. Use --download-ovs to download it."
+    exit 1
+fi
 
 if $PULL; then
     if [ "$DISTRO" == "ubuntu" ]; then

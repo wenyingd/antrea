@@ -11,6 +11,7 @@ GOFLAGS            := -trimpath
 # For binaries meant to be published as release assets or copied to a different host, cgo should
 # always be disabled.
 CGO_ENABLED        ?= 0
+IPSEC              ?= n
 BINDIR             ?= $(CURDIR)/bin
 GO_FILES           := $(shell find . -type d -name '.cache' -prune -o -type f -name '*.go' -print)
 GOPATH             ?= $$($(GO) env GOPATH)
@@ -20,6 +21,12 @@ OVS_VERSION        := $(shell head -n 1 build/images/deps/ovs-version)
 GO_VERSION         := $(shell head -n 1 build/images/deps/go-version)
 CNI_BINARIES_VERSION := $(shell head -n 1 build/images/deps/cni-binaries-version)
 BUILD_TAG          := $(shell build/images/build-tag.sh)
+ifneq ($(IPSEC), n)
+BUILD_TAG          := $(BUILD_TAG)-ipsec
+endif
+WIN_BUILD_TAG      := $(shell echo $(GO_VERSION) $(CNI_BINARIES_VERSION) $(NANOSERVER_VERSION)|md5sum|head -c 10)
+WIN_OVS_VERSION	   := $(shell head -n 1 build/images/deps/ovs-version-windows)
+WIN_BUILD_OVS_TAG  := $(NANOSERVER_VERSION)-$(WIN_OVS_VERSION)
 GIT_HOOKS          := $(shell find hack/git_client_side_hooks -type f -print)
 DOCKER_NETWORK     ?= default
 TRIVY_TARGET_IMAGE ?=
