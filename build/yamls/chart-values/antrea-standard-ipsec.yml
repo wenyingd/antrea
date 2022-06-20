@@ -1,0 +1,6 @@
+trafficEncryptionMode: "ipsec"
+tunnelType: "gre"
+antreaAgentTweaker:
+  enable: true
+nodePortLocal:
+  enable: true
