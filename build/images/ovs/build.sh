@@ -31,7 +31,8 @@ Build the antrea openvswitch image.
         --distro <distro>       Target distribution. If distro is 'windows', platform should be empty. The script uses 'windows/amd64' automatically
         --no-cache              Do not use the local build cache nor the cached image from the registry
         --download-ovs          Download OVS source code tarball from internet. Default is false.
-        --ipsec                 Build with IPsec support. Default is false."
+        --ipsec                 Build with IPsec support. Default is false.
+        --rpm-repo-url <url>        URL of the RPM repository to use for Photon builds."
 
 function print_usage {
     echoerr "$_usage"
@@ -44,7 +45,7 @@ IPSEC=false
 PLATFORM=""
 DISTRO="ubuntu"
 DOWNLOAD_OVS=false
-SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "windows")
+SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "photon" "windows")
 
 while [[ $# -gt 0 ]]
 do
@@ -78,6 +79,10 @@ case $key in
     --ipsec)
     IPSEC=true
     shift
+    ;;
+    --rpm-repo-url)
+    RPM_REPO_URL="$2"
+    shift 2
     ;;
     -h|--help)
     print_usage
@@ -194,6 +199,20 @@ elif [ "$DISTRO" == "windows" ]; then
     image="antrea/windows-ovs"
     build_args="--build-arg OVS_VERSION=$OVS_VERSION"
     docker_build_and_push_windows "${image}" "Dockerfile.windows" "${build_args}" "${OVS_VERSION}" $PUSH ""
+elif [ "$DISTRO" == "photon" ]; then
+    if [ "$RPM_REPO_URL" == "" ]; then
+        echoerr "Must specify --rpm-repo-url when building for Photon"
+        exit 1
+    fi
+    if [ "$IPSEC" == "true" ]; then
+        echoerr "IPsec is not supported for Photon"
+        exit 1
+    fi
+    if ! [ -f "photon-rootfs.tar.gz" ]; then
+        echoerr "photon-rootfs.tar.gz not found."
+        exit 1
+    fi
+    docker_build_and_push "antrea/openvswitch-photon" "Dockerfile.photon"
 fi
 
 popd > /dev/null

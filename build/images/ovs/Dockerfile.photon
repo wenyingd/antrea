@@ -1,0 +1,122 @@
+# Copyright 2022 Antrea Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Prerequisite to build this Dockerfile:
+# - openvswitch-$OVS_VERSION.tar.gz - archive of the source code of OpenvSwitch.
+# - RPM server served at $RPM_REPO_URL.
+
+FROM scratch as ovs-photon-rpms
+# Photon images are for local testing, they are not consumed by cayman_photon.
+# We maintain a dedicated Antrea Dockerfile in cayman_photon. Antrea photon
+# image is actually built there.
+ARG RPM_REPO_URL
+ARG OVS_VERSION
+
+ADD photon-rootfs.tar.gz /
+RUN /usr/bin/sed -i -e 's/^enabled=.*/enabled=0/g' /etc/yum.repos.d/*.repo
+COPY photon-iso.repo /etc/yum.repos.d/
+RUN /usr/bin/sed -i -e "s|^baseurl=.*\$|baseurl=${RPM_REPO_URL}|g" /etc/yum.repos.d/photon-iso.repo
+
+COPY openvswitch.spec /tmp/
+COPY openvswitch-$OVS_VERSION.tar.gz /tmp/
+
+RUN tdnf remove -y toybox && \
+    tdnf install -y \
+      bzip2 \
+      coreutils \
+      cpio \
+      diffutils \
+      e2fsprogs \
+      file \
+      findutils \
+      grep \
+      gzip \
+      iotop \
+      kbd \
+      net-tools \
+      parted \
+      patch \
+      pciutils \
+      procps-ng \
+      psmisc \
+      python3-xml \
+      sed \
+      tar \
+      usbutils \
+      util-linux \
+      which && \
+    tdnf install -y \
+      autoconf \
+      automake \
+      build-essential \
+      ca-certificates \
+      curl \
+      ethtool \
+      gawk \
+      git \
+      groff \
+      libcap-ng \
+      libcap-ng-devel \
+      libgcc-atomic \
+      libtool \
+      linux-devel \
+      make \
+      net-tools \
+      netcat \
+      openssl \
+      openssl-devel \
+      python3 \
+      python3-devel \
+      python3-libs \
+      python3-six \
+      python3-xml \
+      rpm-build \
+      systemd \
+      wget
+RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") && \
+    mkdir -p "${SOURCE_DIR}" && \
+    mv /tmp/openvswitch-*.tar.gz "${SOURCE_DIR}" && \
+    rpmbuild -bb --nocheck /tmp/openvswitch.spec && \
+    mkdir -p /tmp/ovs-rpms && mv ${RPM_DIR}/*/*.rpm /tmp/ovs-rpms
+
+FROM scratch
+
+LABEL maintainer="wcp-dev@vmware.com"
+LABEL vendor="VMware, Inc."
+LABEL name="VMware Stateless Photon OS 3.0 Base Image"
+
+ADD photon-rootfs.tar.gz /
+COPY --from=ovs-photon-rpms /etc/yum.repos.d/* /etc/yum.repos.d/
+COPY --from=ovs-photon-rpms /tmp/ovs-rpms/* /tmp/ovs-rpms/
+
+RUN tdnf install -y iptables rpm && \
+    tdnf install -y \
+      bash \
+      gawk \
+      jq \
+      libcap-ng \
+      libgcc-atomic \
+      logrotate \
+      openssl \
+      python3 \
+      python3-libs \
+      python3-six \
+      python3-xml && \
+    rpm -ivh /tmp/ovs-rpms/openvswitch-*.rpm /tmp/ovs-rpms/python*-openvswitch*.rpm && \
+    chmod 0644 /etc/logrotate.d/openvswitch-switch && \
+    sed -i "/rotate /a\    #size 100M" /etc/logrotate.d/openvswitch-switch && \
+    rm -rf /tmp/* && \
+    tdnf clean all && \
+    rm -rf /var/cache/tdnf/* /usr/share/doc/* /usr/share/man/* /etc/yum.repos.d/photon-iso.repo && \
+    /usr/bin/sed -i -e 's/^enabled=.*/enabled=1/g' /etc/yum.repos.d/*.repo

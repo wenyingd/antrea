@@ -33,7 +33,8 @@ Build the antrea base image.
         --download-cni-binaries Download CNI binaries from internet. You can also download the
                                 binaries manually and put them in the current directory.
                                 Currently cni-plugins-*.tgz is required.
-        --ipsec                 Build with IPsec support Default is false."
+        --ipsec                 Build with IPsec support Default is false.
+        --rpm-repo-url <url>    URL of the RPM repository to use for Photon builds."
 
 function print_usage {
     echoerr "$_usage"
@@ -46,7 +47,8 @@ PLATFORM=""
 DISTRO="ubuntu"
 DOWNLOAD_CNI_BINARIES=false
 IPSEC=false
-SUPPORT_DISTROS=("ubuntu" "ubi" "debian")
+RPM_REPO_URL=""
+SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "photon")
 
 while [[ $# -gt 0 ]]
 do
@@ -80,6 +82,10 @@ case $key in
     --download-cni-binaries)
     DOWNLOAD_CNI_BINARIES=true
     shift
+    ;;
+    --rpm-repo-url)
+    RPM_REPO_URL="$2"
+    shift 2
     ;;
     -h|--help)
     print_usage
@@ -199,6 +205,8 @@ elif [ "$DISTRO" == "ubi" ]; then
     docker_build_and_push "antrea/base-ubi" Dockerfile.ubi
 elif [ "$DISTRO" == "debian" ]; then
     docker_build_and_push "antrea/base-debian" Dockerfile.debian
+elif [ "$DISTRO" == "photon" ]; then
+    docker_build_and_push "antrea/base-debian" Dockerfile.photon
 fi
 
 popd > /dev/null

@@ -350,6 +350,10 @@ mockgen:
 	$(CURDIR)/hack/update-codegen.sh mockgen
 
 ### Docker images ###
+# This target is for development only. It assumes that "make bin" has been run previously and will
+# copy the local binaries to the Docker image, instead of building the binaries inside the image as
+# part of the Docker build.
+
 .PHONY: debian
 debian:
 	@echo "===> Building antrea/antrea-debian Docker image <==="
@@ -360,9 +364,15 @@ else
 endif
 	docker tag antrea/antrea-debian:$(DOCKER_IMG_VERSION) antrea/antrea-debian
 
-# This target is for development only. It assumes that "make bin" has been run previously and will
-# copy the local binaries to the Docker image, instead of building the binaries inside the image as
-# part of the Docker build.
+.PHONY: photon
+photon:
+	@echo "===> Building antrea/antrea-photon Docker image <==="
+ifneq ($(NO_PULL),)
+	docker build -t antrea/antrea-photon:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.photon --build-arg RPM_REPO_URL=${RPM_REPO_URL} $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/antrea-photon:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.photon --build-arg RPM_REPO_URL=${RPM_REPO_URL} $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/antrea-photon:$(DOCKER_IMG_VERSION) antrea/antrea-photon
 
 .PHONY: ubuntu
 ubuntu:
