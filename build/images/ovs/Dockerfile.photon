@@ -88,7 +88,7 @@ RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") 
     mkdir -p "${SOURCE_DIR}" && \
     mv /tmp/openvswitch-*.tar.gz "${SOURCE_DIR}" && \
     rpmbuild -bb --nocheck /tmp/openvswitch.spec && \
-    mkdir -p /tmp/ovs-rpms && mv ${RPM_DIR}/*/*.rpm /tmp/ovs-rpms
+    mkdir -p /tmp/ovs-rpms && mv ${RPM_DIR}/*/openvswitch-${OVS_VERSION}*.rpm ${RPM_DIR}/*/python*-openvswitch-${OVS_VERSION}*.rpm /tmp/ovs-rpms
 
 FROM scratch
 

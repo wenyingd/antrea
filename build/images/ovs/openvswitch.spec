@@ -1,9 +1,7 @@
-%{!?python2_sitelib: %global python2_sitelib %(python2 -c "from distutils.sysconfig import get_python_lib;print(get_python_lib())")}
 %{!?python3_sitelib: %global python3_sitelib %(python3 -c "from distutils.sysconfig import get_python_lib;print(get_python_lib())")}
-%define _unpackaged_files_terminate_build 0
 Summary:        Open vSwitch daemon/database/utilities
 Name:           openvswitch
-Version:        2.15.1
+Version:        2.17.0
 Release:        1%{?dist}
 License:        ASL 2.0 and LGPLv2+
 URL:            http://www.openvswitch.org/
@@ -25,7 +23,6 @@ BuildRequires:  python3-devel
 BuildRequires:  python3-libs
 BuildRequires:  python3-six
 BuildRequires:  python3-xml
-BuildRequires:  python2
 Requires:       libgcc-atomic
 Requires:       libcap-ng
 Requires:       openssl
@@ -37,16 +34,7 @@ Requires:       gawk
 
 %description
 Open vSwitch provides standard network bridging functions and
-support for the OpenFlow protocol for remote per-flow control of
-traffic.
-
-%package -n     python-openvswitch
-Summary:        python-openvswitch
-Requires:       python2
-Requires:       python2-libs
-
-%description -n python-openvswitch
-Python 2 openvswith bindings.
+support for the OpenFlow protocol for remote per-flow control of traffic.
 
 %package -n     python3-openvswitch
 Summary:        python3-openvswitch
@@ -59,44 +47,45 @@ Python 3 version.
 %package        devel
 Summary:        Header and development files for openvswitch
 Requires:       %{name} = %{version}
+
 %description    devel
 openvswitch-devel package contains header files and libs.
 
 %package        devel-static
 Summary:        Static libs for openvswitch
 Requires:       %{name} = %{version}
+
 %description    devel-static
 openvswitch-devel-static package contains static libs.
 
 %package        doc
 Summary:        Documentation for openvswitch
 Requires:       %{name} = %{version}-%{release}
+
 %description    doc
 It contains the documentation and manpages for openvswitch.
 
 %prep
-%setup -q
+%autosetup -p1
 autoreconf --install --force
 
 %build
 export PYTHON2=no
-%configure --enable-ssl --enable-shared
 
+%configure --enable-ssl --enable-shared
 make %{_smp_mflags}
 
 %install
-make DESTDIR=%{buildroot} install
+make DESTDIR=%{buildroot} install %{_smp_mflags}
 find %{buildroot}/%{_libdir} -name '*.la' -delete
-mkdir -p %{buildroot}/%{python2_sitelib}
 mkdir -p %{buildroot}/%{python3_sitelib}
-cp -ra %{buildroot}/%{_datadir}/openvswitch/python/ovs %{buildroot}/%{python2_sitelib}
-cp -ra %{buildroot}/%{_datadir}/openvswitch/python/ovs %{buildroot}/%{python3_sitelib}
+cp -a %{buildroot}/%{_datadir}/openvswitch/python/ovs %{buildroot}/%{python3_sitelib}
 
 mkdir -p %{buildroot}/%{_libdir}/systemd/system
 install -p -D -m 0644 rhel/usr_share_openvswitch_scripts_systemd_sysconfig.template %{buildroot}/%{_sysconfdir}/sysconfig/openvswitch
 
 /usr/bin/python3 build-aux/dpdkstrip.py --nodpdk < rhel/usr_lib_systemd_system_ovs-vswitchd.service.in > rhel/usr_lib_systemd_system_ovs-vswitchd.service
-for service in openvswitch ovsdb-server ovs-vswitchd ; do
+for service in openvswitch ovsdb-server ovs-vswitchd; do
 	install -p -D -m 0644 rhel/usr_lib_systemd_system_${service}.service %{buildroot}/%{_unitdir}/${service}.service
 done
 
@@ -105,6 +94,9 @@ install -p -D -m 0644 rhel/etc_openvswitch_default.conf %{buildroot}/%{_sysconfd
 sed -i '/OVS_USER_ID=.*/c\OVS_USER_ID=' %{buildroot}/%{_sysconfdir}/openvswitch/default.conf
 
 install -p -D -m 0644 rhel/etc_logrotate.d_openvswitch %{buildroot}/%{_sysconfdir}/logrotate.d/openvswitch-switch
+
+%check
+make -k check |& tee %{_specdir}/%{name}-check-log || %{nocheck} %{_smp_mflags}
 
 %preun
 %systemd_preun %{name}.service
@@ -133,10 +125,8 @@ sed -i 's:\(.*su\).*:\1 openvswitch openvswitch:' %{_sysconfdir}/logrotate.d/ope
 %{_datadir}/openvswitch/*.ovsschema
 %{_datadir}/openvswitch/python/*
 %{_datadir}/openvswitch/scripts/ovs-*
+%{_datadir}/openvswitch/bugtool-plugins/*
 %config(noreplace) %{_sysconfdir}/sysconfig/openvswitch
-
-%files -n python-openvswitch
-%{python2_sitelib}/*
 
 %files -n python3-openvswitch
 %{python3_sitelib}/*
@@ -158,9 +148,27 @@ sed -i 's:\(.*su\).*:\1 openvswitch openvswitch:' %{_sysconfdir}/logrotate.d/ope
 %{_mandir}/man8/ovs-*.8.gz
 %{_mandir}/man8/vtep-ctl.8.gz
 %{_mandir}/man5/ovsdb-server.5.gz
-%{_mandir}/man7/ovs-actions.7.gz
 
 %changelog
+*   Mon Apr 18 2022 Gerrit Photon <photon-checkins@vmware.com> 2.17.1-1
+-   Automatic Version Bump
+*   Thu Sep 02 2021 Satya Naga Vasamsetty <svasamsetty@vmware.com> 2.15.0-2
+-   Bump up release for openssl
+*   Tue Apr 13 2021 Gerrit Photon <photon-checkins@vmware.com> 2.15.0-1
+-   Automatic Version Bump
+*   Mon Mar 01 2021 Dweep Advani <dadvani@vmware.com> 2.14.0-4
+-   Patched for CVE-2020-35498
+*   Tue Sep 29 2020 Satya Naga Vasamsetty <svasamsetty@vmware.com> 2.14.0-3
+-   openssl 1.1.1
+*   Fri Sep 18 2020 Tapas Kundu <tkundu@vmware.com> 2.14.0-2
+-   Packged python bindings in right path
+*   Wed Aug 19 2020 Tapas Kundu <tkundu@vmware.com> 2.14.0-1
+-   Updated to 2.14
+-   Removed ovn packages.
+*   Sun Jul 26 2020 Tapas Kundu <tkundu@vmware.com> 2.12.0-3
+-   Fix fix_dict_change
+*   Sat Jun 20 2020 Tapas Kundu <tkundu@vmware.com> 2.12.0-2
+-   Mass removal python2
 *   Wed Feb 05 2020 Tapas Kundu <tkundu@vmware.com> 2.12.0-1
 -   Build with Python3
 *   Tue Nov 13 2018 Anish Swaminathan <anishs@vmware.com> 2.8.2-3
@@ -170,7 +178,7 @@ sed -i 's:\(.*su\).*:\1 openvswitch openvswitch:' %{_sysconfdir}/logrotate.d/ope
 *   Tue Feb 27 2018 Vinay Kulkarni <kulkarniv@vmware.com> 2.8.2-1
 -   Update to OVS 2.8.2
 *   Tue Oct 10 2017 Dheeraj Shetty <dheerajs@vmware.com> 2.7.0-9
--   Fix CVE-2017-14970
+-   Fix CVE-2.17.14970
 *   Wed Oct 04 2017 Dheeraj Shetty <dheerajs@vmware.com> 2.7.0-8
 -   Fix CVE-2017-9263
 *   Tue Sep 19 2017 Anish Swaminathan <anishs@vmware.com> 2.7.0-7
