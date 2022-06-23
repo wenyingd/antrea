@@ -340,6 +340,8 @@ controller:
   # false, a Secret named "antrea-controller-tls" must be provided with the
   # following keys: ca.crt, tls.crt, tls.key.
   selfSignedCert: true
+  # -- The Secret name of controller TLS certificates.
+  tlsSecretName: "antrea-controller-tls"
   # -- Tolerations for the antrea-controller Pod.
   tolerations:
     # Mark it as a critical add-on.

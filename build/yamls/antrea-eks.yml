@@ -5267,7 +5267,7 @@ spec:
         # Make it optional as we only read it when selfSignedCert=false.
         - name: antrea-controller-tls
           secret:
-            secretName: antrea-controller-tls
+            secretName: "antrea-controller-tls"
             defaultMode: 0400
             optional: true
         - name: host-var-log-antrea

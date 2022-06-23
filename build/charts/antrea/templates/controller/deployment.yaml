@@ -154,7 +154,7 @@ spec:
         # Make it optional as we only read it when selfSignedCert=false.
         - name: antrea-controller-tls
           secret:
-            secretName: antrea-controller-tls
+            secretName: {{ .Values.controller.tlsSecretName | quote }}
             defaultMode: 0400
             optional: true
         - name: host-var-log-antrea

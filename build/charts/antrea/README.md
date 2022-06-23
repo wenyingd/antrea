@@ -86,6 +86,7 @@ Kubernetes: `>= 1.16.0-0`
 | controller.podLabels | object | `{}` | Labels to be added to antrea-controller Pod. |
 | controller.priorityClassName | string | `"system-cluster-critical"` | Prority class to use for the antrea-controller Pod. |
 | controller.selfSignedCert | bool | `true` | Indicates whether to use auto-generated self-signed TLS certificates. If false, a Secret named "antrea-controller-tls" must be provided with the following keys: ca.crt, tls.crt, tls.key. |
+| controller.tlsSecretName | string | `"antrea-controller-tls"` | The Secret name of controller TLS certificates. |
 | controller.tolerations | list | `[{"key":"CriticalAddonsOnly","operator":"Exists"},{"effect":"NoSchedule","key":"node-role.kubernetes.io/master"},{"effect":"NoSchedule","key":"node-role.kubernetes.io/control-plane"},{"effect":"NoExecute","key":"node.kubernetes.io/unreachable","operator":"Exists","tolerationSeconds":0}]` | Tolerations for the antrea-controller Pod. |
 | controllerImage | object | `{"pullPolicy":"IfNotPresent","repository":"antrea/antrea-controller-ubuntu","tag":""}` | Container image to use for the antrea-controller component. |
 | defaultMTU | int | `0` | Default MTU to use for the host gateway interface and the network interface of each Pod. By default, antrea-agent will discover the MTU of the Node's primary interface and adjust it to accommodate for tunnel encapsulation overhead if applicable. |
