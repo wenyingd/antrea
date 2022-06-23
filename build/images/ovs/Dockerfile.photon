@@ -110,6 +110,7 @@ RUN tdnf install -y iptables rpm && \
       logrotate \
       openssl \
       python3 \
+      python3-curses \
       python3-libs \
       python3-six \
       python3-xml && \
