@@ -50,6 +50,12 @@ func skipIfAntreaIPAMTest(tb testing.TB) {
 	}
 }
 
+func skipIfRunOnTKGs(tb testing.TB) {
+	if testOptions.runOnTKGs {
+		tb.Skipf("Skipping test when running on TKGs: %s", tb.Name())
+	}
+}
+
 func skipIfNotFlowVisibilityTest(tb testing.TB) {
 	if !testOptions.flowVisibility {
 		tb.Skipf("Skipping when not running flow visibility test")
@@ -706,6 +712,7 @@ func testMain(m *testing.M) int {
 	flag.BoolVar(&testOptions.flowVisibility, "flow-visibility", false, "Run flow visibility tests")
 	flag.BoolVar(&testOptions.npEvaluation, "networkpolicy-evaluation", false, "Run NetworkPolicy evaluation tests")
 	flag.BoolVar(&testOptions.deployAntrea, "deploy-antrea", true, "Deploy Antrea before running tests")
+	flag.BoolVar(&testOptions.runOnTKGs, "tkgs", false, "Run tests on TKGs")
 	flag.StringVar(&testOptions.coverageDir, "coverage-dir", "", "Directory for coverage data files")
 	flag.StringVar(&testOptions.skipCases, "skip-cases", "", "Key words to skip cases")
 	flag.StringVar(&testOptions.linuxVMs, "linuxVMs", "", "hostname of Linux VMs")

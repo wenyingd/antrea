@@ -219,6 +219,7 @@ type TestOptions struct {
 	externalServerIPs string
 	vlanSubnets       string
 	vlanID            int
+	runOnTKGs         bool
 }
 
 type flowVisibilityTestOptions struct {

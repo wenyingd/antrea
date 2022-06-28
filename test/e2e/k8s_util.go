@@ -542,8 +542,11 @@ func (data *TestData) CreateOrUpdateDeployment(ns string,
 		case v1.ProtocolSCTP:
 			args = []string{"/agnhost porter"}
 		default:
-			args = []string{fmt.Sprintf("/agnhost serve-hostname --udp --http=false --port=%d & /agnhost serve-hostname --tcp --http=false --port=%d & /agnhost porter", port, port)}
-
+			if testOptions.runOnTKGs {
+				args = []string{fmt.Sprintf("/agnhost serve-hostname --udp --http=false --port=%d & /agnhost serve-hostname --tcp --http=false --port=%d", port, port)}
+			} else {
+				args = []string{fmt.Sprintf("/agnhost serve-hostname --udp --http=false --port=%d & /agnhost serve-hostname --tcp --http=false --port=%d & /agnhost porter", port, port)}
+			}
 		}
 		return v1.Container{
 			Name:            fmt.Sprintf("c%d", port),
@@ -1039,10 +1042,11 @@ func (k *KubernetesUtils) waitForHTTPServers(allPods []Pod) error {
 		if _, wrong, _ := reachability.Summary(); wrong != 0 {
 			return false
 		}
-
-		k.Validate(allPods, reachability, []int32{80, 81}, utils.ProtocolSCTP)
-		if _, wrong, _ := reachability.Summary(); wrong != 0 {
-			return false
+		if !testOptions.runOnTKGs {
+			k.Validate(allPods, reachability, []int32{80, 81}, utils.ProtocolSCTP)
+			if _, wrong, _ := reachability.Summary(); wrong != 0 {
+				return false
+			}
 		}
 		return true
 	}
