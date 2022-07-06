@@ -12,22 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# - openvswitch-$OVS_VERSION.tar.gz - archive of the source code of OpenvSwitch.
 FROM quay.io/centos/centos:stream9 as ovs-rpms
-# Some patches may not apply cleanly if a non-default version is provided.
-# See build/images/deps/ovs-version for the default version.
-ARG OVS_VERSION
 
-# Install RPM tools and generic build dependencies.
-RUN yum clean all -y && yum -y install wget git yum-utils python3 rpm-build && \
-    sed -i 's/enabled=.*/enabled=1/g' /etc/yum.repos.d/centos.repo
+ARG OVS_VERSION
+ARG IPSEC
+
+COPY CentOS.repo /tmp/CentOS.repo
+RUN rm -f /etc/yum.repos.d/* && cp /tmp/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
+    yum clean all -y && yum -y install wget git yum-utils python3 rpm-build
 
 COPY apply-patches.sh /
-COPY charon-logging.conf /tmp
-COPY CentOS.repo /tmp
-
-# Download OVS source code
-RUN wget -q -O - https://www.openvswitch.org/releases/openvswitch-$OVS_VERSION.tar.gz | tar xz -C /tmp
-RUN cd /tmp/openvswitch* && \
+COPY openvswitch-$OVS_VERSION.tar.gz /tmp/
+RUN tar -xzf /tmp/openvswitch-$OVS_VERSION.tar.gz -C /tmp && \
+    rm -rf openvswitch-$OVS_VERSION.tar.gz && \
+    cd /tmp/openvswitch-$OVS_VERSION && \
     /apply-patches.sh && \
     sed -e "s/@VERSION@/$OVS_VERSION/" rhel/openvswitch-fedora.spec.in > /tmp/ovs.spec && \
     yum-builddep -y /tmp/ovs.spec && ./boot.sh && \
@@ -36,11 +35,13 @@ RUN cd /tmp/openvswitch* && \
     # As Antrea runs OVS as root, we disable libcapng to make logrotate also run as root.
     # See https://github.com/openvswitch/ovs/blob/v2.17.7/rhel/openvswitch-fedora.spec.in#L26-L27.
     RPMBUILD_OPT="--without libcapng --without check" make rpm-fedora && mkdir -p /tmp/ovs-rpms && \
-    mv /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/*.rpm  /tmp/ovs-rpms && \
+    find /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/*.rpm -not -name "*ipsec*" -exec cp -vr '{}' /tmp/ovs-rpms \; && \
+    if ${IPSEC}; then cp /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/*ipsec*.rpm /tmp/ovs-rpms; fi && \
     rm -rf /tmp/openvswitch*
 
 FROM registry.access.redhat.com/ubi9
 ARG OVS_VERSION
+ARG IPSEC
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="A Docker image based on UBI9 which includes Open vSwitch built from source."
@@ -61,8 +62,10 @@ RUN --mount=type=bind,from=ovs-rpms,source=/tmp/,target=/tmp/build \
     popd && \
     mv /etc/logrotate.d/openvswitch /etc/logrotate.d/openvswitch-switch && \
     sed -i "/rotate /a\    #size 100M" /etc/logrotate.d/openvswitch-switch && \
-    # https://github.com/libreswan/libreswan/blob/main/programs/setup/setup.in
-    # The init system is configured to systemd by default. Change it to namespaces
-    # to spawn the ipsec process directly.
-    sed -i 's/^initsystem=.*$/initsystem="namespaces"/' /usr/libexec/ipsec/setup && \
+        if ${IPSEC}; then \
+        # https://github.com/libreswan/libreswan/blob/main/programs/setup/setup.in
+        # The init system is configured to systemd by default. Change it to namespaces
+        # to spawn the ipsec process directly.
+        sed -i 's/^initsystem=.*$/initsystem="namespaces"/' /usr/libexec/ipsec/setup; \
+    fi && \
     rm /etc/rhsm/rhsm.conf.bak && yum clean all

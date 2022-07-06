@@ -364,6 +364,16 @@ else
 endif
 	docker tag antrea/antrea-debian:$(DOCKER_IMG_VERSION) antrea/antrea-debian
 
+.PHONY: ubi
+ubi:
+	@echo "===> Building antrea/antrea-ubi Docker image <==="
+ifneq ($(NO_PULL),)
+	docker build -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-ubi
+
 .PHONY: photon
 photon:
 	@echo "===> Building antrea/antrea-photon Docker image <==="

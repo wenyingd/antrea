@@ -213,6 +213,8 @@ elif [ "$DISTRO" == "photon" ]; then
         exit 1
     fi
     docker_build_and_push "antrea/openvswitch-photon" "Dockerfile.photon"
+elif [ "$DISTRO" == "ubi" ]; then
+    docker_build_and_push "antrea/openvswitch-ubi" "Dockerfile.ubi"
 fi
 
 popd > /dev/null
