@@ -17,6 +17,7 @@ package networkpolicy
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -44,16 +45,12 @@ func shuffle(s *[]corev1.Pod) {
 	*s = slice
 }
 
-// Total NetworkPolicies number = 50% Pods number
-//  5% NetworkPolicies cover 80% Pods = 2.5% Pods number
-// 15% NetworkPolicies cover 13% Pods = 7.5% Pods number
-// 80% NetworkPolicies cover 6% Pods  = 40%  Pods number
-func generateNetpolTemplate(labelNum int, podName, ns string, isIngress bool) *netv1.NetworkPolicy {
+func generateNetpolTemplate(labelNum int, ns string, isIngress bool) *netv1.NetworkPolicy {
 	name := uuid.New().String()
 	protocol := corev1.ProtocolTCP
 	port := intstr.FromInt(80)
 	policyPorts := []netv1.NetworkPolicyPort{{Protocol: &protocol, Port: &port}}
-	policyPeer := []netv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"name": podName}}}}
+	policyPeer := []netv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"namespace": ns}}}}
 	netpol := &netv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -61,7 +58,7 @@ func generateNetpolTemplate(labelNum int, podName, ns string, isIngress bool) *n
 			Labels:    map[string]string{networkPolicyLabelKey: ""},
 		},
 		Spec: netv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: utils.PickLabels(labelNum, false)},
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{fmt.Sprintf("app-%d", labelNum): fmt.Sprintf("scale-%d", labelNum)}},
 		},
 	}
 	if isIngress {
@@ -74,40 +71,19 @@ func generateNetpolTemplate(labelNum int, podName, ns string, isIngress bool) *n
 	return netpol
 }
 
-func generateP80NetworkPolicies(podName, ns string, isIngress bool) *netv1.NetworkPolicy {
-	return generateNetpolTemplate(2, podName, ns, isIngress)
-}
-func generateP15NetworkPolicies(podName, ns string, isIngress bool) *netv1.NetworkPolicy {
-	return generateNetpolTemplate(7, podName, ns, isIngress)
-}
-func generateP5NetworkPolicies(podName, ns string, isIngress bool) *netv1.NetworkPolicy {
-	return generateNetpolTemplate(10, podName, ns, isIngress)
+func generateIngressNP(ns string) *netv1.NetworkPolicy {
+	return generateNetpolTemplate(1, ns, true)
 }
 
-func generateNetworkPolicies(cs kubernetes.Interface, isIngress bool, npNum int, ns string) ([]*netv1.NetworkPolicy, error) {
-	// NetworkPolicies num is about half num of all workload Pods
-	p5 := npNum * 5 / 100   // 2.5% number of Pods
-	p15 := npNum * 15 / 100 // 7.5% number of Pods
-	p80 := npNum * 80 / 100 // 40% number of Pods
+func generateEgressNP(ns string) *netv1.NetworkPolicy {
+	return generateNetpolTemplate(1, ns, false)
+}
+
+func generateNetworkPolicies(ns string) ([]*netv1.NetworkPolicy, error) {
 	var nps []*netv1.NetworkPolicy
-	podList, err := cs.
-		CoreV1().Pods(ns).
-		List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	shuffle(&podList.Items)
 
-	items := podList.Items[:p5+p15+p80]
-	for i := 0; i < p5; i++ {
-		nps = append(nps, generateP80NetworkPolicies(items[i].Name, ns, isIngress))
-	}
-	for i := 0; i < p15; i++ {
-		nps = append(nps, generateP15NetworkPolicies(items[i].Name, ns, isIngress))
-	}
-	for i := 0; i < p80; i++ {
-		nps = append(nps, generateP5NetworkPolicies(items[i].Name, ns, isIngress))
-	}
+	nps = append(nps, generateIngressNP(ns))
+	nps = append(nps, generateEgressNP(ns))
 	return nps, nil
 }
 
@@ -117,14 +93,15 @@ type NetworkPolicyInfo struct {
 	Spec      netv1.NetworkPolicySpec
 }
 
-func ScaleUp(ctx context.Context, num int, cs kubernetes.Interface, nss []string, ipv6 bool) (nps []NetworkPolicyInfo, err error) {
+func ScaleUp(ctx context.Context, cs kubernetes.Interface, nss []string, ipv6 bool) (nps []NetworkPolicyInfo, err error) {
 	// ScaleUp networkPolicies
+	start := time.Now()
 	for _, ns := range nss {
-		npsData, err := generateNetworkPolicies(cs, utils.GenRandInt()%2 == 0, num, ns)
+		npsData, err := generateNetworkPolicies(ns)
 		if err != nil {
 			return nil, fmt.Errorf("error when generating network policies: %w", err)
 		}
-		klog.InfoS("Scale up NetworkPolicies", "Num", len(npsData))
+		klog.InfoS("Scale up NetworkPolicies", "Num", len(npsData), "Namespace", ns)
 		for _, np := range npsData {
 			if err := utils.DefaultRetry(func() error {
 				newNP, err := cs.NetworkingV1().NetworkPolicies(ns).Create(ctx, np, metav1.CreateOptions{})
@@ -142,6 +119,7 @@ func ScaleUp(ctx context.Context, num int, cs kubernetes.Interface, nss []string
 			}
 		}
 	}
+	klog.InfoS("Scale up NetworkPolicies", "Duration", time.Since(start), "count", len(nps))
 	return
 }
 

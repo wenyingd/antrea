@@ -17,6 +17,7 @@ package namespace
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,7 +26,7 @@ import (
 )
 
 func ScaleUp(ctx context.Context, cs kubernetes.Interface, nsPrefix string, nsNum int) (nss []string, err error) {
-	klog.Infof("Creating scale test namespaces")
+	start := time.Now()
 	for i := 0; i < nsNum; i++ {
 		nsToCreate := fmt.Sprintf("%s-%d", nsPrefix, i)
 		if _, err := cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: nsToCreate}}, metav1.CreateOptions{}); err != nil {
@@ -34,5 +35,6 @@ func ScaleUp(ctx context.Context, cs kubernetes.Interface, nsPrefix string, nsNu
 		nss = append(nss, nsToCreate)
 		klog.InfoS("Create Namespace", "name", nsToCreate)
 	}
+	klog.InfoS("Scaled up Namespaces", "Duration", time.Since(start), "count", len(nss))
 	return nss, nil
 }

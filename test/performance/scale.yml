@@ -4,9 +4,9 @@ real_node: true
 repeat_times: 1
 pods_num_per_node: 10
 pods_num_per_ns: 5
-svc_num_per_node: 1
+svc_num_per_node: 2
 np_num_per_node: 5
-namespace_num: 1
+namespace_num: 3
 record_prometheus: false
 pre_workload: true
 teardown: false
@@ -23,19 +23,19 @@ scales:
     repeat_times: 1
   - name: "ScaleRestartAgent"
     package: "test/performance/framework"
-    repeat_times: 0
+    repeat_times: 1
   - name: "RestartController"
     package: "test/performance/framework"
-    repeat_times: 0
+    repeat_times: 1
   - name: "ScaleNetworkPolicy"
     package: "test/performance/framework"
-    repeat_times: 0
+    repeat_times: 1
   - name: "ScaleRestartAgent"
     package: "test/performance/framework"
-    repeat_times: 0
+    repeat_times: 1
   - name: "RestartController"
     package: "test/performance/framework"
-    repeat_times: 0
+    repeat_times: 1
   - name: "ScaleServiceDemo"
     package: "test/performance/framework"
     repeat_times: 3

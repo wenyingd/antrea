@@ -30,10 +30,7 @@ func init() {
 }
 
 func ScaleNetworkPolicy(ctx context.Context, data *ScaleData) error {
-	npNum := data.Specification.NpNumPerNode * data.nodesNum
-
-	// ScaleUp networkPolicies
-	nps, err := networkpolicy.ScaleUp(ctx, npNum, data.kubernetesClientSet, data.namespaces, data.Specification.IPv6)
+	nps, err := networkpolicy.ScaleUp(ctx, data.kubernetesClientSet, data.namespaces, data.Specification.IPv6)
 	if err != nil {
 		return fmt.Errorf("scale up NetworkPolicies error: %v", err)
 	}

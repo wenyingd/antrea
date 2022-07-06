@@ -83,6 +83,6 @@ func ScaleUp(ctx context.Context, cs kubernetes.Interface, nss []string, ipv6 bo
 		}
 		time.Sleep(time.Duration(utils.GenRandInt()%2000) * time.Millisecond)
 	}
-	klog.InfoS("Scale Service time", "Duration", time.Since(start))
+	klog.InfoS("Scale up Services", "Duration", time.Since(start), "count", len(svcs))
 	return
 }
