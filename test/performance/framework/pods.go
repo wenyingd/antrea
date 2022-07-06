@@ -89,24 +89,25 @@ func workloadPodTemplate(podName, ns string, labels map[string]string, onRealNod
 func newWorkloadPod(podName, ns string, onRealNode bool) *corev1.Pod {
 	labels := map[string]string{
 		AppLabelKey: AppLabelValue,
+		"namespace": ns,
 	}
-	for len(labels) == 1 { // must generate at least one label.
-		for _, l := range utils.LabelCandidates {
-			if utils.GenRandInt()%10 < 8 {
-				labels[l] = ""
-			}
-		}
-	}
-	if onRealNode {
-		labels[utils.PodOnRealNodeLabelKey] = ""
-	}
+	// for len(labels) == 1 { // must generate at least one label.
+	// 	for _, l := range utils.LabelCandidates {
+	// 		if utils.GenRandInt()%10 < 8 {
+	// 			labels[l] = ""
+	// 		}
+	// 	}
+	// }
+	// if onRealNode {
+	// 	labels[utils.PodOnRealNodeLabelKey] = ""
+	// }
 	return workloadPodTemplate(podName, ns, labels, onRealNode)
 }
 
 func ScaleUpWorkloadPods(ctx context.Context, data *ScaleData) error {
 	// Creating workload Pods
 	for _, ns := range data.namespaces {
-		podNum := data.nodesNum * data.Specification.PodsNumPerNode
+		podNum := data.Specification.PodsNumPerNs
 		gErr, _ := errgroup.WithContext(context.Background())
 		for i := 0; i < podNum; i++ {
 			index := i
@@ -126,7 +127,7 @@ func ScaleUpWorkloadPods(ctx context.Context, data *ScaleData) error {
 				return nil
 			})
 		}
-		klog.InfoS("Create workload Pods", "PodNum", podNum)
+		klog.InfoS("Create workload Pods", "PodNum", podNum, "ns", ns)
 		if err := gErr.Wait(); err != nil {
 			return err
 		}
@@ -145,7 +146,8 @@ func ScaleUpWorkloadPods(ctx context.Context, data *ScaleData) error {
 						count += 1
 					}
 				}
-				return count >= data.podsNum, nil
+				klog.V(2).InfoS("Check Pod num", "Running Pod num", count, "expect Pod num", data.podsNumPerNs)
+				return count >= data.podsNumPerNs, nil
 			}
 			return false, nil
 		}, ctx.Done())

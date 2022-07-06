@@ -3,6 +3,7 @@ ipv6: false
 real_node: true
 repeat_times: 1
 pods_num_per_node: 10
+pods_num_per_ns: 5
 svc_num_per_node: 1
 np_num_per_node: 5
 namespace_num: 1
@@ -22,19 +23,19 @@ scales:
     repeat_times: 1
   - name: "ScaleRestartAgent"
     package: "test/performance/framework"
-    repeat_times: 1
+    repeat_times: 0
   - name: "RestartController"
     package: "test/performance/framework"
-    repeat_times: 1
+    repeat_times: 0
   - name: "ScaleNetworkPolicy"
     package: "test/performance/framework"
-    repeat_times: 1
+    repeat_times: 0
   - name: "ScaleRestartAgent"
     package: "test/performance/framework"
-    repeat_times: 1
+    repeat_times: 0
   - name: "RestartController"
     package: "test/performance/framework"
-    repeat_times: 1
+    repeat_times: 0
   - name: "ScaleServiceDemo"
     package: "test/performance/framework"
     repeat_times: 3

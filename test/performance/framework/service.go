@@ -21,11 +21,8 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/test/performance/config"
 	"antrea.io/antrea/test/performance/framework/service"
 	"antrea.io/antrea/test/performance/utils"
 )
@@ -36,45 +33,24 @@ func init() {
 }
 
 func ScaleService(ctx context.Context, data *ScaleData) error {
-	// Service numbers based on the Node number.
-	svcNum := data.Specification.SvcNumPerNode * data.nodesNum
-	svcs, err := service.ScaleUp(ctx, svcNum, data.kubernetesClientSet, data.namespaces, data.Specification.IPv6)
+	svcs, err := service.ScaleUp(ctx, data.kubernetesClientSet, data.namespaces, data.Specification.IPv6)
 	if err != nil {
 		return fmt.Errorf("scale up services error: %v", err)
 	}
 
 	start := time.Now()
-	// Check services is ready
-	for i := range data.clientPods {
-		clientPod := data.clientPods[i]
-		readySvcs := sets.String{}
+	for i := range svcs {
 		if utils.CheckTimeout(start, data.checkTimeout) {
 			break
 		}
-		checkSvcs := svcs[:]
-		if len(svcs) > 10 {
-			tmp := (int(utils.GenRandInt()) % (len(svcs) - 10)) + 10
-			checkSvcs = svcs[tmp-10 : tmp]
+		k := int(utils.GenRandInt()) % len(data.clientPods)
+		clientPod := data.clientPods[k]
+		svc := svcs[i]
+		if err := PingIP(data.kubeconfig, data.kubernetesClientSet, &clientPod, svc.IP); err != nil {
+			klog.ErrorS(err, "Check readiness of service error", "ClientPodName", clientPod.Name, "svc", svc)
+			return err
 		}
-		if err := wait.PollImmediateUntil(3*config.WaitInterval, func() (bool, error) {
-			if readySvcs.Len() == len(checkSvcs) {
-				return true, nil
-			}
-			for _, svc := range checkSvcs {
-				svcKey := fmt.Sprintf("%s_%s", svc.NameSpace, svc.Name)
-				if _, ok := readySvcs[svcKey]; ok { // Skip the service if it is verified.
-					continue
-				}
-				if err := PingIP(data.kubeconfig, data.kubernetesClientSet, &clientPod, svc.IP); err != nil {
-					return false, err
-				}
-				klog.V(2).InfoS("Check service", "svc", svc, "Pod", clientPod.Name)
-				readySvcs.Insert(svcKey)
-			}
-			return readySvcs.Len() == len(checkSvcs), nil
-		}, ctx.Done()); err != nil {
-			klog.ErrorS(err, "Check readiness of service error", "ClientPodName", clientPod.Name)
-		}
+		klog.V(2).InfoS("Check service", "svc", svc, "Pod", clientPod.Name)
 	}
 
 	if err := service.ScaleDown(ctx, svcs, data.kubernetesClientSet); err != nil {

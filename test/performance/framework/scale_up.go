@@ -142,7 +142,7 @@ type ScaleData struct {
 	Specification       *config.ScaleList
 	nodesNum            int
 	simulateNodesNum    int
-	podsNum             int
+	podsNumPerNs        int
 	checkTimeout        time.Duration
 }
 
@@ -257,7 +257,7 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 		}
 	}
 	td.nodesNum = len(nodes.Items)
-	td.podsNum = td.nodesNum * scaleConfig.PodsNumPerNode
+	td.podsNumPerNs = scaleConfig.PodsNumPerNs
 	td.simulateNodesNum = simulateNodesNum
 	td.checkTimeout = time.Duration(scaleConfig.CheckTimeout) * time.Minute
 
@@ -273,7 +273,6 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 		}
 		td.namespaces = nss
 
-		// TODO scale client Pod per ns
 		klog.Infof("Creating the scale test client DaemonSet")
 		if err := createTestPodClients(ctx, kClient, nss[0]); err != nil {
 			return nil, err
@@ -282,7 +281,7 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 		klog.Infof("Checking scale test client DaemonSet")
 		expectClientNum := td.nodesNum - td.simulateNodesNum
 		err = wait.PollImmediateUntil(config.WaitInterval, func() (bool, error) {
-			podList, err := kClient.CoreV1().Pods(td.namespaces[0]).List(ctx, metav1.ListOptions{LabelSelector: ScaleClientPodTemplateName})
+			podList, err := kClient.CoreV1().Pods(nss[0]).List(ctx, metav1.ListOptions{LabelSelector: ScaleClientPodTemplateName})
 			if err != nil {
 				return false, fmt.Errorf("error when getting scale test client pods: %w", err)
 			}
@@ -297,6 +296,7 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 		if err != nil {
 			return nil, err
 		}
+
 	}
 
 	return &td, nil
