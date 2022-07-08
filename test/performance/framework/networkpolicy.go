@@ -17,6 +17,7 @@ package framework
 import (
 	"context"
 	"fmt"
+	"k8s.io/klog/v2"
 	"time"
 
 	"antrea.io/antrea/test/performance/framework/networkpolicy"
@@ -35,13 +36,9 @@ func ScaleNetworkPolicy(ctx context.Context, data *ScaleData) error {
 
 	maxNPCheckedCount := data.nodesNum
 
-	if len(nps) < maxNPCheckedCount {
-		maxNPCheckedCount = len(nps)
-	}
-
 	start := time.Now()
 	for i, np := range nps {
-		if utils.CheckTimeout(start, data.checkTimeout) || (i+1) > maxNPCheckedCount {
+		if utils.CheckTimeout(start, data.checkTimeout) || i > maxNPCheckedCount {
 			break
 		}
 
@@ -63,6 +60,7 @@ func ScaleNetworkPolicy(ctx context.Context, data *ScaleData) error {
 		if err := PingIP(data.kubeconfig, data.kubernetesClientSet, fromPod, ip); err == nil {
 			return fmt.Errorf("the connection should not be success, NetworkPolicyName: %s, FromPod: %s, ToPodIP: %s", np.Name, fromPod.Name, ip)
 		}
+		klog.InfoS("Checked networkPolicy", "Name", np.Name, "Namespace", np.Namespace, "count", i, "maxNum", maxNPCheckedCount)
 	}
 	if err := networkpolicy.ScaleDown(ctx, data.namespaces, data.kubernetesClientSet); err != nil {
 		return err
