@@ -30,10 +30,10 @@ type ScaleConfiguration struct {
 	IPv6             bool `yaml:"ipv6"`
 	RealNode         bool `yaml:"real_node"`
 	RepeatTimes      int  `yaml:"repeat_times"`
-	PodsNumPerNode   int  `yaml:"pods_num_per_node"`
+	NsNumPerNode     int  `yaml:"ns_num_per_node"`
 	PodsNumPerNs     int  `yaml:"pods_num_per_ns"`
-	SvcNumPerNode    int  `yaml:"svc_num_per_node"`
-	NpNumPerNode     int  `yaml:"np_num_per_node"`
+	SvcNumPerNs      int  `yaml:"svc_num_per_ns"`
+	NpNumPerNs       int  `yaml:"np_num_per_ns"`
 	RecordPrometheus bool `yaml:"record_prometheus"`
 	PreWorkload      bool `yaml:"pre_workload"`
 	NamespaceNum     int  `yaml:"namespace_num"`

@@ -200,11 +200,11 @@ func checkNodeStatus(node corev1.Node) bool {
 }
 
 func validScaleSpecification(c *config.ScaleConfiguration) error {
-	if c.NpNumPerNode*2 > c.PodsNumPerNode {
+	if c.NpNumPerNs*2 > c.PodsNumPerNs {
 		return fmt.Errorf("networkPolicy quantity is too larger than 1/2 workload Pods quantity, scale may fail")
 	}
-	if c.SvcNumPerNode*4 > c.PodsNumPerNode {
-		return fmt.Errorf("service quantity is too larger than 1/4 workload Pods quantity, scale may fail")
+	if c.SvcNumPerNs*2 > c.PodsNumPerNs {
+		return fmt.Errorf("service quantity is too larger than 1/2 workload Pods quantity, scale may fail")
 	}
 	return nil
 }
@@ -261,13 +261,14 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 	td.simulateNodesNum = simulateNodesNum
 	td.checkTimeout = time.Duration(scaleConfig.CheckTimeout) * time.Minute
 
+	expectNsNum := td.Specification.NsNumPerNode * td.nodesNum
 	klog.Infof("Preflight checks and clean up")
 	if scaleConfig.PreWorkload {
 		if err := td.ScaleDown(ctx); err != nil {
 			return nil, fmt.Errorf("deleting scale test namespaces error: %v", err)
 		}
 
-		nss, err := namespace.ScaleUp(ctx, td.kubernetesClientSet, ScaleTestNamespaceBase, td.Specification.NamespaceNum)
+		nss, err := namespace.ScaleUp(ctx, td.kubernetesClientSet, ScaleTestNamespaceBase, expectNsNum)
 		if err != nil {
 			return nil, fmt.Errorf("scale up namespaces error: %v", err)
 		}

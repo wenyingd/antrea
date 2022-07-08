@@ -71,19 +71,24 @@ func generateNetpolTemplate(labelNum int, ns string, isIngress bool) *netv1.Netw
 	return netpol
 }
 
-func generateIngressNP(ns string) *netv1.NetworkPolicy {
-	return generateNetpolTemplate(1, ns, true)
+func generateIngressNP(labelNum int, ns string) *netv1.NetworkPolicy {
+	return generateNetpolTemplate(labelNum, ns, true)
 }
 
-func generateEgressNP(ns string) *netv1.NetworkPolicy {
-	return generateNetpolTemplate(1, ns, false)
+func generateEgressNP(labelNum int, ns string) *netv1.NetworkPolicy {
+	return generateNetpolTemplate(labelNum, ns, false)
 }
 
-func generateNetworkPolicies(ns string) ([]*netv1.NetworkPolicy, error) {
+func generateNetworkPolicies(ns string, num int) ([]*netv1.NetworkPolicy, error) {
 	var nps []*netv1.NetworkPolicy
 
-	nps = append(nps, generateIngressNP(ns))
-	nps = append(nps, generateEgressNP(ns))
+	for i := 0; i < num; i++ {
+		if i%2 == 0 {
+			nps = append(nps, generateIngressNP(i/2+1, ns))
+		} else {
+			nps = append(nps, generateEgressNP(i/2+1, ns))
+		}
+	}
 	return nps, nil
 }
 
@@ -93,11 +98,11 @@ type NetworkPolicyInfo struct {
 	Spec      netv1.NetworkPolicySpec
 }
 
-func ScaleUp(ctx context.Context, cs kubernetes.Interface, nss []string, ipv6 bool) (nps []NetworkPolicyInfo, err error) {
+func ScaleUp(ctx context.Context, cs kubernetes.Interface, nss []string, numPerNs int, ipv6 bool) (nps []NetworkPolicyInfo, err error) {
 	// ScaleUp networkPolicies
 	start := time.Now()
 	for _, ns := range nss {
-		npsData, err := generateNetworkPolicies(ns)
+		npsData, err := generateNetworkPolicies(ns, numPerNs)
 		if err != nil {
 			return nil, fmt.Errorf("error when generating network policies: %w", err)
 		}

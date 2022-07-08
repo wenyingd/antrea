@@ -29,7 +29,7 @@ func init() {
 }
 
 func ScaleNetworkPolicy(ctx context.Context, data *ScaleData) error {
-	nps, err := networkpolicy.ScaleUp(ctx, data.kubernetesClientSet, data.namespaces, data.Specification.IPv6)
+	nps, err := networkpolicy.ScaleUp(ctx, data.kubernetesClientSet, data.namespaces, data.Specification.NpNumPerNs, data.Specification.IPv6)
 	if err != nil {
 		return fmt.Errorf("scale up NetworkPolicies error: %v", err)
 	}
@@ -39,6 +39,7 @@ func ScaleNetworkPolicy(ctx context.Context, data *ScaleData) error {
 	start := time.Now()
 	for i, np := range nps {
 		if utils.CheckTimeout(start, data.checkTimeout) || i > maxNPCheckedCount {
+			klog.InfoS("NetworkPolicies check deadline exceeded", "count", i)
 			break
 		}
 

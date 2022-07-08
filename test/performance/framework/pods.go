@@ -86,11 +86,10 @@ func workloadPodTemplate(podName, ns string, labels map[string]string, onRealNod
 	}
 }
 
-func newWorkloadPod(podName, ns string, onRealNode bool) *corev1.Pod {
+func newWorkloadPod(podName, ns string, onRealNode bool, labelNum int) *corev1.Pod {
 	labels := map[string]string{
-		AppLabelKey: AppLabelValue,
-		"namespace": ns,
-		"app-1":     "scale-1",
+		AppLabelKey:                     AppLabelValue,
+		fmt.Sprintf("app-%d", labelNum): fmt.Sprintf("scale-%d", labelNum),
 	}
 	return workloadPodTemplate(podName, ns, labels, onRealNode)
 }
@@ -106,10 +105,10 @@ func ScaleUpWorkloadPods(ctx context.Context, data *ScaleData) error {
 			time.Sleep(time.Duration(utils.GenRandInt()%100) * time.Millisecond)
 			gErr.Go(func() error {
 				podName := fmt.Sprintf("antrea-scale-test-pod-%s", uuid.New().String())
-				pod := newWorkloadPod(podName, ns, true)
+				pod := newWorkloadPod(podName, ns, true, i/2+1)
 				if !data.Specification.RealNode {
 					onRealNode := (index % data.nodesNum) >= data.simulateNodesNum
-					pod = newWorkloadPod(podName, ns, onRealNode)
+					pod = newWorkloadPod(podName, ns, onRealNode, i/2+1)
 				}
 				klog.V(2).InfoS("Creating Pods", "onRealNode", data.Specification.RealNode)
 				if _, err := data.kubernetesClientSet.CoreV1().

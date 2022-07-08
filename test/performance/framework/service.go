@@ -33,14 +33,17 @@ func init() {
 }
 
 func ScaleService(ctx context.Context, data *ScaleData) error {
-	svcs, err := service.ScaleUp(ctx, data.kubernetesClientSet, data.namespaces, data.Specification.IPv6)
+	svcs, err := service.ScaleUp(ctx, data.kubernetesClientSet, data.namespaces, data.Specification.SvcNumPerNs, data.Specification.IPv6)
 	if err != nil {
 		return fmt.Errorf("scale up services error: %v", err)
 	}
 
+	maxSvcCheckedCount := data.nodesNum
+
 	start := time.Now()
 	for i := range svcs {
-		if utils.CheckTimeout(start, data.checkTimeout) {
+		if utils.CheckTimeout(start, data.checkTimeout) || i > maxSvcCheckedCount {
+			klog.InfoS("Services check deadline exceeded", "count", i)
 			break
 		}
 		k := int(utils.GenRandInt()) % len(data.clientPods)
