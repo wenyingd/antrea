@@ -53,7 +53,7 @@ func ScaleDown(ctx context.Context, nss []string, cs kubernetes.Interface) error
 				return false, err
 			}
 		}
-		klog.InfoS("Scale down NetworkPolicies", "allNamespaces", nss, "cleanedCount", cleanCount, "staleNpNum", staleNpNum)
+		klog.InfoS("Scale down NetworkPolicies", "CleanedNamespaceNum", cleanCount, "staleNpNum", staleNpNum)
 		return cleanCount == len(nss), nil
 	}, ctx.Done())
 }
