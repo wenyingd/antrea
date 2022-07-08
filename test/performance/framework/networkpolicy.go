@@ -19,8 +19,6 @@ import (
 	"fmt"
 	"time"
 
-	"golang.org/x/time/rate"
-
 	"antrea.io/antrea/test/performance/framework/networkpolicy"
 	"antrea.io/antrea/test/performance/utils"
 )
@@ -35,64 +33,37 @@ func ScaleNetworkPolicy(ctx context.Context, data *ScaleData) error {
 		return fmt.Errorf("scale up NetworkPolicies error: %v", err)
 	}
 
-	retryWithRateLimiter := func(ctx context.Context, rateLimiter *rate.Limiter, f func() error) error {
-		rateLimiter.Wait(ctx)
-		return utils.DefaultRetry(f)
+	maxNPCheckedCount := data.nodesNum
+
+	if len(nps) < maxNPCheckedCount {
+		maxNPCheckedCount = len(nps)
 	}
 
-	baseIndex := 1
-	if len(nps) > 600 {
-		baseIndex = len(nps) / 600
-	}
 	start := time.Now()
-	for _, ns := range data.namespaces {
+	for i, np := range nps {
+		if utils.CheckTimeout(start, data.checkTimeout) || (i+1) > maxNPCheckedCount {
+			break
+		}
+
 		// Check connection of Pods in NetworkPolicies, workload Pods
-		rateLimiter := rate.NewLimiter(rate.Limit(10*len(data.clientPods)), len(data.clientPods)*20)
-		for i, np := range nps {
-			if utils.CheckTimeout(start, data.checkTimeout) {
-				break
-			}
-			if i%baseIndex != 0 {
-				continue
-			}
-			fromPod, ip, err := networkpolicy.SelectConnectPod(ctx, data.kubernetesClientSet, ns, np)
-			if err != nil || fromPod == nil || ip == "" {
-				continue
-			}
-			if err := retryWithRateLimiter(ctx, rateLimiter, func() error {
-				if err := PingIP(data.kubeconfig, data.kubernetesClientSet, fromPod, ip); err != nil {
-					return fmt.Errorf("the connection should be success, NetworkPolicyName: %s, FromPod: %s, ToPod: %s",
-						np.Name, fromPod.Name, ip)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
+		fromPod, ip, err := networkpolicy.SelectConnectPod(ctx, data.kubernetesClientSet, np.Namespace, np)
+		if err != nil || fromPod == nil || ip == "" {
+			continue
+		}
+		if err := PingIP(data.kubeconfig, data.kubernetesClientSet, fromPod, ip); err != nil {
+			return fmt.Errorf("the connection should be success, NetworkPolicyName: %s, FromPod: %s, ToPod: %s",
+				np.Name, fromPod.Name, ip)
 		}
 
 		// Check isolation of Pods in NetworkPolicies, client Pods to workload Pods
-		for i, np := range nps {
-			if utils.CheckTimeout(start, data.checkTimeout) {
-				break
-			}
-			if i%baseIndex != 0 {
-				continue
-			}
-			fromPod, ip, err := networkpolicy.SelectIsoPod(ctx, data.kubernetesClientSet, ns, np, data.clientPods)
-			if err != nil || fromPod == nil || ip == "" {
-				continue
-			}
-			if err := retryWithRateLimiter(ctx, rateLimiter, func() error {
-				if err := PingIP(data.kubeconfig, data.kubernetesClientSet, fromPod, ip); err == nil {
-					return fmt.Errorf("the connection should not be success, NetworkPolicyName: %s, FromPod: %s, ToPodIP: %s", np.Name, fromPod.Name, ip)
-				}
-				return nil
-			}); err != nil {
-				return err
-			}
+		fromPod, ip, err = networkpolicy.SelectIsoPod(ctx, data.kubernetesClientSet, np.Namespace, np, data.clientPods)
+		if err != nil || fromPod == nil || ip == "" {
+			continue
+		}
+		if err := PingIP(data.kubeconfig, data.kubernetesClientSet, fromPod, ip); err == nil {
+			return fmt.Errorf("the connection should not be success, NetworkPolicyName: %s, FromPod: %s, ToPodIP: %s", np.Name, fromPod.Name, ip)
 		}
 	}
-
 	if err := networkpolicy.ScaleDown(ctx, data.namespaces, data.kubernetesClientSet); err != nil {
 		return err
 	}
