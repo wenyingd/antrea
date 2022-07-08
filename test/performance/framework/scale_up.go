@@ -17,6 +17,7 @@ package framework
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,8 +59,6 @@ const (
 	ScaleClientContainerName   = "antrea-scale-test-client"
 	ScaleClientPodTemplateName = "antrea-scale-test-client"
 	ScaleTestClientDaemonSet   = "antrea-scale-test-client-daemonset"
-
-	clientPodsNamepace = "scale-client"
 )
 
 var (
@@ -149,6 +148,12 @@ type ScaleData struct {
 }
 
 func createTestPodClients(ctx context.Context, kClient kubernetes.Interface, ns string) error {
+	if _, err := kClient.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{}); errors.IsNotFound(err) {
+		if _, err := kClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}, metav1.CreateOptions{}); err != nil {
+			return err
+		}
+	}
+
 	if err := utils.DefaultRetry(func() error {
 		_, err := kClient.AppsV1().DaemonSets(ns).Create(ctx, &appsv1.DaemonSet{
 			ObjectMeta: metav1.ObjectMeta{
@@ -263,6 +268,8 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 	td.simulateNodesNum = simulateNodesNum
 	td.checkTimeout = time.Duration(scaleConfig.CheckTimeout) * time.Minute
 
+	clientPodsNamespace := ScaleTestNamespacePrefix + "scale-client"
+
 	expectNsNum := td.Specification.NsNumPerNode * td.nodesNum
 	klog.Infof("Preflight checks and clean up")
 	if scaleConfig.PreWorkload {
@@ -277,7 +284,7 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 		td.namespaces = nss
 
 		klog.Infof("Creating the scale test client DaemonSet")
-		if err := createTestPodClients(ctx, kClient, clientPodsNamepace); err != nil {
+		if err := createTestPodClients(ctx, kClient, clientPodsNamespace); err != nil {
 			return nil, err
 		}
 
@@ -290,7 +297,7 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 	klog.Infof("Checking scale test client DaemonSet")
 	expectClientNum := td.nodesNum - td.simulateNodesNum
 	err = wait.PollImmediateUntil(config.WaitInterval, func() (bool, error) {
-		podList, err := kClient.CoreV1().Pods(clientPodsNamepace).List(ctx, metav1.ListOptions{LabelSelector: ScaleClientPodTemplateName})
+		podList, err := kClient.CoreV1().Pods(clientPodsNamespace).List(ctx, metav1.ListOptions{LabelSelector: ScaleClientPodTemplateName})
 		if err != nil {
 			return false, fmt.Errorf("error when getting scale test client pods: %w", err)
 		}
