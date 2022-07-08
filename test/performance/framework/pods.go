@@ -88,8 +88,8 @@ func workloadPodTemplate(podName, ns string, labels map[string]string, onRealNod
 
 func newWorkloadPod(podName, ns string, onRealNode bool, labelNum int) *corev1.Pod {
 	labels := map[string]string{
-		AppLabelKey:                     AppLabelValue,
-		fmt.Sprintf("app-%d", labelNum): fmt.Sprintf("scale-%d", labelNum),
+		AppLabelKey: AppLabelValue,
+		fmt.Sprintf("%s%d", utils.SelectorLabelKeySuffix, labelNum): fmt.Sprintf("%s%d", utils.SelectorLabelValueSuffix, labelNum),
 	}
 	return workloadPodTemplate(podName, ns, labels, onRealNode)
 }

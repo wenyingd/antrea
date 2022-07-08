@@ -31,6 +31,11 @@ const PodOnRealNodeLabelKey = "realNode"
 // pods cover percents:       80% 64% 51% 41% 32% 25% 20% 16% 13% 10% 8% 6%
 var LabelCandidates = []string{"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"}
 
+const (
+	SelectorLabelKeySuffix   = "app-"
+	SelectorLabelValueSuffix = "scale-"
+)
+
 func DefaultRetry(fn func() error) error {
 	return retry.OnError(retry.DefaultRetry, func(_ error) bool { return true }, fn)
 }

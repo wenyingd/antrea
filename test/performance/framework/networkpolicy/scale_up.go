@@ -58,7 +58,9 @@ func generateNetpolTemplate(labelNum int, ns string, isIngress bool) *netv1.Netw
 			Labels:    map[string]string{networkPolicyLabelKey: ""},
 		},
 		Spec: netv1.NetworkPolicySpec{
-			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{fmt.Sprintf("app-%d", labelNum): fmt.Sprintf("scale-%d", labelNum)}},
+			PodSelector: metav1.LabelSelector{MatchLabels: map[string]string{
+				fmt.Sprintf("%s%d", utils.SelectorLabelKeySuffix, labelNum): fmt.Sprintf("%s%d", utils.SelectorLabelValueSuffix, labelNum),
+			}},
 		},
 	}
 	if isIngress {

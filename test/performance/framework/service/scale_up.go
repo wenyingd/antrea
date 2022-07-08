@@ -31,12 +31,15 @@ import (
 
 func generateService(ns string, num int) (svcs []*corev1.Service) {
 	for i := 0; i < num; i++ {
+		labelNum := i/2 + 1
 		svc := &corev1.Service{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("antrea-scale-svc-%d-%s", i, uuid.New().String()),
 			},
 			Spec: corev1.ServiceSpec{
-				Selector: map[string]string{"namespace": ns},
+				Selector: map[string]string{
+					fmt.Sprintf("%s%d", utils.SelectorLabelKeySuffix, labelNum): fmt.Sprintf("%s%d", utils.SelectorLabelValueSuffix, labelNum),
+				},
 				Ports: []corev1.ServicePort{
 					{
 						Protocol: corev1.ProtocolTCP,
