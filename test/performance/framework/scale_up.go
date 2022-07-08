@@ -268,7 +268,7 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 	td.simulateNodesNum = simulateNodesNum
 	td.checkTimeout = time.Duration(scaleConfig.CheckTimeout) * time.Minute
 
-	clientPodsNamespace := ScaleTestNamespacePrefix + "scale-client"
+	clientPodsNamespace := ScaleTestNamespacePrefix + "-scale-client"
 
 	expectNsNum := td.Specification.NsNumPerNode * td.nodesNum
 	klog.Infof("Preflight checks and clean up")

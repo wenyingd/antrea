@@ -131,13 +131,13 @@ func ScaleUp(ctx context.Context, cs kubernetes.Interface, nss []string, numPerN
 }
 
 func SelectConnectPod(ctx context.Context, cs kubernetes.Interface, ns string, np NetworkPolicyInfo) (fromPod *corev1.Pod, toPodIP string, err error) {
-	klog.V(2).InfoS("Checking connectivity of the NetworkPolicy", "NetworkPolicyName", np.Name)
+	klog.V(2).InfoS("Checking connectivity of the NetworkPolicy", "NetworkPolicyName", np.Name, "Namespace", np.Namespace)
 	podList, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&np.Spec.PodSelector)})
 	if err != nil {
 		return nil, "", fmt.Errorf("error when selecting networkpolicy applied to pods: %w", err)
 	}
 	if len(podList.Items) == 0 {
-		klog.V(2).InfoS("No Pod is selected by the NetworkPolicy, skip", "NetworkPolicyName", np.Name)
+		klog.V(2).InfoS("No Pod is selected by the NetworkPolicy, skip", "NetworkPolicyName", np.Name, "Namespace", np.Namespace)
 		return nil, "", nil
 	}
 	var fromPods []corev1.Pod

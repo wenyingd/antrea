@@ -89,12 +89,17 @@ func workloadPodTemplate(podName, ns string, labels map[string]string, onRealNod
 func newWorkloadPod(podName, ns string, onRealNode bool, labelNum int) *corev1.Pod {
 	labels := map[string]string{
 		AppLabelKey: AppLabelValue,
+		"namespace": ns,
 		fmt.Sprintf("%s%d", utils.SelectorLabelKeySuffix, labelNum): fmt.Sprintf("%s%d", utils.SelectorLabelValueSuffix, labelNum),
 	}
 	return workloadPodTemplate(podName, ns, labels, onRealNode)
 }
 
 func ScaleUpWorkloadPods(ctx context.Context, data *ScaleData) error {
+	if !data.Specification.PreWorkload {
+		klog.V(2).InfoS("Skip creating workload Pods, since PreWorkload set false", "PreWorkload", data.Specification.PreWorkload)
+		return nil
+	}
 	// Creating workload Pods
 	start := time.Now()
 	podNum := data.Specification.PodsNumPerNs
@@ -110,9 +115,7 @@ func ScaleUpWorkloadPods(ctx context.Context, data *ScaleData) error {
 					onRealNode := (index % data.nodesNum) >= data.simulateNodesNum
 					pod = newWorkloadPod(podName, ns, onRealNode, i/2+1)
 				}
-				klog.V(2).InfoS("Creating Pods", "onRealNode", data.Specification.RealNode)
-				if _, err := data.kubernetesClientSet.CoreV1().
-					Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+				if _, err := data.kubernetesClientSet.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 					return err
 				}
 				return nil
