@@ -54,11 +54,10 @@ func cleanedNs(ctx context.Context, cs kubernetes.Interface, ns string) bool {
 	return true
 }
 
-// ScaleDown delete pods/ns and verify if it gets deleted
-func ScaleDown(ctx context.Context, cs kubernetes.Interface, nsPrefix string) error {
+func SelectNamespaces(ctx context.Context, cs kubernetes.Interface, nsPrefix string) ([]string, error) {
 	allNS, err := cs.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var nssToDelete []string
 	for i := range allNS.Items {
@@ -67,8 +66,19 @@ func ScaleDown(ctx context.Context, cs kubernetes.Interface, nsPrefix string) er
 			continue
 		}
 		nssToDelete = append(nssToDelete, toDeleteNs.Name)
-		if err := cs.CoreV1().Namespaces().Delete(ctx, toDeleteNs.Name, metav1.DeleteOptions{}); err != nil {
-			klog.InfoS("Delete namespace", "Name", toDeleteNs.Name)
+	}
+	return nssToDelete, nil
+}
+
+// ScaleDown delete pods/ns and verify if it gets deleted
+func ScaleDown(ctx context.Context, cs kubernetes.Interface, nsPrefix string) error {
+	nssToDelete, err := SelectNamespaces(ctx, cs, nsPrefix)
+	if err != nil {
+		return err
+	}
+	for _, ns := range nssToDelete {
+		if err := cs.CoreV1().Namespaces().Delete(ctx, ns, metav1.DeleteOptions{}); err != nil {
+			klog.ErrorS(err, "Delete Namespace failed", "Name", ns)
 			return err
 		}
 	}

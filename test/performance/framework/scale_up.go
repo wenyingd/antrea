@@ -58,6 +58,8 @@ const (
 	ScaleClientContainerName   = "antrea-scale-test-client"
 	ScaleClientPodTemplateName = "antrea-scale-test-client"
 	ScaleTestClientDaemonSet   = "antrea-scale-test-client-daemonset"
+
+	clientPodsNamepace = "scale-client"
 )
 
 var (
@@ -275,29 +277,33 @@ func ScaleUp(ctx context.Context, kubeConfigPath, scaleConfigPath string) (*Scal
 		td.namespaces = nss
 
 		klog.Infof("Creating the scale test client DaemonSet")
-		if err := createTestPodClients(ctx, kClient, nss[0]); err != nil {
+		if err := createTestPodClients(ctx, kClient, clientPodsNamepace); err != nil {
 			return nil, err
 		}
 
-		klog.Infof("Checking scale test client DaemonSet")
-		expectClientNum := td.nodesNum - td.simulateNodesNum
-		err = wait.PollImmediateUntil(config.WaitInterval, func() (bool, error) {
-			podList, err := kClient.CoreV1().Pods(nss[0]).List(ctx, metav1.ListOptions{LabelSelector: ScaleClientPodTemplateName})
-			if err != nil {
-				return false, fmt.Errorf("error when getting scale test client pods: %w", err)
-			}
-			if len(podList.Items) == expectClientNum {
-				td.clientPods = podList.Items
-				return true, nil
-			}
-			klog.InfoS("Waiting test client DaemonSet Pods ready", "podsNum", len(podList.Items),
-				"expectClientNum", expectClientNum)
-			return false, nil
-		}, ctx.Done())
+	} else {
+		td.namespaces, err = namespace.SelectNamespaces(ctx, kClient, ScaleTestNamespacePrefix)
 		if err != nil {
 			return nil, err
 		}
-
+	}
+	klog.Infof("Checking scale test client DaemonSet")
+	expectClientNum := td.nodesNum - td.simulateNodesNum
+	err = wait.PollImmediateUntil(config.WaitInterval, func() (bool, error) {
+		podList, err := kClient.CoreV1().Pods(clientPodsNamepace).List(ctx, metav1.ListOptions{LabelSelector: ScaleClientPodTemplateName})
+		if err != nil {
+			return false, fmt.Errorf("error when getting scale test client pods: %w", err)
+		}
+		if len(podList.Items) == expectClientNum {
+			td.clientPods = podList.Items
+			return true, nil
+		}
+		klog.InfoS("Waiting test client DaemonSet Pods ready", "podsNum", len(podList.Items),
+			"expectClientNum", expectClientNum)
+		return false, nil
+	}, ctx.Done())
+	if err != nil {
+		return nil, err
 	}
 
 	return &td, nil
