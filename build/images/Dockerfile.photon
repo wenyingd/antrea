@@ -22,4 +22,4 @@ LABEL description="The Docker image to deploy the Antrea CNI."
 USER root
 
 COPY build/images/scripts/* /usr/local/bin/
-COPY bin/antctl bin/antrea-agent bin/antrea-controller bin/antrea-cni bin/antrea-agent-tweaker /usr/local/bin/
+COPY bin/antctl bin/antrea-agent bin/antrea-controller bin/antrea-cni bin/antrea-agent-tweaker bin/antrea-resource-init /usr/local/bin/
