@@ -1,0 +1,12 @@
+# Prerequisite to build this Dockerfile:
+# - Pre-built Antrea binaries in bin/.
+
+FROM registry.access.redhat.com/ubi8
+
+LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
+LABEL description="The docker image for the flow aggregator"
+
+COPY bin/flow-aggregator /
+COPY bin/antctl /usr/local/bin/
+
+ENTRYPOINT ["/flow-aggregator"]
