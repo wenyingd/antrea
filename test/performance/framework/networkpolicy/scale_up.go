@@ -15,6 +15,7 @@
 package networkpolicy
 
 import (
+	klog "antrea/.cache/gopath/pkg/mod/k8s.io/klog/v2@v2.8.0"
 	"context"
 	"fmt"
 	"time"
@@ -184,7 +185,7 @@ func SelectConnectPod(ctx context.Context, cs kubernetes.Interface, ns string, n
 }
 
 func SelectIsoPod(ctx context.Context, cs kubernetes.Interface, ns string, np NetworkPolicyInfo, clientPods []corev1.Pod) (fromPod *corev1.Pod, toPodIP string, err error) {
-	klog.V(2).InfoS("Checking isolation of the NetworkPolicy", "NetworkPolicyName", np.Name)
+	klog.V(2).InfoS("Checking isolation of the NetworkPolicy", "NetworkPolicyName", np.Name, "Namespace", np.Namespace)
 	podList, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: metav1.FormatLabelSelector(&np.Spec.PodSelector)})
 	if err != nil {
 		return nil, "", fmt.Errorf("error when selecting networkpolicy applied to pods: %w", err)
