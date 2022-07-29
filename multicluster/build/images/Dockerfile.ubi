@@ -1,0 +1,8 @@
+FROM registry.access.redhat.com/ubi8
+
+LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
+LABEL description="The Docker image to deploy the Antrea Multicluster controller."
+
+USER root
+
+COPY bin/antrea-mc-controller /

@@ -495,8 +495,32 @@ build-antrea-mc-controller:
 	docker build -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build $(DOCKER_BUILD_ARGS) .
 	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller
 
-.PHONY: build-antrea-mc-controller-coverage
-build-antrea-mc-controller-coverage:
+.PHONY: antrea-mc-controller-debian
+antrea-mc-controller-debian:
+	@echo "===> Building antrea/antrea-mc-controller Debian Docker image <==="
+ifneq ($(NO_PULL),)
+	docker build -t antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller-debian
+	docker tag antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-debian
+	docker tag antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION)
+
+.PHONY: antrea-mc-controller-ubi
+antrea-mc-controller-ubi:
+	@echo "===> Building antrea/antrea-mc-controller UBI Docker image <==="
+ifneq ($(NO_PULL),)
+	docker build -t antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+else
+	docker build --pull -t antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+endif
+	docker tag antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller-ubi
+	docker tag antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-ubi
+	docker tag antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION)
+
+.PHONY: antrea-mc-controller-coverage
+antrea-mc-controller-coverage:
 	@echo "===> Building antrea/antrea-mc-controller-coverage Docker image <==="
 	docker build -t antrea/antrea-mc-controller-coverage:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build.coverage $(DOCKER_BUILD_ARGS) .
 	docker tag antrea/antrea-mc-controller-coverage:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller-coverage
