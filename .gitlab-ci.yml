@@ -5,7 +5,8 @@ stages:
 test-unit:
   stage: test
   script:
-    - cp -r /usr/local/go ~/go
+    - chmod -R a+w ~/go && rm -rf ~/go
+    - version=`cat build/images/deps/go-version` && if [ ! -f ~/go${version}.linux-amd64.tar.gz ]; then wget -4 https://go.dev/dl/go${version}.linux-amd64.tar.gz -O ~/go${version}.linux-amd64.tar.gz; fi && tar zvxf ~/go${version}.linux-amd64.tar.gz -C ~/
     - export GOPATH=~/go && export PATH="~/go/bin:$PATH"
     - make test-unit
 
