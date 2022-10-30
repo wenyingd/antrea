@@ -90,6 +90,9 @@ fi
 pushd "$THIS_DIR/.." > /dev/null
 
 ARGS=""
+# Download OVS source code tarball and CNI binaries from internet.
+OVS_ARGS="--download-ovs"
+BASE_IMAGE_ARGS="--download-cni-binaries"
 PLATFORM_ARG=""
 if $PUSH; then
    ARGS="$ARGS --push"
@@ -111,6 +114,8 @@ if [ "$DISTRO" == "ubi" ]; then
         exit 1
     fi
     ARGS="$ARGS --distro ubi"
+elif [ "$DISTRO" == "ubuntu" ]; then
+    ARGS="$ARGS --ipsec"
 fi
 
 CNI_BINARIES_VERSION=$(head -n 1 build/images/deps/cni-binaries-version)
@@ -140,11 +145,11 @@ if $PULL; then
 fi
 
 cd build/images/ovs
-./build.sh $ARGS
+./build.sh $ARGS $OVS_ARGS
 cd -
 
 cd build/images/base
-./build.sh $ARGS
+./build.sh $ARGS $BASE_IMAGE_ARGS
 cd -
 
 if $NO_CACHE; then

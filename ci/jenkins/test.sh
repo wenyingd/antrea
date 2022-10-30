@@ -567,6 +567,8 @@ function deliver_antrea {
     echo "====== Delivering Antrea to all Nodes ======"
     docker save -o antrea-ubuntu.tar antrea/antrea-agent-ubuntu:latest antrea/antrea-controller-ubuntu:latest
     docker save -o flow-aggregator.tar antrea/flow-aggregator:latest
+    docker pull harbor-repo.vmware.com/dockerhub-proxy-cache/antrea/perftool
+    docker save -o perftool.tar harbor-repo.vmware.com/dockerhub-proxy-cache/antrea/perftool
 
     if [[ $TESTBED_TYPE == "flexible-ipam" ]]; then
         kubectl get nodes -o wide --no-headers=true | awk '{print $6}' | while read IP; do
@@ -973,6 +975,10 @@ fi
 source $WORKSPACE/ci/jenkins/utils.sh
 check_and_upgrade_golang
 clean_tmp
+echo "===== Clean up previous docker images and containers ====="
+docker ps -a | grep Exited | awk '{print $1}' | xargs -r docker rm || true
+docker images | grep antrea | grep -Ev 'antrea/ubuntu|antrea/golang|antrea/sonobuoy' | awk '{print $1":"$2}' | xargs -r docker rmi || true
+docker images | grep none | awk '{print $3}' | xargs -r docker rmi || true
 if [[ ${TESTCASE} == "windows-install-ovs" ]]; then
     run_install_windows_ovs
     if [[ ${TEST_FAILURE} == true ]]; then
