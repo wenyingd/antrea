@@ -3,38 +3,14 @@ ipv6: false
 real_node: true
 repeat_times: 1
 ns_num_per_node: 2
-pods_num_per_ns: 10
+pods_num_per_ns: 100
 svc_num_per_ns: 4
-np_num_per_ns: 5
+np_num_per_ns: 100
 record_prometheus: false
 pre_workload: true
 teardown: false
 check_timeout: 20
 scales:
-  - name: "ScaleRestartAgent"
-    package: "test/performance/framework"
-    repeat_times: 1
-  - name: "ScaleUpWorkloadPods"
-    package: "test/performance/framework"
-    repeat_times: 1
-  - name: "ScaleService"
-    package: "test/performance/framework"
-    repeat_times: 1
-  - name: "ScaleRestartAgent"
-    package: "test/performance/framework"
-    repeat_times: 1
-  - name: "RestartController"
-    package: "test/performance/framework"
-    repeat_times: 1
   - name: "ScaleNetworkPolicy"
     package: "test/performance/framework"
     repeat_times: 1
-  - name: "ScaleRestartAgent"
-    package: "test/performance/framework"
-    repeat_times: 0
-  - name: "RestartController"
-    package: "test/performance/framework"
-    repeat_times: 0
-  - name: "ScaleServiceDemo"
-    package: "test/performance/framework"
-    repeat_times: 0
