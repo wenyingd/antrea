@@ -15,7 +15,6 @@
 package networkpolicy
 
 import (
-	klog "antrea/.cache/gopath/pkg/mod/k8s.io/klog/v2@v2.8.0"
 	"context"
 	"fmt"
 	"time"
@@ -52,6 +51,12 @@ func generateNetpolTemplate(labelNum int, ns string, isIngress bool) *netv1.Netw
 	port := intstr.FromInt(80)
 	policyPorts := []netv1.NetworkPolicyPort{{Protocol: &protocol, Port: &port}}
 	policyPeer := []netv1.NetworkPolicyPeer{{PodSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"namespace": ns}}}}
+	for i := 1; i < 250; i++ {
+		for j := 1; j < 250; j++ {
+			cidr := fmt.Sprintf("192.168.%d.%d/32", i, j)
+			policyPeer = append(policyPeer, netv1.NetworkPolicyPeer{IPBlock: &netv1.IPBlock{CIDR: cidr}})
+		}
+	}
 	netpol := &netv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
