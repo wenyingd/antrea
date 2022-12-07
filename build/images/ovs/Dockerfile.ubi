@@ -67,5 +67,7 @@ RUN --mount=type=bind,from=ovs-rpms,source=/tmp/,target=/tmp/build \
         # The init system is configured to systemd by default. Change it to namespaces
         # to spawn the ipsec process directly.
         sed -i 's/^initsystem=.*$/initsystem="namespaces"/' /usr/libexec/ipsec/setup; \
+        # Disable audit log to avoid coredump on OpenShift clusters.
+        sed -i -e '/^class LibreSwanHelper(object):/{:b;$!N;/config setup$/!bb; a\    audit-log=no' -e '}' /usr/share/openvswitch/scripts/ovs-monitor-ipsec; \
     fi && \
     rm /etc/rhsm/rhsm.conf.bak && yum clean all
