@@ -9,4 +9,6 @@ LABEL description="The docker image for the flow aggregator"
 COPY bin/flow-aggregator /
 COPY bin/antctl /usr/local/bin/
 
+RUN yum install -y ca-certificates && yum clean all -y
+
 ENTRYPOINT ["/flow-aggregator"]
