@@ -102,7 +102,6 @@ make -k check |& tee %{_specdir}/%{name}-check-log || %{nocheck} %{_smp_mflags}
 %systemd_preun %{name}.service
 
 %post
-sed -i 's:\(.*su\).*:\1 openvswitch openvswitch:' %{_sysconfdir}/logrotate.d/openvswitch-switch
 %systemd_post %{name}.service
 
 %postun
