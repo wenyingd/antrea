@@ -1,16 +1,16 @@
 # check if git is available
 ifeq ($(shell which git),)
         $(warning git is not available, binaries will not include git SHA)
-        GIT_SHA :=
-        GIT_TREE_STATE :=
-        GIT_TAG :=
+        GIT_SHA ?=
+        GIT_TREE_STATE ?=
+        GIT_TAG ?=
         VERSION_SUFFIX := unknown
 else
-        GIT_SHA := $(shell git rev-parse --short HEAD)
+        GIT_SHA ?= $(shell git rev-parse --short HEAD)
         # Tree state is "dirty" if there are uncommitted changes, untracked files are ignored
-        GIT_TREE_STATE := $(shell test -n "`git status --porcelain --untracked-files=no`" && echo "dirty" || echo "clean")
+        GIT_TREE_STATE ?= $(shell test -n "`git status --porcelain --untracked-files=no`" && echo "dirty" || echo "clean")
         # Empty string if we are not building a tag
-        GIT_TAG := $(shell git describe --tags --abbrev=0 --exact-match 2>/dev/null)
+        GIT_TAG ?= $(shell git describe --tags --abbrev=0 --exact-match 2>/dev/null)
         ifeq ($(GIT_TREE_STATE),dirty)
                 VERSION_SUFFIX := $(GIT_SHA).dirty
         else

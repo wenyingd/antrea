@@ -6,7 +6,7 @@ GO                 ?= go
 # To build binaries (standalone or embedded inside container images) with debugging information,
 # edit LDFLAGS and GOFLAGS.
 LDFLAGS            := -s -w
-GOFLAGS            := -trimpath
+GOFLAGS            ?= -trimpath
 # By default, disable cgo for all Go binaries.
 # For binaries meant to be published as release assets or copied to a different host, cgo should
 # always be disabled.
@@ -203,6 +203,10 @@ DOCKER_ENV := \
 	@docker run --rm -u $$(id -u):$$(id -g) \
 		-e "GOCACHE=/tmp/gocache" \
 		-e "GOPATH=/tmp/gopath" \
+		-e "GOFLAGS=$(GOFLAGS)" \
+		-e "GIT_SHA=$(GIT_SHA)" \
+		-e "GIT_TAG=$(GIT_TAG)" \
+		-e "GIT_TREE_STATE=$(GIT_TREE_STATE)" \
 		-w /usr/src/antrea.io/antrea \
 		-v $(DOCKER_CACHE)/gopath:/tmp/gopath \
 		-v $(DOCKER_CACHE)/gocache:/tmp/gocache \
