@@ -15,6 +15,7 @@
 package main
 
 import (
+	"antrea.io/antrea/pkg/auth"
 	"context"
 	"fmt"
 	"net"
@@ -486,6 +487,8 @@ func createAPIServerConfig(kubeconfig string,
 	if err := authentication.ApplyTo(&serverConfig.Authentication, serverConfig.SecureServing, nil); err != nil {
 		return nil, err
 	}
+	serverConfig.Authentication.Authenticator = auth.UnionAuthRequest(serverConfig.Authentication.Authenticator)
+
 	if err := authorization.ApplyTo(&serverConfig.Authorization); err != nil {
 		return nil, err
 	}
