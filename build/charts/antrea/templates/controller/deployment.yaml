@@ -140,6 +140,9 @@ spec:
               mountPath: /var/run/antrea/antrea-controller-tls
             - name: host-var-log-antrea
               mountPath: /var/log/antrea
+            - name: k3s-kubeconfig
+              mountPath: /var/run/antrea/k3s.kubeconfig
+              readOnly: true
       volumes:
         - name: antrea-config
           configMap:
@@ -154,3 +157,6 @@ spec:
           hostPath:
             path: /var/log/antrea
             type: DirectoryOrCreate
+        - name: k3s-kubeconfig
+          hostPath:
+            path: /var/run/antrea/k3s.kubeconfig
