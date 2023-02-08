@@ -3,6 +3,8 @@ package csp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"k8s.io/apiserver/pkg/authentication/user"
 	"net/http"
 	"strings"
 
@@ -15,6 +17,10 @@ import (
 const (
 	CSPTokenPermKey    = "CSP-Permissions"
 	authenticatedGroup = "system:authenticated"
+	scopePermKey       = "scope"
+	namespaceKey       = "ns"
+	clusterScope       = "cluster"
+	userNamePrefix     = "userName"
 )
 
 type clientClaim struct {
@@ -26,43 +32,44 @@ type clientClaim struct {
 	IssuedAt    *jwt.NumericDate `json:"iat,omitempty"`
 }
 
-func (c *clientClaim) GetName() string {
-	return c.ClientID
-}
-
-func (c *clientClaim) GetUID() string {
-	return c.ClientID
-}
-
-func (c *clientClaim) GetGroups() []string {
-	return []string{
-		authenticatedGroup,
-		c.OrgID,
+func (c *clientClaim) getScope() string {
+	scope := c.getPermWithPrefix(scopePermKey, clusterScope)
+	if scope == clusterScope {
+		return scope
 	}
+	return strings.Trim(scope, fmt.Sprintf("%s_", namespaceKey))
 }
 
-func (c *clientClaim) GetExtra() map[string][]string {
-	return map[string][]string{
-		CSPTokenPermKey: c.Permissions,
+func (c *clientClaim) getPermWithPrefix(prefix, defaultValue string) string {
+	value := defaultValue
+	for _, permStr := range c.Permissions {
+		if strings.HasPrefix(permStr, prefix) {
+			perm := strings.Split(permStr, ":")
+			if len(perm) > 1 {
+				value = perm[1]
+				break
+			}
+		}
 	}
+	return value
 }
 
-type authHandler struct {
+type authenticationHandler struct {
 	organizations sets.String
 	clients       map[string]string
 	audiences     authenticator.Audiences
 	tm            cspauth.TokenManager
 }
 
-func (a *authHandler) AuthenticateRequest(req *http.Request) (*authenticator.Response, bool, error) {
-	token := a.parseToken(req)
+func (h *authenticationHandler) AuthenticateRequest(req *http.Request) (*authenticator.Response, bool, error) {
+	token := h.parseToken(req)
 	if token == "" {
 		return nil, false, errors.New("no token is found in the HTTP request header")
 	}
-	return a.validate(token)
+	return h.validate(token)
 }
 
-func (a *authHandler) parseToken(req *http.Request) string {
+func (h *authenticationHandler) parseToken(req *http.Request) string {
 	auth := strings.TrimSpace(req.Header.Get("Authorization"))
 	if auth == "" {
 		return ""
@@ -74,8 +81,8 @@ func (a *authHandler) parseToken(req *http.Request) string {
 	return parts[1]
 }
 
-func (a *authHandler) validate(tokenData string) (*authenticator.Response, bool, error) {
-	valid, err := a.tm.Validate(context.Background(), tokenData)
+func (h *authenticationHandler) validate(tokenData string) (*authenticator.Response, bool, error) {
+	valid, err := h.tm.Validate(context.Background(), tokenData)
 	if err != nil {
 		return nil, false, err
 	}
@@ -91,7 +98,33 @@ func (a *authHandler) validate(tokenData string) (*authenticator.Response, bool,
 		return nil, false, err
 	}
 	return &authenticator.Response{
-		User:      claim,
-		Audiences: a.audiences,
+		User:      h.parseUserInfoFromClaim(claim),
+		Audiences: h.audiences,
 	}, true, nil
+}
+
+func (h *authenticationHandler) parseUserInfoFromClaim(claim *clientClaim) user.Info {
+	namespace := claim.getScope()
+	groups := []string{
+		authenticatedGroup,
+		claim.OrgID,
+		fmt.Sprintf("%s:%s", scopePermKey, namespace),
+	}
+	userName := h.getUserName(claim, namespace)
+	return &user.DefaultInfo{
+		Name:   userName,
+		UID:    claim.ClientID,
+		Groups: groups,
+		Extra: map[string][]string{
+			CSPTokenPermKey: claim.Permissions,
+		},
+	}
+}
+
+func (h *authenticationHandler) getUserName(claim *clientClaim, namespace string) string {
+	userName := claim.getPermWithPrefix(userNamePrefix, "")
+	if userName != "" {
+		return userName
+	}
+	return h.getExternalNodeName(claim.ClientID)
 }

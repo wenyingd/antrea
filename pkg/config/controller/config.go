@@ -38,12 +38,18 @@ type NodeIPAMConfig struct {
 	NodeCIDRMaskSizeIPv6 int `yaml:"nodeCIDRMaskSizeIPv6,omitempty"`
 }
 
+type AuthenticationConfig struct {
+	LocalAuthenticate   bool                                              `yaml:"localAuthenticate,omitempty"`
+	RemoteAuthenticator componentbaseconfig.ClientConnectionConfiguration `yaml:"remoteAuthenticator"`
+}
+
 type ControllerConfig struct {
 	// FeatureGates is a map of feature names to bools that enable or disable experimental features.
 	FeatureGates map[string]bool `yaml:"featureGates,omitempty"`
 	// clientConnection specifies the kubeconfig file and client connection settings for the
 	// antrea-controller to communicate with the Kubernetes apiserver.
 	ClientConnection componentbaseconfig.ClientConnectionConfiguration `yaml:"clientConnection"`
+	Authentication   AuthenticationConfig                              `yaml:"authentication"`
 	// APIPort is the port for the antrea-controller APIServer to serve on.
 	// Defaults to 10349.
 	APIPort int `yaml:"apiPort,omitempty"`

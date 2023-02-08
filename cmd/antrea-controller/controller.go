@@ -16,6 +16,7 @@ package main
 
 import (
 	"antrea.io/antrea/pkg/auth"
+	"antrea.io/antrea/pkg/config/controller"
 	"context"
 	"fmt"
 	"net"
@@ -258,7 +259,10 @@ func run(o *Options) error {
 			crdInformerFactory)
 	}
 
-	apiServerConfig, err := createAPIServerConfig(o.config.ClientConnection.Kubeconfig,
+	if !o.config.Authentication.LocalAuthenticate {
+		o.config.Authentication.RemoteAuthenticator = o.config.ClientConnection
+	}
+	apiServerConfig, err := createAPIServerConfig(o.config.Authentication,
 		client,
 		aggregatorClient,
 		apiExtensionClient,
@@ -441,7 +445,7 @@ func startNodeIPAM(client clientset.Interface,
 	return nil
 }
 
-func createAPIServerConfig(kubeconfig string,
+func createAPIServerConfig(authenticationConfig controller.AuthenticationConfig,
 	client clientset.Interface,
 	aggregatorClient aggregatorclientset.Interface,
 	apiExtensionClient apiextensionclientset.Interface,
@@ -475,9 +479,9 @@ func createAPIServerConfig(kubeconfig string,
 	secureServing.BindPort = bindPort
 	secureServing.BindAddress = net.IPv4zero
 	// kubeconfig file is useful when antrea-controller is not running as a pod, like during development.
-	if len(kubeconfig) > 0 {
-		authentication.RemoteKubeConfigFile = kubeconfig
-		authorization.RemoteKubeConfigFile = kubeconfig
+	if !authenticationConfig.LocalAuthenticate && len(authenticationConfig.RemoteAuthenticator.Kubeconfig) > 0 {
+		authentication.RemoteKubeConfigFile = authenticationConfig.RemoteAuthenticator.Kubeconfig
+		authorization.RemoteKubeConfigFile = authenticationConfig.RemoteAuthenticator.Kubeconfig
 	}
 
 	serverConfig := genericapiserver.NewConfig(apiserver.Codecs)
