@@ -26,6 +26,7 @@ import (
 	apiextensionclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apiserver/pkg/server/dynamiccertificates"
 	"k8s.io/client-go/kubernetes"
@@ -38,6 +39,12 @@ import (
 
 const (
 	CAConfigMapKey = "ca.crt"
+)
+
+var (
+	antreaListOption = metav1.ListOptions{
+		LabelSelector: "app=antrea",
+	}
 )
 
 // CACertController is responsible for taking the CA certificate from the
@@ -130,28 +137,26 @@ func (c *CACertController) syncCACert() error {
 // syncMutatingWebhooks updates the CABundle of the MutatingWebhookConfiguration backed by antrea-controller.
 func (c *CACertController) syncMutatingWebhooks(caCert []byte) error {
 	klog.Info("Syncing CA certificate with MutatingWebhookConfigurations")
-	for _, name := range c.caConfig.MutationWebhooks {
-		mWebhook, err := c.client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("error getting MutatingWebhookConfiguration %s: %v", name, err)
-		}
-		err = c.patchWebhookWithCACert(mWebhook, caCert)
-		if err != nil {
-			return fmt.Errorf("error updating antrea CA cert of MutatingWebhookConfiguration %s: %v", name, err)
-		}
+	mWebhooks, err := c.client.AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.TODO(), antreaListOption)
+	if err != nil {
+		return fmt.Errorf("error listing antrea MutatingWebhookConfiguration: %v", err)
 	}
-	for _, name := range c.caConfig.OptionalMutationWebhooks {
-		mWebhook, err := c.client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), name, metav1.GetOptions{})
-		if err != nil {
-			if errors.IsNotFound(err) {
-				klog.V(2).Infof("Optional mutation webhook %s not found, skipping its update", name)
-				continue
+	candidateResources := sets.NewString(c.caConfig.MutationWebhooks...)
+	optionalResources := sets.NewString(c.caConfig.OptionalMutationWebhooks...)
+	for _, mWebhook := range mWebhooks.Items {
+		name := mWebhook.Name
+		if candidateResources.Has(name) {
+			err = c.patchWebhookWithCACert(&mWebhook, caCert)
+			if err != nil {
+				return fmt.Errorf("error updating antrea CA cert of MutatingWebhookConfiguration %s: %v", name, err)
 			}
-			return fmt.Errorf("error getting MutatingWebhookConfiguration %s: %v", name, err)
 		}
-		err = c.patchWebhookWithCACert(mWebhook, caCert)
-		if err != nil {
-			return fmt.Errorf("error updating antrea CA cert of MutatingWebhookConfiguration %s: %v", name, err)
+
+		if optionalResources.Has(name) {
+			err = c.patchWebhookWithCACert(&mWebhook, caCert)
+			if err != nil {
+				return fmt.Errorf("error updating antrea CA cert of MutatingWebhookConfiguration %s: %v", name, err)
+			}
 		}
 	}
 	return nil
@@ -159,10 +164,15 @@ func (c *CACertController) syncMutatingWebhooks(caCert []byte) error {
 
 func (c *CACertController) syncConversionWebhooks(caCert []byte) error {
 	klog.Info("Syncing CA certificate with CRDs that have conversion webhooks")
-	for _, name := range c.caConfig.CRDsWithConversionWebhooks {
-		crdDef, err := c.apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("error getting CRD definition for %s: %v", name, err)
+	cWebhooks, err := c.apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().List(context.TODO(), antreaListOption)
+	if err != nil {
+		return fmt.Errorf("error listing antrea CRD definition: %v", err)
+	}
+	candidateResources := sets.NewString(c.caConfig.CRDsWithConversionWebhooks...)
+	for _, crdDef := range cWebhooks.Items {
+		name := crdDef.Name
+		if !candidateResources.Has(name) {
+			continue
 		}
 		if crdDef.Spec.Conversion == nil || crdDef.Spec.Conversion.Strategy != apiextensionv1.WebhookConverter {
 			return fmt.Errorf("CRD %s does not have webhook conversion registered", name)
@@ -173,7 +183,7 @@ func (c *CACertController) syncConversionWebhooks(caCert []byte) error {
 			crdDef.Spec.Conversion.Webhook.ClientConfig.CABundle = caCert
 		}
 		if updated {
-			if _, err := c.apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Update(context.TODO(), crdDef, metav1.UpdateOptions{}); err != nil {
+			if _, err := c.apiExtensionClient.ApiextensionsV1().CustomResourceDefinitions().Update(context.TODO(), &crdDef, metav1.UpdateOptions{}); err != nil {
 				return fmt.Errorf("error updating antrea CA cert of CustomResourceDefinition %s: %v", name, err)
 			}
 		}
@@ -202,12 +212,17 @@ func (c *CACertController) patchWebhookWithCACert(webhookCfg *v1.MutatingWebhook
 // syncValidatingWebhooks updates the CABundle of the ValidatingWebhookConfiguration backed by antrea-controller.
 func (c *CACertController) syncValidatingWebhooks(caCert []byte) error {
 	klog.Info("Syncing CA certificate with ValidatingWebhookConfigurations")
-	for _, name := range c.caConfig.ValidatingWebhooks {
-		updated := false
-		vWebhook, err := c.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(), name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("error getting ValidatingWebhookConfiguration %s: %v", name, err)
+	vWebhooks, err := c.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().List(context.TODO(), antreaListOption)
+	if err != nil {
+		return fmt.Errorf("error listing antrea ValidatingWebhookConfiguration: %v", err)
+	}
+	candidateResources := sets.NewString(c.caConfig.ValidatingWebhooks...)
+	for _, vWebhook := range vWebhooks.Items {
+		name := vWebhook.Name
+		if !candidateResources.Has(name) {
+			continue
 		}
+		updated := false
 		for idx, webhook := range vWebhook.Webhooks {
 			if bytes.Equal(webhook.ClientConfig.CABundle, caCert) {
 				continue
@@ -217,7 +232,7 @@ func (c *CACertController) syncValidatingWebhooks(caCert []byte) error {
 			vWebhook.Webhooks[idx] = webhook
 		}
 		if updated {
-			if _, err := c.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(), vWebhook, metav1.UpdateOptions{}); err != nil {
+			if _, err := c.client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(), &vWebhook, metav1.UpdateOptions{}); err != nil {
 				return fmt.Errorf("error updating antrea CA cert of ValidatingWebhookConfiguration %s: %v", name, err)
 			}
 		}
@@ -228,16 +243,21 @@ func (c *CACertController) syncValidatingWebhooks(caCert []byte) error {
 // syncAPIServices updates the CABundle of the APIServices backed by antrea-controller.
 func (c *CACertController) syncAPIServices(caCert []byte) error {
 	klog.Info("Syncing CA certificate with APIServices")
-	for _, name := range c.caConfig.APIServiceNames {
-		apiService, err := c.aggregatorClient.ApiregistrationV1().APIServices().Get(context.TODO(), name, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("error getting APIService %s: %v", name, err)
+	antreaAPIServices, err := c.aggregatorClient.ApiregistrationV1().APIServices().List(context.TODO(), antreaListOption)
+	if err != nil {
+		return fmt.Errorf("error listing antrea APIService: %v", err)
+	}
+	candidateResources := sets.NewString(c.caConfig.APIServiceNames...)
+	for _, apiService := range antreaAPIServices.Items {
+		name := apiService.Name
+		if !candidateResources.Has(name) {
+			continue
 		}
 		if bytes.Equal(apiService.Spec.CABundle, caCert) {
 			continue
 		}
 		apiService.Spec.CABundle = caCert
-		if _, err := c.aggregatorClient.ApiregistrationV1().APIServices().Update(context.TODO(), apiService, metav1.UpdateOptions{}); err != nil {
+		if _, err := c.aggregatorClient.ApiregistrationV1().APIServices().Update(context.TODO(), &apiService, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("error updating antrea CA cert of APIService %s: %v", name, err)
 		}
 	}
