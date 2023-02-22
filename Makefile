@@ -1,4 +1,6 @@
 SHELL              := /bin/bash
+# The value is just a placeholder, it will be replaced by the real value in cayman_antrea to reflect the build number.
+BUILD_INFO         ?= dev-$(shell git log --pretty=format:'%h' -n 1 2>/dev/null)
 # go options
 GO                 ?= go
 # By default, disable debugging information (see https://pkg.go.dev/cmd/link) and trim embedded
@@ -47,6 +49,8 @@ DOCKER_BUILD_ARGS += --build-arg GO_VERSION=$(GO_VERSION)
 DOCKER_BUILD_ARGS += --build-arg BUILD_TAG=$(BUILD_TAG)
 
 export CGO_ENABLED
+
+CAYMAN_DOCKER_BUILD_ARGS := --build-arg BUILD_INFO=$(BUILD_INFO)
 
 .PHONY: all
 all: build
@@ -362,9 +366,9 @@ mockgen:
 debian:
 	@echo "===> Building antrea/antrea-debian Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-debian:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/antrea-debian:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/antrea-debian:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/antrea-debian:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/antrea-debian:$(DOCKER_IMG_VERSION) antrea/antrea-debian
 
@@ -372,9 +376,9 @@ endif
 ubi:
 	@echo "===> Building antrea/antrea-ubi Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-ubi
 
@@ -382,9 +386,9 @@ endif
 photon:
 	@echo "===> Building antrea/antrea-photon Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-photon:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.photon --build-arg RPM_REPO_URL=${RPM_REPO_URL} $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/antrea-photon:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.photon --build-arg RPM_REPO_URL=${RPM_REPO_URL} $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/antrea-photon:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.photon --build-arg RPM_REPO_URL=${RPM_REPO_URL} $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/antrea-photon:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.photon --build-arg RPM_REPO_URL=${RPM_REPO_URL} $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/antrea-photon:$(DOCKER_IMG_VERSION) antrea/antrea-photon
 
@@ -503,9 +507,9 @@ build-antrea-mc-controller:
 antrea-mc-controller-debian:
 	@echo "===> Building antrea/antrea-mc-controller Debian Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.debian $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller-debian
 	docker tag antrea/antrea-mc-controller-debian:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-debian
@@ -515,9 +519,9 @@ endif
 antrea-mc-controller-ubi:
 	@echo "===> Building antrea/antrea-mc-controller UBI Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.ubi $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller-ubi
 	docker tag antrea/antrea-mc-controller-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-ubi
@@ -539,9 +543,9 @@ flow-aggregator-image:
 flow-aggregator-image-debian:
 	@echo "===> Building antrea/flow-aggregator Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.debian $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.debian $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.debian $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) antrea/flow-aggregator-debian
 	docker tag antrea/flow-aggregator-debian:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-aggregator-debian
@@ -551,9 +555,9 @@ endif
 flow-aggregator-image-ubi:
 	@echo "===> Building antrea/flow-aggregator Docker image <==="
 ifneq ($(NO_PULL),)
-	docker build -t antrea/flow-aggregator-ubi:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+	docker build -t antrea/flow-aggregator-ubi:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.ubi $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 else
-	docker build --pull -t antrea/flow-aggregator-ubi:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.ubi $(DOCKER_BUILD_ARGS) .
+	docker build --pull -t antrea/flow-aggregator-ubi:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.ubi $(DOCKER_BUILD_ARGS) $(CAYMAN_DOCKER_BUILD_ARGS) .
 endif
 	docker tag antrea/flow-aggregator-ubi:$(DOCKER_IMG_VERSION) antrea/flow-aggregator-ubi
 	docker tag antrea/flow-aggregator-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-aggregator-ubi

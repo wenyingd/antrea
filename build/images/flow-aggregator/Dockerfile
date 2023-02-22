@@ -13,6 +13,7 @@
 # limitations under the License.
 
 ARG GO_VERSION
+ARG BUILD_INFO
 FROM golang:${GO_VERSION} as flow-aggregator-build
 
 WORKDIR /antrea
@@ -27,6 +28,7 @@ FROM ubuntu:22.04
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="The docker image for the flow aggregator"
+LABEL build-info="${BUILD_INFO}"
 
 COPY --from=flow-aggregator-build /antrea/bin/flow-aggregator /
 COPY --from=flow-aggregator-build /antrea/bin/antctl /usr/local/bin/
@@ -36,4 +38,5 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+RUN echo "${BUILD_INFO}" > /build-info
 ENTRYPOINT ["/flow-aggregator"]

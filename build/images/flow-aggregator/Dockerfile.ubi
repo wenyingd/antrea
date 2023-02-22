@@ -1,10 +1,12 @@
 # Prerequisite to build this Dockerfile:
 # - Pre-built Antrea binaries in bin/.
 
+ARG BUILD_INFO
 FROM registry.access.redhat.com/ubi8
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="The docker image for the flow aggregator"
+LABEL build-info="${BUILD_INFO}"
 
 COPY bin/flow-aggregator /
 COPY bin/antctl /usr/local/bin/
@@ -12,3 +14,4 @@ COPY bin/antctl /usr/local/bin/
 RUN yum install -y ca-certificates && yum clean all -y
 
 ENTRYPOINT ["/flow-aggregator"]
+RUN echo "${BUILD_INFO}" > /build-info

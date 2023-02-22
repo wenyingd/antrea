@@ -15,11 +15,14 @@
 ARG BUILD_TAG
 
 FROM antrea/base-photon:${BUILD_TAG}
+ARG BUILD_INFO
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="The Docker image to deploy the Antrea CNI."
+LABEL build-info="${BUILD_INFO}"
 
 USER root
 
 COPY build/images/scripts/* /usr/local/bin/
 COPY bin/antctl bin/antrea-agent bin/antrea-controller bin/antrea-cni bin/antrea-agent-tweaker bin/antrea-resource-init /usr/local/bin/
+RUN echo "${BUILD_INFO}" > /build-info

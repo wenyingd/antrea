@@ -3,9 +3,11 @@
 
 # Chose this base image so that a shell is available for users to exec into the container, run antctl and run tools like pprof easily
 FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/debian:stable-slim
+ARG BUILD_INFO
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="The docker image for the flow aggregator"
+LABEL build-info="${BUILD_INFO}"
 
 COPY bin/flow-aggregator /
 COPY bin/antctl /usr/local/bin/
@@ -16,3 +18,4 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["/flow-aggregator"]
+RUN echo "${BUILD_INFO}" > /build-info
