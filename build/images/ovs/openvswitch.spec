@@ -1,7 +1,7 @@
 %{!?python3_sitelib: %global python3_sitelib %(python3 -c "from distutils.sysconfig import get_python_lib;print(get_python_lib())")}
 Summary:        Open vSwitch daemon/database/utilities
 Name:           openvswitch
-Version:        2.17.0
+Version:        2.17.5
 Release:        1%{?dist}
 License:        ASL 2.0 and LGPLv2+
 URL:            http://www.openvswitch.org/
@@ -147,8 +147,11 @@ make -k check |& tee %{_specdir}/%{name}-check-log || %{nocheck} %{_smp_mflags}
 %{_mandir}/man8/ovs-*.8.gz
 %{_mandir}/man8/vtep-ctl.8.gz
 %{_mandir}/man5/ovsdb-server.5.gz
+%{_mandir}/man5/ovsdb.local-config.5*
 
 %changelog
+*   Fri Mar 24 2023 Xu Liu <xliu2@vmware.com> 2.17.5-1
+-   Bump up to support OVS 2.17.5
 *   Mon Apr 18 2022 Gerrit Photon <photon-checkins@vmware.com> 2.17.1-1
 -   Automatic Version Bump
 *   Thu Sep 02 2021 Satya Naga Vasamsetty <svasamsetty@vmware.com> 2.15.0-2
