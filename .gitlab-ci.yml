@@ -1,19 +1,97 @@
 ---
+variables:
+  GIT_CLEAN_FLAGS: -ffdx -e .cache
+  DOCKER_BUILDKIT: 1
+  NO_PULL: 1
+
+default:
+  before_script:
+    - |
+      echo "Pulling golang image"
+      export GO_VERSION=$(cat build/images/deps/go-version)
+      docker pull harbor-repo.vmware.com/dockerhub-proxy-cache/library/golang:${GO_VERSION}
+      docker tag harbor-repo.vmware.com/dockerhub-proxy-cache/library/golang:${GO_VERSION} golang:${GO_VERSION}
+      echo "Ensuring go version"
+      mkdir -p ~/.local/go/
+      export GOPATH=~/.local/go/
+      go install golang.org/dl/go${GO_VERSION}@latest
+      ${GOPATH}/bin/go${GO_VERSION} download
+      ln -sf ${GOPATH}/bin/go${GO_VERSION} ${GOPATH}/bin/go
+      export PATH=${GOPATH}/bin:$PATH
+      echo "Using $(go version)"
+    - |
+      echo "Cleaning up stale images"
+      docker images --format json | jq -r 'select( .Repository | startswith("antrea/antrea",
+                                                                            "antrea/openvswitch",
+                                                                            "antrea/base",
+                                                                            "antrea/cni"))
+                                          |select((now - (.CreatedAt | (strptime("%Y-%m-%d %H:%M:%S %z") | mktime))) > 86400)|.ID' \
+                                          |xargs -r docker rmi -f
+      docker system prune -f
 stages:
   - test
+  - build
+
+sanity-check:
+  stage: test
+  script:
+    - echo "Check if we can build e2e tests"
+    - go test -c  -o /dev/null antrea.io/antrea/test/e2e
 
 test-unit:
   stage: test
   script:
-    - chmod -R a+w ~/go && rm -rf ~/go
-    - version=`cat build/images/deps/go-version` && if [ ! -f ~/go${version}.linux-amd64.tar.gz ]; then wget -4 https://go.dev/dl/go${version}.linux-amd64.tar.gz -O ~/go${version}.linux-amd64.tar.gz; fi && tar zvxf ~/go${version}.linux-amd64.tar.gz -C ~/
-    - export GOPATH=~/go && export PATH="~/go/bin:$PATH"
-    - make test-unit
+    - make docker-test-unit
 
-# to do
-# go.yml: golangci-lint, golangci-lint-netpol-tmp, bin, windows-bin, antctl, codegen, manifest, tidy, verify
-# build.yml: maybe no need to do because rely on doker and the user of it
-# build_tag.yml: same with above
-# golicense.yml: maybe no need to do becasue rely on other actions
-# kind.yml: build-antrea-coverage-image, build-flow-aggregator-image, test-e2e-encap, test-e2e-encap-no-proxy, test-e2e-noencap, test-e2e-hybrid, test-e2e-encap-np, build-antrea-image, test-netpol-tmp, validate-prometheus-metrics-doc, artifact-cleanup
-# kind_update.yml: build-antrea-image, from-N-1, from-N-2, compatible-N-1, compatible-N-2, artifact-cleanup
+check-codegen:
+  stage: test
+  script:
+    - ./ci/check-codegen.sh
+
+check-manifest:
+  stage: test
+  script:
+    - ./ci/check-manifest.sh
+
+.build-script-common: &build-script-common
+  - |
+    pushd build/images/ovs
+    ./build.sh --distro ${DISTRO} --download-ovs ${EXTRA_BUILD_ARGS}
+    ./build.sh --distro ${DISTRO} --download-ovs --ipsec ${EXTRA_BUILD_ARGS}
+    popd
+    pushd build/images/base
+    ./build.sh --distro ${DISTRO} --download-cni-binaries ${EXTRA_BUILD_ARGS}
+    ./build.sh --distro ${DISTRO} --download-cni-binaries --ipsec ${EXTRA_BUILD_ARGS}
+    popd
+    make docker-bin
+    make ${DISTRO}
+    IPSEC=true make ${DISTRO}
+
+build-image-debian:
+  stage: build
+  variables:
+    DISTRO: debian
+  script:
+    - *build-script-common
+
+build-image-ubi:
+  stage: build
+  variables:
+    DISTRO: ubi
+  script:
+    - *build-script-common
+
+build-image-ubuntu:
+  stage: build
+  variables:
+    DISTRO: ubuntu
+  script:
+    - *build-script-common
+
+build-image-photon:
+  stage: build
+  variables:
+    DISTRO: photon
+    EXTRA_BUILD_ARGS: --use-public-photon
+  script:
+    - *build-script-common
