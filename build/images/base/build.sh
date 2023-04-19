@@ -34,6 +34,8 @@ Build the antrea base image.
                                 binaries manually and put them in the current directory.
                                 Currently cni-plugins-*.tgz is required.
         --ipsec                 Build with IPsec support Default is false.
+        --distro <distro>       Target Linux distribution.
+        --use-public-photon     Use public Photon repository. Should only be used in CI and for local testing.
         --rpm-repo-url <url>    URL of the RPM repository to use for Photon builds."
 
 function print_usage {
@@ -48,6 +50,7 @@ DISTRO="ubuntu"
 DOWNLOAD_CNI_BINARIES=false
 IPSEC=false
 RPM_REPO_URL=""
+USE_PUBLIC_PHOTON=false
 SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "photon")
 
 while [[ $# -gt 0 ]]
@@ -86,6 +89,10 @@ case $key in
     --rpm-repo-url)
     RPM_REPO_URL="$2"
     shift 2
+    ;;
+    --use-public-photon)
+    USE_PUBLIC_PHOTON=true
+    shift
     ;;
     -h|--help)
     print_usage
@@ -206,7 +213,20 @@ elif [ "$DISTRO" == "ubi" ]; then
 elif [ "$DISTRO" == "debian" ]; then
     docker_build_and_push "antrea/base-debian" Dockerfile.debian
 elif [ "$DISTRO" == "photon" ]; then
-    docker_build_and_push "antrea/base-debian" Dockerfile.photon
+    if [ "$RPM_REPO_URL" == "" ] && ! ${USE_PUBLIC_PHOTON} ; then
+        echoerr "Must specify --rpm-repo-url or --use-public-photon"
+        exit 1
+    fi
+    if [ "$RPM_REPO_URL" != "" ] && ${USE_PUBLIC_PHOTON} ; then
+        echoerr "Cannot specify both --rpm-repo-url and --use-public-photon"
+        exit 1
+    fi
+    docker_build_and_push "antrea/base-debian" Dockerfile.photon    
+fi
+
+if $PUSH; then
+    docker push antrea/cni-binaries:$CNI_BINARIES_VERSION
+    docker push antrea/base-$DISTRO:$BUILD_TAG
 fi
 
 popd > /dev/null

@@ -24,9 +24,13 @@ ARG RPM_REPO_URL
 ARG OVS_VERSION
 
 ADD photon-rootfs.tar.gz /
-RUN /usr/bin/sed -i -e 's/^enabled=.*/enabled=0/g' /etc/yum.repos.d/*.repo
+RUN if [ -n "${RPM_REPO_URL}" ]; then /usr/bin/sed -i -e 's/^enabled=.*/enabled=0/g' /etc/yum.repos.d/*.repo; fi
 COPY photon-iso.repo /etc/yum.repos.d/
-RUN /usr/bin/sed -i -e "s|^baseurl=.*\$|baseurl=${RPM_REPO_URL}|g" /etc/yum.repos.d/photon-iso.repo
+RUN if [ -n "${RPM_REPO_URL}" ]; then \
+        /usr/bin/sed -i -e "s|^baseurl=.*\$|baseurl=${RPM_REPO_URL}|g" /etc/yum.repos.d/photon-iso.repo; \
+    else \
+        /usr/bin/sed -i -e "s/^enabled=.*/enabled=0/g" /etc/yum.repos.d/photon-iso.repo; \
+    fi
 
 COPY openvswitch.spec /tmp/
 COPY openvswitch-$OVS_VERSION.tar.gz /tmp/
