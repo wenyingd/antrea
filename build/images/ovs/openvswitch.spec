@@ -58,6 +58,14 @@ Requires:       %{name} = %{version}
 %description    devel-static
 openvswitch-devel-static package contains static libs.
 
+%package ipsec
+Summary: Open vSwitch IPsec tunneling support
+License: ASL 2.0
+Requires: openvswitch python3-openvswitch strongswan iana-etc
+
+%description ipsec
+This package provides IPsec tunneling support for OVS tunnels.
+
 %package        doc
 Summary:        Documentation for openvswitch
 Requires:       %{name} = %{version}-%{release}
@@ -85,7 +93,7 @@ mkdir -p %{buildroot}/%{_libdir}/systemd/system
 install -p -D -m 0644 rhel/usr_share_openvswitch_scripts_systemd_sysconfig.template %{buildroot}/%{_sysconfdir}/sysconfig/openvswitch
 
 /usr/bin/python3 build-aux/dpdkstrip.py --nodpdk < rhel/usr_lib_systemd_system_ovs-vswitchd.service.in > rhel/usr_lib_systemd_system_ovs-vswitchd.service
-for service in openvswitch ovsdb-server ovs-vswitchd; do
+for service in openvswitch ovsdb-server ovs-vswitchd openvswitch-ipsec; do
 	install -p -D -m 0644 rhel/usr_lib_systemd_system_${service}.service %{buildroot}/%{_unitdir}/${service}.service
 done
 
@@ -137,6 +145,10 @@ make -k check |& tee %{_specdir}/%{name}-check-log || %{nocheck} %{_smp_mflags}
 
 %files devel-static
 %{_libdir}/*.a
+
+%files ipsec
+%{_datadir}/openvswitch/scripts/ovs-monitor-ipsec
+%{_unitdir}/openvswitch-ipsec.service
 
 %files doc
 %{_mandir}/man1/ovs-*.1.gz

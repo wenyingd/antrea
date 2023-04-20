@@ -191,7 +191,7 @@ fi
 function docker_build_and_push() {
     local image="$1"
     local dockerfile="$2"
-    local build_args="--build-arg OVS_VERSION=$OVS_VERSION"
+    local build_args="--build-arg OVS_VERSION=$OVS_VERSION --build-arg IPSEC=$IPSEC"
     local cache_args=""
     if $PUSH; then
         cache_args="$cache_args --cache-to type=registry,ref=$image-cache:$BUILD_TAG,mode=max"
@@ -221,10 +221,6 @@ elif [ "$DISTRO" == "windows" ]; then
 elif [ "$DISTRO" == "photon" ]; then
     if [ "$RPM_REPO_URL" == "" ] && ! ${USE_PUBLIC_PHOTON} ; then
         echoerr "Must specify --rpm-repo-url or --use-public-photon"
-        exit 1
-    fi
-    if [ "$IPSEC" == "true" ]; then
-        echoerr "IPsec is not supported for Photon"
         exit 1
     fi
     if ! [ -f "photon-rootfs.tar.gz" ]; then

@@ -22,6 +22,7 @@ FROM scratch as ovs-photon-rpms
 # image is actually built there.
 ARG RPM_REPO_URL
 ARG OVS_VERSION
+ARG IPSEC
 
 ADD photon-rootfs.tar.gz /
 RUN if [ -n "${RPM_REPO_URL}" ]; then /usr/bin/sed -i -e 's/^enabled=.*/enabled=0/g' /etc/yum.repos.d/*.repo; fi
@@ -92,9 +93,13 @@ RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") 
     mkdir -p "${SOURCE_DIR}" && \
     mv /tmp/openvswitch-*.tar.gz "${SOURCE_DIR}" && \
     rpmbuild -bb --nocheck /tmp/openvswitch.spec && \
-    mkdir -p /tmp/ovs-rpms && mv ${RPM_DIR}/*/openvswitch-${OVS_VERSION}*.rpm ${RPM_DIR}/*/python*-openvswitch-${OVS_VERSION}*.rpm /tmp/ovs-rpms
+    mkdir -p /tmp/ovs-rpms && mv ${RPM_DIR}/*/openvswitch-${OVS_VERSION}*.rpm ${RPM_DIR}/*/python*-openvswitch-${OVS_VERSION}*.rpm /tmp/ovs-rpms && \
+    if ${IPSEC}; then \
+        mv ${RPM_DIR}/*/openvswitch-ipsec-${OVS_VERSION}*.rpm /tmp/ovs-rpms; \
+    fi
 
 FROM scratch
+ARG IPSEC
 
 LABEL maintainer="wcp-dev@vmware.com"
 LABEL vendor="VMware, Inc."
@@ -103,6 +108,7 @@ LABEL name="VMware Stateless Photon OS 3.0 Base Image"
 ADD photon-rootfs.tar.gz /
 COPY --from=ovs-photon-rpms /etc/yum.repos.d/* /etc/yum.repos.d/
 COPY --from=ovs-photon-rpms /tmp/ovs-rpms/* /tmp/ovs-rpms/
+COPY charon-logging.conf /tmp
 
 RUN tdnf install -y iptables rpm && \
     tdnf install -y \
@@ -118,6 +124,10 @@ RUN tdnf install -y iptables rpm && \
       python3-libs \
       python3-six \
       python3-xml && \
+    if ${IPSEC}; then \
+        tdnf install -y strongswan iana-etc && \
+        sed -i "/^.*filelog.*{/r /tmp/charon-logging.conf" /etc/strongswan.d/charon-logging.conf; \
+    fi && \
     rpm -ivh /tmp/ovs-rpms/openvswitch-*.rpm /tmp/ovs-rpms/python*-openvswitch*.rpm && \
     chmod 0644 /etc/logrotate.d/openvswitch-switch && \
     sed -i "/rotate /a\    #size 100M" /etc/logrotate.d/openvswitch-switch && \
