@@ -142,6 +142,13 @@ pushd $THIS_DIR > /dev/null
 CNI_BINARIES_VERSION=$(head -n 1 ../deps/cni-binaries-version)
 SURICATA_VERSION=$(head -n 1 ../deps/suricata-version)
 
+if [ "$DISTRO" == "photon" ]; then
+    SURICATA_VERSION="6.0.10"
+    LIBNET_VERSION="1.1.6"
+    curl -LO "https://www.openinfosecfoundation.org/download/suricata-${SURICATA_VERSION}.tar.gz"
+    curl -LO "https://downloads.sourceforge.net/libnet-dev/libnet-${LIBNET_VERSION}.tar.gz"
+fi
+
 BUILD_TAG=$(../build-tag.sh)
 if [ "$IPSEC" == "true" ]; then
     BUILD_TAG="${BUILD_TAG}-ipsec"

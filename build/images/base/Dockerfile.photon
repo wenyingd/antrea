@@ -17,12 +17,16 @@ ARG CNI_BINARIES_VERSION
 
 FROM antrea/cni-binaries:${CNI_BINARIES_VERSION} as cni-binaries
 
-FROM antrea/openvswitch-photon:${BUILD_TAG}
+# We do not want to messup with the ovs build image, so we use a separate image
+# to build suricata. Suricata will be available in Photon 4.0, so we can remove
+# this builder step once we drop support for Photon 3.0.
+# libnet is necessary to build suricata. Otherwise suricata will complain about
+# "[ERRCODE: SC_ERR_LIBNET_REQUIRED_FOR_ACTION(143)] - Libnet 1.1.x is required for
+# action "reject" but is not compiled into Suricata". Photon does not provids libnet
+# packages, so we also need to build it from source.
+FROM antrea/openvswitch-photon:${BUILD_TAG} as suricata-builder
 
 ARG RPM_REPO_URL
-
-LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
-LABEL description="An Photon based Docker base image for Antrea."
 
 USER root
 
@@ -33,6 +37,50 @@ RUN if [ -n "${RPM_REPO_URL}" ]; then \
     else \
         /usr/bin/sed -i -e "s/^enabled=.*/enabled=0/g" /etc/yum.repos.d/photon-iso.repo; \
     fi
+
+ARG SURICATA_VERSION
+ARG LIBNET_VERSION=1.1.6
+COPY suricata.spec suricata-${SURICATA_VERSION}.tar.gz /tmp/
+COPY libnet.spec libnet-*.tar.gz /tmp/
+
+RUN tdnf remove -y toybox && \
+    tdnf install -y \
+    findutils grep gzip tar sed cpio \
+    autoconf automake build-essential \
+    pkg-config coreutils \
+    rust \
+    libyaml-devel \
+    zlib-devel pcre-devel libcap-ng-devel \
+    lz4-devel libpcap-devel \
+    nspr-devel nss-devel file-devel \
+    jansson-devel \
+    clang-devel elfutils-libelf-devel rpm-build
+
+RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") ARCH=$(rpm --eval "%{_arch}") && \
+    mkdir -p "${SOURCE_DIR}" && \
+    mv /tmp/suricata-*.tar.gz "${SOURCE_DIR}" && \
+    mv /tmp/libnet-*.tar.gz "${SOURCE_DIR}" && \
+    rpmbuild -bb --nocheck /tmp/libnet.spec && \
+    tdnf install -y ${RPM_DIR}/${ARCH}/libnet*.rpm && \
+    rpmbuild -bb --nocheck /tmp/suricata.spec && \
+    mkdir -p /tmp/suricata-rpms && mv ${RPM_DIR}/*/suricata-${SURICATA_VERSION}*.rpm /tmp/suricata-rpms && \
+    mv ${RPM_DIR}/*/libnet-${LIBNET_VERSION}-*.rpm /tmp/suricata-rpms
+
+
+FROM antrea/openvswitch-photon:${BUILD_TAG}
+ARG RPM_REPO_URL
+
+USER root
+
+RUN if [ -n "${RPM_REPO_URL}" ]; then /usr/bin/sed -i -e 's/^enabled=.*/enabled=0/g' /etc/yum.repos.d/*.repo; fi
+COPY photon-iso.repo /etc/yum.repos.d/
+RUN if [ -n "${RPM_REPO_URL}" ]; then \
+        /usr/bin/sed -i -e "s|^baseurl=.*\$|baseurl=${RPM_REPO_URL}|g" /etc/yum.repos.d/photon-iso.repo; \
+    else \
+        /usr/bin/sed -i -e "s/^enabled=.*/enabled=0/g" /etc/yum.repos.d/photon-iso.repo; \
+    fi
+
+COPY --from=suricata-builder /tmp/suricata-rpms /tmp/suricata-rpms
 
 RUN tdnf remove -y toybox && \
     tdnf install -y \
@@ -46,6 +94,8 @@ RUN tdnf remove -y toybox && \
       ca-certificates \
       util-linux \
       ethtool && \
+    # Install Suricata dependencies and rpm packages.
+    tdnf install -y /tmp/suricata-rpms/*.rpm && \
     tdnf clean all && \
     rm -rf /var/cache/tdnf/* /usr/share/doc/* /usr/share/man/* /etc/yum.repos.d/photon-iso.repo && \
     /usr/bin/sed -i -e 's/^enabled=.*/enabled=1/g' /etc/yum.repos.d/*.repo
