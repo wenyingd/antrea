@@ -126,7 +126,8 @@ RUN tdnf install -y iptables rpm && \
       python3-xml && \
     if ${IPSEC}; then \
         tdnf install -y strongswan iana-etc && \
-        sed -i "/^.*filelog.*{/r /tmp/charon-logging.conf" /etc/strongswan.d/charon-logging.conf; \
+        sed -i "/^.*filelog.*{/r /tmp/charon-logging.conf" /etc/strongswan.d/charon-logging.conf && \
+        sed -i 's/# fips_mode = 0/fips_mode = 1/g' /etc/strongswan.d/charon/openssl.conf; \
     fi && \
     rpm -ivh /tmp/ovs-rpms/openvswitch-*.rpm /tmp/ovs-rpms/python*-openvswitch*.rpm && \
     chmod 0644 /etc/logrotate.d/openvswitch-switch && \
