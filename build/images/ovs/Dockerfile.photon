@@ -109,6 +109,7 @@ ADD photon-rootfs.tar.gz /
 COPY --from=ovs-photon-rpms /etc/yum.repos.d/* /etc/yum.repos.d/
 COPY --from=ovs-photon-rpms /tmp/ovs-rpms/* /tmp/ovs-rpms/
 COPY charon-logging.conf /tmp
+COPY charon-logging-5.6.3.conf /tmp
 
 RUN tdnf install -y iptables rpm && \
     tdnf install -y \
@@ -126,7 +127,8 @@ RUN tdnf install -y iptables rpm && \
       python3-xml && \
     if ${IPSEC}; then \
         tdnf install -y strongswan iana-etc && \
-        sed -i "/^.*filelog.*{/r /tmp/charon-logging.conf" /etc/strongswan.d/charon-logging.conf && \
+        # strongswan < 5.7.0 uses a different format to configure logging. Photon 3.0 pinned strongswan to 5.6.3.
+        sed -i "/^.*filelog.*{/r /tmp/charon-logging-5.6.3.conf" /etc/strongswan.d/charon-logging.conf && \
         sed -i 's/# fips_mode = 0/fips_mode = 1/g' /etc/strongswan.d/charon/openssl.conf; \
     fi && \
     rpm -ivh /tmp/ovs-rpms/openvswitch-*.rpm /tmp/ovs-rpms/python*-openvswitch*.rpm && \
