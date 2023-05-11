@@ -130,6 +130,10 @@ RUN tdnf install -y iptables rpm && \
         # strongswan < 5.7.0 uses a different format to configure logging. Photon 3.0 pinned strongswan to 5.6.3.
         sed -i "/^.*filelog.*{/r /tmp/charon-logging-5.6.3.conf" /etc/strongswan.d/charon-logging.conf && \
         sed -i 's/# fips_mode = 0/fips_mode = 1/g' /etc/strongswan.d/charon/openssl.conf; \
+        # Change the priority as we prefer to use the openssl engine in fips mode.
+        # The default loading sequence of plugins is determined during compilation.
+        # 0xffff is large enough to load openssl firstly.
+        sed -i 's/load =.*/load = 0xffff/g' /etc/strongswan.d/charon/openssl.conf; \
     fi && \
     rpm -ivh /tmp/ovs-rpms/openvswitch-*.rpm /tmp/ovs-rpms/python*-openvswitch*.rpm && \
     chmod 0644 /etc/logrotate.d/openvswitch-switch && \
