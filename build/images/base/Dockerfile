@@ -61,7 +61,7 @@ USER root
 
 COPY iptables-wrapper-installer.sh /iptables-wrapper-installer.sh
 
-RUN apt-get update && apt-get install -y --no-install-recommends ipset jq inotify-tools gpg-agent software-properties-common && \
+RUN apt-get update && apt-get install -y --no-install-recommends ipset jq iproute2 inotify-tools gpg-agent software-properties-common && \
     # ethtool is for commercial release Antrea to toggle Geneve checksum offload.
     apt-get install -y --no-install-recommends ethtool && \
     add-apt-repository ppa:oisf/suricata-${SURICATA_VERSION} && apt-get update && apt-get install -y suricata && \
