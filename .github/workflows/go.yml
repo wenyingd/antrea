@@ -39,7 +39,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version: 1.17
     - name: Check-out code
@@ -75,7 +75,7 @@ jobs:
     runs-on: [windows-2019]
     steps:
       - name: Set up Go 1.17
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: 1.17
       - name: Check-out code
@@ -111,7 +111,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
       - name: Set up Go 1.17
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: 1.17
       - name: Check-out code
@@ -156,7 +156,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version: 1.17
     - name: Check-out code
@@ -188,7 +188,7 @@ jobs:
     runs-on: [macos-latest]
     steps:
       - name: Set up Go 1.17
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: 1.17
       - name: Check-out code
@@ -220,7 +220,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version: 1.17
     - name: Check-out code
@@ -259,7 +259,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version: 1.17
     - name: Check-out code
@@ -288,7 +288,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version: 1.17
     - name: Check-out code
@@ -308,7 +308,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
     - name: Set up Go 1.17
-      uses: actions/setup-go@v3
+      uses: actions/setup-go@v4
       with:
         go-version: 1.17
     - name: Check-out code
@@ -344,7 +344,7 @@ jobs:
     runs-on: [ubuntu-latest]
     steps:
       - name: Set up Go 1.17
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v4
         with:
           go-version: 1.17
       - name: Check-out code
