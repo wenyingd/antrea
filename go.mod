@@ -42,14 +42,14 @@ require (
 	github.com/prometheus/client_golang v1.12.2
 	github.com/prometheus/common v0.37.0
 	github.com/sirupsen/logrus v1.9.0
-	github.com/spf13/afero v1.9.2
+	github.com/spf13/afero v1.9.5
 	github.com/spf13/cobra v1.4.0
 	github.com/spf13/pflag v1.0.5
 	github.com/stretchr/testify v1.7.1
 	github.com/ti-mo/conntrack v0.4.0
 	github.com/vishvananda/netlink v1.1.1-0.20211101163509-b10eb8fe5cf6
 	github.com/vmware/go-ipfix v0.5.12
-	golang.org/x/crypto v0.0.0-20220214200702-86341886e292
+	golang.org/x/crypto v0.0.0-20220722155217-630584e8d5aa
 	golang.org/x/exp v0.0.0-20200224162631-6cc2880d07d6
 	golang.org/x/mod v0.6.0-dev.0.20220106191415-9b9b3d81d5e3
 	golang.org/x/net v0.0.0-20220225172249-27dd8689420f
