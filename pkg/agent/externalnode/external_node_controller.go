@@ -19,6 +19,7 @@ import (
 	"net"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -86,6 +87,7 @@ type ExternalNodeController struct {
 	nodeName                     string
 	externalNodeNamespace        string
 	policyBypassRules            []agentConfig.PolicyBypassRule
+	monitor                      *uplinkMonitor
 }
 
 func NewExternalNodeController(ovsBridgeClient ovsconfig.OVSBridgeClient, ofClient openflow.Client, externalNodeInformer cache.SharedIndexInformer,
@@ -143,6 +145,7 @@ func (c *ExternalNodeController) Run(stopCh <-chan struct{}) {
 
 	c.queue.Add(k8s.NamespacedName(c.externalNodeNamespace, c.nodeName))
 	go wait.Until(c.worker, time.Second, stopCh)
+	c.monitor = newUplinkMonitor(stopCh)
 
 	<-stopCh
 }
@@ -465,6 +468,11 @@ func (c *ExternalNodeController) createOVSPortsAndFlows(uplinkName, hostIFName, 
 	}
 	klog.InfoS("Added uplink and host port in OVS and installed openflow entries", "uplink", uplinkName, "hostInterface", hostIFName)
 	success = true
+
+	if err := c.monitor.addUplinkAndStart(iface.Index, uplinkName); err != nil {
+		return nil, err
+	}
+
 	ifIPs := make([]net.IP, 0)
 	for _, ip := range ips {
 		ifIPs = append(ifIPs, net.ParseIP(ip))
@@ -605,6 +613,8 @@ func (c *ExternalNodeController) removeOVSPortsAndFlows(interfaceConfig *interfa
 	}); err != nil {
 		return fmt.Errorf("failed to wait for host interface %s deletion in 2s, err %v", hostIFName, err)
 	}
+	uplinkIface, _ := net.InterfaceByName(uplinkIfName)
+	c.monitor.deleteUplinkAndTryStop(uplinkIface.Index)
 	// Recover the uplink interface's name.
 	if err = renameInterface(uplinkIfName, hostIFName); err != nil {
 		return err
@@ -694,4 +704,39 @@ func parseProtocol(protocol string) binding.Protocol {
 		proto = binding.ProtocolIP
 	}
 	return proto
+}
+
+type uplinkMonitor struct {
+	mutex   sync.RWMutex
+	uplinks map[int]string
+	stopCh  <-chan struct{}
+	done    chan struct{}
+	started bool
+}
+
+func newUplinkMonitor(stopCh <-chan struct{}) *uplinkMonitor {
+	return &uplinkMonitor{
+		stopCh:  stopCh,
+		uplinks: make(map[int]string),
+	}
+}
+
+func (c *uplinkMonitor) addUplinkAndStart(idx int, name string) error {
+	c.mutex.Lock()
+	c.uplinks[idx] = name
+	c.mutex.Unlock()
+	return c.start()
+}
+
+func (c *uplinkMonitor) deleteUplinkAndTryStop(idx int) {
+	c.mutex.Lock()
+	delete(c.uplinks, idx)
+	if len(c.uplinks) == 0 {
+		c.stop()
+	}
+	c.mutex.Unlock()
+}
+
+func (c *uplinkMonitor) isStart() bool {
+	return c.started
 }

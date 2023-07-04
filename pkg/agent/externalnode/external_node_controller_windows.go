@@ -57,3 +57,11 @@ func (c *ExternalNodeController) removeExternalNodeConfig() error {
 	signals.GenerateStopSignal()
 	return nil
 }
+
+func (c *uplinkMonitor) start() error {
+	return nil
+}
+
+func (c *uplinkMonitor) stop() {
+	return
+}

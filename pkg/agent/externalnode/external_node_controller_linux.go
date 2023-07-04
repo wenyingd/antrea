@@ -16,8 +16,9 @@ package externalnode
 
 import (
 	"fmt"
-
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
+	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/util"
@@ -70,4 +71,49 @@ func (c *ExternalNodeController) moveIFConfigurations(adapterConfig *config.Adap
 
 func (c *ExternalNodeController) removeExternalNodeConfig() error {
 	return nil
+}
+
+func (c *uplinkMonitor) start() error {
+	if c.isStart() {
+		return nil
+	}
+
+	c.done = make(chan struct{})
+	linkUpdateCh := make(chan netlink.LinkUpdate)
+	if err := netlink.LinkSubscribe(linkUpdateCh, c.done); err != nil {
+		return fmt.Errorf("failed to subscribe for link events: %v", err)
+	}
+
+	go func() {
+		for true {
+			select {
+			case update := <-linkUpdateCh:
+				c.mutex.Lock()
+				name, found := c.uplinks[update.Attrs().Index]
+				c.mutex.Unlock()
+				if !found || name != update.Attrs().Name {
+					continue
+				}
+				// check if the event is for link down
+				if update.IfInfomsg.Flags&unix.IFF_UP == 0 {
+					klog.InfoS("uplink is down, set it up")
+					netlink.LinkSetUp(update.Link)
+				}
+			case <-c.stopCh:
+				klog.InfoS("ExternalNodeController has stopped")
+				close(c.done)
+				return
+			case <-c.done:
+				klog.InfoS("ExternalNode monitor is completed, stop")
+				return
+			}
+		}
+	}()
+	c.started = true
+	return nil
+}
+
+func (c *uplinkMonitor) stop() {
+	close(c.done)
+	c.started = false
 }
