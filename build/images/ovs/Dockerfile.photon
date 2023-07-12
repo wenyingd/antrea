@@ -92,7 +92,7 @@ RUN tdnf remove -y toybox && \
 RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") && \
     mkdir -p "${SOURCE_DIR}" && \
     mv /tmp/openvswitch-*.tar.gz "${SOURCE_DIR}" && \
-    rpmbuild -bb --nocheck /tmp/openvswitch.spec && \
+    rpmbuild -bb --nocheck /tmp/openvswitch.spec --define "ovs_version ${OVS_VERSION}" && \
     mkdir -p /tmp/ovs-rpms && mv ${RPM_DIR}/*/openvswitch-${OVS_VERSION}*.rpm ${RPM_DIR}/*/python*-openvswitch-${OVS_VERSION}*.rpm /tmp/ovs-rpms && \
     if ${IPSEC}; then \
         mv ${RPM_DIR}/*/openvswitch-ipsec-${OVS_VERSION}*.rpm /tmp/ovs-rpms; \
