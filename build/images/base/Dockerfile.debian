@@ -24,6 +24,11 @@ LABEL description="An Debian based Docker base image for Antrea."
 
 COPY iptables-wrapper-installer.sh /iptables-wrapper-installer.sh
 
+RUN echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye main" > /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-updates main" >> /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-security-remote bullseye-security main" >> /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-backports main" > /etc/apt/sources.list.d/backports.list
+
 USER root
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -34,6 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ethtool \
     inotify-tools && \
+    apt-get install -y --no-install-recommends -t bullseye-backports suricata && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* && \
     /iptables-wrapper-installer.sh
 
