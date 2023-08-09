@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2023 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,12 +26,17 @@ import (
 
 type SystemV1beta1Interface interface {
 	RESTClient() rest.Interface
+	NodeCPUInfosGetter
 	SupportBundlesGetter
 }
 
 // SystemV1beta1Client is used to interact with features provided by the system.antrea.io group.
 type SystemV1beta1Client struct {
 	restClient rest.Interface
+}
+
+func (c *SystemV1beta1Client) NodeCPUInfos() NodeCPUInfoInterface {
+	return newNodeCPUInfos(c)
 }
 
 func (c *SystemV1beta1Client) SupportBundles() SupportBundleInterface {

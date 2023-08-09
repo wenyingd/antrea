@@ -49,6 +49,7 @@ import (
 	"antrea.io/antrea/pkg/apiserver"
 	"antrea.io/antrea/pkg/apiserver/handlers/loglevel"
 	"antrea.io/antrea/pkg/apiserver/openapi"
+	"antrea.io/antrea/pkg/apiserver/registry/system/cpuinfo"
 	"antrea.io/antrea/pkg/apiserver/registry/system/supportbundle"
 	"antrea.io/antrea/pkg/ovs/ovsctl"
 	"antrea.io/antrea/pkg/querier"
@@ -105,6 +106,7 @@ func installAPIGroup(s *genericapiserver.GenericAPIServer, aq agentquerier.Agent
 	supportBundleStorage := supportbundle.NewAgentStorage(ovsctl.NewClient(aq.GetNodeConfig().OVSBridge), aq, npq, v4Enabled, v6Enabled)
 	systemStorage["supportbundles"] = supportBundleStorage.SupportBundle
 	systemStorage["supportbundles/download"] = supportBundleStorage.Download
+	systemStorage["nodecpuinfos"] = cpuinfo.NewREST()
 	systemGroup.VersionedResourcesStorageMap["v1beta1"] = systemStorage
 	return s.InstallAPIGroup(&systemGroup)
 }

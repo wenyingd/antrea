@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2023 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,6 +24,10 @@ import (
 
 type FakeSystemV1beta1 struct {
 	*testing.Fake
+}
+
+func (c *FakeSystemV1beta1) NodeCPUInfos() v1beta1.NodeCPUInfoInterface {
+	return &FakeNodeCPUInfos{c}
 }
 
 func (c *FakeSystemV1beta1) SupportBundles() v1beta1.SupportBundleInterface {

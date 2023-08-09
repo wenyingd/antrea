@@ -6392,6 +6392,7 @@ rules:
       - system.antrea.io
     resources:
       - supportbundles/download
+      - nodecpuinfos
     verbs:
       - get
   - nonResourceURLs:

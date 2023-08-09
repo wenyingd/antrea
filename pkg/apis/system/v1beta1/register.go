@@ -55,6 +55,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&crdv1beta1.AntreaControllerInfo{},
 		&crdv1beta1.AntreaControllerInfoList{},
 		&SupportBundle{},
+		&NodeCPUInfo{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)

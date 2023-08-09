@@ -39,3 +39,21 @@ type SupportBundle struct {
 	Size     uint32       `json:"size,omitempty"`
 	Filepath string       `json:"-"`
 }
+
+// +genclient
+// +genclient:nonNamespaced
+// +genclient:onlyVerbs=get
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type NodeCPUInfo struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	CPUVendorID string `json:"cpuVendorID,omitempty"`
+	CPUs        int    `json:"cpus,omitempty"`
+	Cores       int    `json:"cores,omitempty"`
+	Sockets     int    `json:"sockets,omitempty"`
+	Nodes       int    `json:"nodes,omitempty"`
+	OS          string `json:"os,omitempty"`
+	Arch        string `json:"arch,omitempty"`
+}
