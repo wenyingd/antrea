@@ -6847,7 +6847,6 @@ spec:
           operator: Exists
       serviceAccountName: antrea-agent
       initContainers:
-      containers:
         - name: antrea-agent-tweaker
           image: "antrea/antrea-ubuntu:latest"
           imagePullPolicy: IfNotPresent
@@ -6869,6 +6868,7 @@ spec:
           - name: antrea-agent-tweaker-config
             mountPath: /etc/antrea/antrea-agent-tweaker.conf
             subPath: antrea-agent-tweaker.conf
+      containers:
         - name: install-cni
           image: "antrea/antrea-ubuntu:latest"
           imagePullPolicy: IfNotPresent

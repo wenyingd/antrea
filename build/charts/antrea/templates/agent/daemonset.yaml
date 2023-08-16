@@ -70,9 +70,6 @@ spec:
       {{- end }}
       serviceAccountName: antrea-agent
       initContainers:
-      {{- if eq .Values.trafficEncapMode "networkPolicyOnly" }}
-      containers:
-      {{- end }}
         {{- if .Values.antreaAgentTweaker.enable }}
         - name: antrea-agent-tweaker
           image: {{ include "antreaAgentImage" . | quote }}
@@ -94,6 +91,9 @@ spec:
             mountPath: /etc/antrea/antrea-agent-tweaker.conf
             subPath: antrea-agent-tweaker.conf
         {{- end }}
+      {{- if eq .Values.trafficEncapMode "networkPolicyOnly" }}
+      containers:
+      {{- end }}
         - name: install-cni
           image: {{ include "antreaAgentImage" . | quote }}
           imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
