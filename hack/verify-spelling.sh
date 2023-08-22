@@ -26,6 +26,7 @@ set -o pipefail
 TOOL_VERSION="v0.3.4"
 
 GO_VERSION="$(${GO} version | awk '{print $3}')"
+GOPROXY=https://build-artifactory.eng.vmware.com/srp-mds-go-remote/
 function version_lt() { test "$(printf '%s\n' "$@" | sort -rV | head -n 1)" != "$1"; }
 
 if version_lt "${GO_VERSION}" "go1.16"; then
@@ -46,7 +47,7 @@ exitHandler() (
 )
 trap exitHandler EXIT
 
-GOBIN="${TMP_DIR}" ${GO} install "github.com/client9/misspell/cmd/misspell@${TOOL_VERSION}"
+GOBIN="${TMP_DIR}" GOPROXY=${GOPROXY} ${GO} install "github.com/client9/misspell/cmd/misspell@${TOOL_VERSION}"
 export PATH="${TMP_DIR}:${PATH}"
 
 # Check spelling and ignore skipped files.

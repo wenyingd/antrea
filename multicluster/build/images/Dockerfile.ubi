@@ -1,4 +1,4 @@
-FROM registry.access.redhat.com/ubi8
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubi8:8.8-1032
 ARG BUILD_INFO
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"

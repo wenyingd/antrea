@@ -16,7 +16,7 @@
 # - openvswitch-$OVS_VERSION.tar.gz - archive of the source code of OpenvSwitch.
 # IPsec related packages will not be installed by default. Sepcify `--build-arg IPsec=true` to enable IPsec support.
 
-FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/debian:bullseye-slim as ovs-debian-debs
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/debian:bullseye-slim as ovs-debian-debs
 # Some patches may not apply cleanly if a non-default version is provided.
 # See build/images/deps/ovs-version for the default version.
 ARG OVS_VERSION
@@ -50,7 +50,7 @@ RUN tar -xzf /tmp/openvswitch-$OVS_VERSION.tar.gz -C /tmp && \
     if ${IPSEC}; then mv openvswitch-ipsec_*.deb ovs-debs/; fi && \
     cd /
 
-FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/debian:bullseye-slim
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/debian:bullseye-slim
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="A Container image based on Debian 10 which includes Open vSwitch built from source."

@@ -24,6 +24,7 @@ set -o pipefail
 TOOL_VERSION=$(head hack/mdtoc-version)
 
 GO_VERSION="$(${GO} version | awk '{print $3}')"
+GOPROXY=https://build-artifactory.eng.vmware.com/srp-mds-go-remote/
 function version_lt() { test "$(printf '%s\n' "$@" | sort -rV | head -n 1)" != "$1"; }
 
 if version_lt "${GO_VERSION}" "go1.16"; then
@@ -46,7 +47,7 @@ exitHandler() (
 )
 trap exitHandler EXIT
 
-GOBIN="${TMP_DIR}" ${GO} install "github.com/tallclair/mdtoc@${TOOL_VERSION}"
+GOBIN="${TMP_DIR}" GOPROXY=${GOPROXY} ${GO} install "github.com/tallclair/mdtoc@${TOOL_VERSION}"
 export PATH="${TMP_DIR}:${PATH}"
 
 echo "Checking table of contents are up to date..."

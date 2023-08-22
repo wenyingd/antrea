@@ -98,7 +98,7 @@ THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 source $THIS_DIR/verify-kustomize.sh
 
 if [ -z "$KUSTOMIZE" ]; then
-    KUSTOMIZE="$(verify_kustomize)"
+    KUSTOMIZE="$(verify_kustomize $GOBUILD_KUSTOMIZE_BIN_PATH)"
 elif ! $KUSTOMIZE version > /dev/null 2>&1; then
     echoerr "$KUSTOMIZE does not appear to be a valid kustomize binary"
     print_help

@@ -18,7 +18,7 @@ THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 _BINDIR="$THIS_DIR/.bin"
 # Must be an exact match, as the generated YAMLs may not be consistent across
 # versions
-_KUSTOMIZE_VERSION="v4.5.7"
+_KUSTOMIZE_VERSION="v4.4.1"
 
 # Ensure the kustomize tool exists and is the correct version, or installs it
 verify_kustomize() {
@@ -33,7 +33,8 @@ verify_kustomize() {
         #  - {kustomize/v3.8.2  2020-08-29T17:44:01Z  }
         kustomize_version="${kustomize_version##*/}"
         kustomize_version="${kustomize_version%% *}"
-        if [ "${kustomize_version}" == "${_KUSTOMIZE_VERSION}" ]; then
+        kustomize_version="${kustomize_version##*\{}"
+        if [ "${kustomize_version}" == "${_KUSTOMIZE_VERSION}" -o "v${kustomize_version}" == "${_KUSTOMIZE_VERSION}" ]; then
             # If version is exact match, stop here.
             echo "$kustomize"
             return 0
@@ -50,11 +51,16 @@ verify_kustomize() {
         return 1
     fi
     >&2 echo "Installing kustomize"
-    local kustomize_url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${_KUSTOMIZE_VERSION}/kustomize_${_KUSTOMIZE_VERSION}_${ostype}_amd64.tar.gz"
-    curl -sLo kustomize.tar.gz "${kustomize_url}" || return 1
     mkdir -p "$_BINDIR" || return 1
-    tar -xzf kustomize.tar.gz -C "$_BINDIR" || return 1
-    rm -f kustomize.tar.gz
+    if [ -z $1 ]; then
+        local kustomize_url="https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize/${_KUSTOMIZE_VERSION}/kustomize_${_KUSTOMIZE_VERSION}_${ostype}_amd64.tar.gz"
+        curl -sLo kustomize.tar.gz "${kustomize_url}" || return 1
+        tar -xzf kustomize.tar.gz -C "$_BINDIR" || return 1
+        rm -f kustomize.tar.gz
+    else
+        cp $1 "$_BINDIR"
+        chmod +x "$_BINDIR"/kustomize
+    fi
     kustomize="$_BINDIR/kustomize"
     echo "$kustomize"
     return 0

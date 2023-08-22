@@ -13,7 +13,7 @@
 # limitations under the License.
 
 ARG BUILD_TAG
-FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/ubuntu:22.04 as cni-binaries
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubuntu:22.04 as cni-binaries
 
 ARG CNI_BINARIES_VERSION
 ARG DOWNLOAD_CNI_BINARIES=false

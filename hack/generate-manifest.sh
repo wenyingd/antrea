@@ -252,7 +252,7 @@ THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 source $THIS_DIR/verify-helm.sh
 
 if [ -z "$HELM" ]; then
-    HELM="$(verify_helm)"
+    HELM="$(verify_helm $GOBUILD_HELM_BIN_PATH)"
 elif ! $HELM version > /dev/null 2>&1; then
     echoerr "$HELM does not appear to be a valid helm binary"
     print_help

@@ -16,7 +16,7 @@
 # - openvswitch-$OVS_VERSION.tar.gz - archive of the source code of OpenvSwitch.
 # IPsec related packages will not be installed by default. Specify `--build-arg IPsec=true` to enable IPsec support.
 
-FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/ubuntu:22.04 as ovs-debs
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubuntu:22.04 as ovs-debs
 
 RUN echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy main restricted universe" > /etc/apt/sources.list && \
     echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy-security main restricted" >> /etc/apt/sources.list && \
@@ -47,7 +47,7 @@ RUN tar -xzf /tmp/openvswitch-$OVS_VERSION.tar.gz -C /tmp && \
     if ${IPSEC}; then mv openvswitch-ipsec_*.deb ovs-debs/; fi && \
     cd / && rm -rf /tmp/openvswitch*
 
-FROM harbor-repo.vmware.com/dockerhub-proxy-cache/library/ubuntu:22.04
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubuntu:22.04
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="A Docker image based on Ubuntu 22.04 which includes Open vSwitch built from source."
