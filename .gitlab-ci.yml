@@ -60,8 +60,8 @@ check-manifest:
     ./build.sh --distro ${DISTRO} --download-ovs --ipsec ${EXTRA_BUILD_ARGS}
     popd
     pushd build/images/base
-    ./build.sh --distro ${DISTRO} --download-cni-binaries ${EXTRA_BUILD_ARGS}
-    ./build.sh --distro ${DISTRO} --download-cni-binaries --ipsec ${EXTRA_BUILD_ARGS}
+    ./build.sh --distro ${DISTRO} --download-cni-binaries --use-upstream-suricata ${EXTRA_BUILD_ARGS}
+    ./build.sh --distro ${DISTRO} --download-cni-binaries --use-upstream-suricata --ipsec ${EXTRA_BUILD_ARGS}
     popd
     make docker-bin
     make ${DISTRO}

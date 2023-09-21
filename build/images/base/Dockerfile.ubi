@@ -20,17 +20,25 @@ FROM antrea/cni-binaries:${CNI_BINARIES_VERSION} as cni-binaries
 FROM antrea/openvswitch-ubi:${BUILD_TAG}
 
 ARG SURICATA_VERSION
+ARG INSTALL_SURICATA_FROM_PACKAGE=false
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="An UBI9 based Docker base image for Antrea."
 
+COPY suricata*.rpm /tmp/
+
 USER root
 
-# Skip installing weak dependencies (geolite2-city and geolite2-country) for Suricata as they are not required for Antrea's use case.
 RUN yum install ipset jq yum-plugin-copr -y && \
     # ethtool is for commercial release Antrea to toggle Geneve checksum offload.
     yum install ethtool -y && \
-    yum copr enable @oisf/suricata-${SURICATA_VERSION} -y && yum install suricata --setopt=install_weak_deps=False -y && \
-    yum remove yum-plugin-copr -y && yum clean all
+    if ${INSTALL_SURICATA_FROM_PACKAGE}; then \
+        yum install -y /tmp/suricata*.rpm --setopt=install_weak_deps=False ; \
+    else \
+        # Skip installing weak dependencies (geolite2-city and geolite2-country) for Suricata as they are not required for Antrea's use case.
+        yum copr enable @oisf/suricata-${SURICATA_VERSION} -y && yum install suricata --setopt=install_weak_deps=False -y && \
+        yum remove yum-plugin-copr -y; \
+    fi && \
+    yum clean all
 
 COPY --from=cni-binaries /opt/cni/bin /opt/cni/bin

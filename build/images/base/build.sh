@@ -36,6 +36,7 @@ Build the antrea base image.
         --ipsec                 Build with IPsec support Default is false.
         --distro <distro>       Target Linux distribution.
         --use-public-photon     Use public Photon repository. Should only be used in CI and for local testing.
+        --use-upstream-suricata Use upstream Suricata package instead of pre-built package.
         --rpm-repo-url <url>    URL of the RPM repository to use for Photon builds."
 
 function print_usage {
@@ -51,6 +52,7 @@ DOWNLOAD_CNI_BINARIES=false
 IPSEC=false
 RPM_REPO_URL=""
 USE_PUBLIC_PHOTON=false
+INSTALL_SURICATA_FROM_PACKAGE=true
 SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "photon")
 
 while [[ $# -gt 0 ]]
@@ -92,6 +94,10 @@ case $key in
     ;;
     --use-public-photon)
     USE_PUBLIC_PHOTON=true
+    shift
+    ;;
+    --use-upstream-suricata)
+    INSTALL_SURICATA_FROM_PACKAGE=false
     shift
     ;;
     -h|--help)
@@ -141,12 +147,36 @@ pushd $THIS_DIR > /dev/null
 
 CNI_BINARIES_VERSION=$(head -n 1 ../deps/cni-binaries-version)
 SURICATA_VERSION=$(head -n 1 ../deps/suricata-version)
+SURICATA_VERSION_SHORT=$(echo $SURICATA_VERSION | cut -f1,2 -d'.')
+
+if [ "$INSTALL_SURICATA_FROM_PACKAGE" == "true" ]; then
+    if [ "$DISTRO" == "ubuntu" -o "$DISTRO" == "debian" ] && ! compgen -G "suricata*.deb" > /dev/null; then
+        echoerr "Suricata deb not found."
+        exit 1
+    elif [ "$DISTRO" == "photon" -o "$DISTRO" == "ubi" ] && ! compgen -G "suricata*.rpm" > /dev/null; then
+        echoerr "Suricata rpm not found."
+        exit 1
+    fi
+    if [ "$DISTRO" == "photon" ] && ! compgen -G "libnet*.rpm" > /dev/null; then
+        echoerr "libnet rpm not found."
+        exit 1
+    fi
+fi
 
 if [ "$DISTRO" == "photon" ]; then
-    SURICATA_VERSION="6.0.10"
-    LIBNET_VERSION="1.1.6"
-    curl -LO "https://artifactory.eng.vmware.com/artifactory/nsx-ujo-local/cayman_antrea/suricata-${SURICATA_VERSION}.tar.gz"
-    curl -LO "https://artifactory.eng.vmware.com/artifactory/nsx-ujo-local/cayman_antrea/libnet-${LIBNET_VERSION}.tar.gz"
+    if [ "$RPM_REPO_URL" == "" ] && ! ${USE_PUBLIC_PHOTON} ; then
+        echoerr "Must specify --rpm-repo-url or --use-public-photon"
+        exit 1
+    fi
+    if [ "$RPM_REPO_URL" != "" ] && ${USE_PUBLIC_PHOTON} ; then
+        echoerr "Cannot specify both --rpm-repo-url and --use-public-photon"
+        exit 1
+    fi
+    if [ "$INSTALL_SURICATA_FROM_PACKAGE" != "true" ]; then
+        LIBNET_VERSION="1.1.6"
+        curl -LO "https://artifactory.eng.vmware.com/artifactory/nsx-ujo-local/cayman_antrea/suricata-${SURICATA_VERSION}.tar.gz"
+        curl -LO "https://artifactory.eng.vmware.com/artifactory/nsx-ujo-local/cayman_antrea/libnet-${LIBNET_VERSION}.tar.gz"
+    fi
 fi
 
 BUILD_TAG=$(../build-tag.sh)
@@ -230,7 +260,6 @@ elif [ "$DISTRO" == "photon" ]; then
     fi
     docker_build_and_push "antrea/base-debian" Dockerfile.photon    
 fi
-
 if $PUSH; then
     docker push antrea/cni-binaries:$CNI_BINARIES_VERSION
     docker push antrea/base-$DISTRO:$BUILD_TAG

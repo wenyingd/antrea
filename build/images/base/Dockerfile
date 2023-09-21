@@ -49,6 +49,7 @@ RUN set -eux; \
 FROM antrea/openvswitch:${BUILD_TAG}
 
 ARG SURICATA_VERSION
+ARG INSTALL_SURICATA_FROM_PACKAGE=false
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="An Ubuntu based Docker base image for Antrea."
@@ -60,11 +61,17 @@ RUN echo "deb http://build-artifactory.eng.vmware.com/ubuntu-remote jammy main r
 USER root
 
 COPY iptables-wrapper-installer.sh /iptables-wrapper-installer.sh
+COPY suricata*.deb /tmp
 
 RUN apt-get update && apt-get install -y --no-install-recommends ipset jq iproute2 inotify-tools gpg-agent software-properties-common && \
     # ethtool is for commercial release Antrea to toggle Geneve checksum offload.
     apt-get install -y --no-install-recommends ethtool && \
-    add-apt-repository ppa:oisf/suricata-${SURICATA_VERSION} && apt-get update && apt-get install -y suricata && \
+    if ${INSTALL_SURICATA_FROM_PACKAGE}; then \
+        apt install -y /tmp/suricata*.deb --no-install-recommends && \
+        apt-mark hold suricata; \
+    else \
+        add-apt-repository ppa:oisf/suricata-${SURICATA_VERSION} && apt-get update && apt-get install -y suricata; \
+    fi && \
     apt-get remove -y gpg-agent software-properties-common && apt-get autoremove -y && rm -rf /var/cache/apt/* /var/lib/apt/lists/* && \
     /iptables-wrapper-installer.sh
 

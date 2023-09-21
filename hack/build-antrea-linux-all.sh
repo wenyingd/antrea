@@ -92,7 +92,7 @@ pushd "$THIS_DIR/.." > /dev/null
 ARGS=""
 # Download OVS source code tarball and CNI binaries from internet.
 OVS_ARGS="--download-ovs"
-BASE_IMAGE_ARGS="--download-cni-binaries"
+BASE_IMAGE_ARGS="--download-cni-binaries --use-upstream-suricata"
 PLATFORM_ARG=""
 if $PUSH; then
    ARGS="$ARGS --push"

@@ -19,15 +19,17 @@ FROM antrea/cni-binaries:${CNI_BINARIES_VERSION} as cni-binaries
 
 FROM antrea/openvswitch-debian:${BUILD_TAG}
 
+ARG INSTALL_SURICATA_FROM_PACKAGE=false
+
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="An Debian based Docker base image for Antrea."
 
 COPY iptables-wrapper-installer.sh /iptables-wrapper-installer.sh
+COPY suricata*.deb /tmp/
 
 RUN echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye main" > /etc/apt/sources.list && \
     echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-updates main" >> /etc/apt/sources.list && \
-    echo "deb http://build-artifactory.eng.vmware.com/debian-security-remote bullseye-security main" >> /etc/apt/sources.list && \
-    echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-backports main" > /etc/apt/sources.list.d/backports.list
+    echo "deb http://build-artifactory.eng.vmware.com/debian-security-remote bullseye-security main" >> /etc/apt/sources.list
 
 USER root
 
@@ -39,7 +41,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     ethtool \
     inotify-tools && \
-    apt-get install -y --no-install-recommends -t bullseye-backports suricata && \
+    if ${INSTALL_SURICATA_FROM_PACKAGE}; then \
+        apt-get install -y --no-install-recommends /tmp/suricata*.deb && \
+        apt-mark hold suricata; \
+    else \
+        echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-backports main" >> /etc/apt/sources.list.d/backports.list && \
+        apt update && \
+        apt-get install -y --no-install-recommends suricata; \
+    fi && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* && \
     /iptables-wrapper-installer.sh
 

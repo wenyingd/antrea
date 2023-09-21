@@ -14,9 +14,11 @@
 
 ARG BUILD_TAG
 ARG CNI_BINARIES_VERSION
+ARG INSTALL_SURICATA_FROM_PACKAGE=false
 
 FROM antrea/cni-binaries:${CNI_BINARIES_VERSION} as cni-binaries
 
+# Option 1: Build Suricata from source
 # We do not want to messup with the ovs build image, so we use a separate image
 # to build suricata. Suricata will be available in Photon 4.0, so we can remove
 # this builder step once we drop support for Photon 3.0.
@@ -24,7 +26,7 @@ FROM antrea/cni-binaries:${CNI_BINARIES_VERSION} as cni-binaries
 # "[ERRCODE: SC_ERR_LIBNET_REQUIRED_FOR_ACTION(143)] - Libnet 1.1.x is required for
 # action "reject" but is not compiled into Suricata". Photon does not provids libnet
 # packages, so we also need to build it from source.
-FROM antrea/openvswitch-photon:${BUILD_TAG} as suricata-builder
+FROM antrea/openvswitch-photon:${BUILD_TAG} as suricata-skip-build-false
 
 ARG RPM_REPO_URL
 
@@ -52,9 +54,11 @@ RUN tdnf remove -y toybox && \
     libyaml-devel \
     zlib-devel pcre-devel libcap-ng-devel \
     lz4-devel libpcap-devel \
-    nspr-devel nss-devel file-devel \
+    file-devel \
+    libnetfilter_queue-devel \
     jansson-devel \
-    clang-devel elfutils-libelf-devel rpm-build
+    clang-devel elfutils-libelf-devel rpm-build \
+    doxygen systemd-devel
 
 RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") ARCH=$(rpm --eval "%{_arch}") && \
     mkdir -p "${SOURCE_DIR}" && \
@@ -62,11 +66,19 @@ RUN SOURCE_DIR=$(rpm --eval "%{_sourcedir}") RPM_DIR=$(rpm --eval "%{_rpmdir}") 
     mv /tmp/libnet-*.tar.gz "${SOURCE_DIR}" && \
     rpmbuild -bb --nocheck /tmp/libnet.spec && \
     tdnf install -y ${RPM_DIR}/${ARCH}/libnet*.rpm && \
-    rpmbuild -bb --nocheck /tmp/suricata.spec && \
+    rpmbuild -bb --nocheck /tmp/suricata.spec --define "suricata_version ${SURICATA_VERSION}" && \
     mkdir -p /tmp/suricata-rpms && mv ${RPM_DIR}/*/suricata-${SURICATA_VERSION}*.rpm /tmp/suricata-rpms && \
     mv ${RPM_DIR}/*/libnet-${LIBNET_VERSION}-*.rpm /tmp/suricata-rpms
 
+# Option 2: Install Suricata from rpm packages
+FROM scratch as suricata-skip-build-true
+COPY suricata*.rpm /tmp/suricata-rpms/
+COPY libnet*.rpm /tmp/suricata-rpms/
 
+# COPY does not support variable substitution. Create an intermediate image conditionally using FROM.
+FROM suricata-skip-build-${INSTALL_SURICATA_FROM_PACKAGE} as suricata-rpms-source
+
+# The final image
 FROM antrea/openvswitch-photon:${BUILD_TAG}
 ARG RPM_REPO_URL
 
@@ -80,7 +92,7 @@ RUN if [ -n "${RPM_REPO_URL}" ]; then \
         /usr/bin/sed -i -e "s/^enabled=.*/enabled=0/g" /etc/yum.repos.d/photon-iso.repo; \
     fi
 
-COPY --from=suricata-builder /tmp/suricata-rpms /tmp/suricata-rpms
+COPY --from=suricata-rpms-source /tmp/suricata-rpms /tmp/suricata-rpms
 
 RUN tdnf remove -y toybox && \
     tdnf install -y \

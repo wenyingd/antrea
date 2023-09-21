@@ -1,22 +1,23 @@
 Summary: Intrusion Detection System
 Name: suricata
-Version: 6.0.10
+Version: %{suricata_version}
 Release: 1%{?dist}
 Epoch: 1
 License: GPLv2
 URL: https://suricata-ids.org/
 Source0: https://www.openinfosecfoundation.org/download/%{name}-%{version}.tar.gz
 
-
 BuildRequires: autoconf automake
 BuildRequires: pkg-config coreutils
 BuildRequires: rust
 BuildRequires: libyaml-devel
 BuildRequires: zlib-devel pcre-devel libcap-ng-devel
+BuildRequires: libnetfilter_queue-devel
 BuildRequires: lz4-devel libpcap-devel
-BuildRequires: nspr-devel nss-devel file-devel
+BuildRequires: file-devel
 BuildRequires: jansson-devel
 BuildRequires: clang-devel elfutils-libelf-devel
+BuildRequires: systemd-devel doxygen
 
 Requires(pre): /usr/sbin/useradd
 Requires(post): systemd
@@ -35,13 +36,14 @@ Matching, and GeoIP identification.
 %prep
 %setup -q -n suricata-%{version}
 
+find python/ -type f -exec sed -i '1s=^#!/usr/bin/\(python\|env python\)[23]\?=#!%{__python3}=' {} +
 sed -i 's/(datadir)/(sysconfdir)/' etc/Makefile.am
 sed -i 's/^dist_doc_DATA =.*/dist_doc_DATA =/' doc/Makefile.am
 
 autoreconf -fv --install
 
 %build
-%configure ./configure --enable-af-packet \
+%configure --enable-af-packet --enable-nfqueue \
 	--enable-gccprotect --disable-gccmarch-native \
 	--disable-coccinelle \
 	--disable-suricata-update
@@ -115,8 +117,9 @@ getent passwd suricata >/dev/null || useradd -r -M -g suricata -s /sbin/nologin 
 %{_datadir}/%{name}/rules
 
 %changelog
-* Fri Apr 17 2023 Xu Liu <xliu2@vmware.com> - 1:6.0.11-1
+* Tue Sep 5 2023 Xu Liu <xliu2@vmware.com> - 1:6.0.13-1
 - Support build on Photon 3.0.
+- Change the shebangs in the python scripts to use Python 3 explicitly.
 
 * Fri Apr 14 2023 Jason Ish <jason.ish@oisf.net> - 1:6.0.11-1
 - Update to 6.0.11.
