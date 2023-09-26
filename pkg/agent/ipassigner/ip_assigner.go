@@ -25,8 +25,6 @@ import (
 
 	"antrea.io/antrea/pkg/agent/ipassigner/responder"
 	"antrea.io/antrea/pkg/agent/util"
-	"antrea.io/antrea/pkg/agent/util/arping"
-	"antrea.io/antrea/pkg/agent/util/ndp"
 )
 
 // IPAssigner provides methods to assign or unassign IP.
@@ -62,20 +60,6 @@ type ipAssigner struct {
 	ndpResponder responder.Responder
 }
 
-func (a *ipAssigner) advertise(ip net.IP) {
-	if utilnet.IsIPv4(ip) {
-		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)
-		if err := arping.GratuitousARPOverIface(ip, a.externalInterface); err != nil {
-			klog.ErrorS(err, "Failed to send gratuitous ARP", "ip", ip)
-		}
-	} else {
-		klog.V(2).InfoS("Sending neighbor advertisement", "ip", ip)
-		if err := ndp.NeighborAdvertisement(ip, a.externalInterface); err != nil {
-			klog.ErrorS(err, "Failed to send neighbor advertisement", "ip", ip)
-		}
-	}
-}
-
 // NewIPAssigner returns an *ipAssigner.
 func NewIPAssigner(nodeTransportInterface string, dummyDeviceName string) (IPAssigner, error) {
 	ipv4, ipv6, externalInterface, err := util.GetIPNetDeviceByName(nodeTransportInterface)
@@ -87,27 +71,16 @@ func NewIPAssigner(nodeTransportInterface string, dummyDeviceName string) (IPAss
 		assignedIPs:       sets.New[string](),
 	}
 	if ipv4 != nil {
-		// For the Egress scenario, the external IPs should always be present on the dummy
-		// interface as they are used as tunnel endpoints. If arp_ignore is set to a value
-		// other than 0, the host will not reply to ARP requests received on the transport
-		// interface when the target IPs are assigned on the dummy interface. So a userspace
-		// ARP responder is needed to handle ARP requests for the Egress IPs.
-		arpIgnore, err := getARPIgnoreForInterface(externalInterface.Name)
+		arpResponder, err := getARPResponder(dummyDeviceName, externalInterface)
 		if err != nil {
 			return nil, err
 		}
-		if dummyDeviceName == "" || arpIgnore > 0 {
-			arpResponder, err := responder.NewARPResponder(externalInterface)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create ARP responder for link %s: %v", externalInterface.Name, err)
-			}
-			a.arpResponder = arpResponder
-		}
+		a.arpResponder = arpResponder
 	}
 	if ipv6 != nil {
-		ndpResponder, err := responder.NewNDPResponder(externalInterface)
+		ndpResponder, err := getNDPResponder(externalInterface)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create NDP responder for link %s: %v", externalInterface.Name, err)
+			return nil, err
 		}
 		a.ndpResponder = ndpResponder
 	}

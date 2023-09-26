@@ -17,13 +17,18 @@ package ipassigner
 import (
 	"errors"
 	"fmt"
+	"net"
+
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
-	"net"
+	utilnet "k8s.io/utils/net"
 
+	"antrea.io/antrea/pkg/agent/ipassigner/responder"
 	"antrea.io/antrea/pkg/agent/util"
+	"antrea.io/antrea/pkg/agent/util/arping"
+	"antrea.io/antrea/pkg/agent/util/ndp"
 	"antrea.io/antrea/pkg/agent/util/sysctl"
 )
 
@@ -122,4 +127,46 @@ func (a *ipAssigner) syncIPsOnDummy(ips sets.Set[string]) error {
 		}
 	}
 	return nil
+}
+
+func getARPResponder(dummyDeviceName string, externalInterface *net.Interface) (responder.Responder, error) {
+	// For the Egress scenario, the external IPs should always be present on the dummy
+	// interface as they are used as tunnel endpoints. If arp_ignore is set to a value
+	// other than 0, the host will not reply to ARP requests received on the transport
+	// interface when the target IPs are assigned on the dummy interface. So a userspace
+	// ARP responder is needed to handle ARP requests for the Egress IPs.
+	arpIgnore, err := getARPIgnoreForInterface(externalInterface.Name)
+	if err != nil {
+		return nil, err
+	}
+	if dummyDeviceName == "" || arpIgnore > 0 {
+		rsp, err := responder.NewARPResponder(externalInterface)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ARP responder for link %s: %v", externalInterface.Name, err)
+		}
+		return rsp, nil
+	}
+	return nil, nil
+}
+
+func getNDPResponder(externalInterface *net.Interface) (responder.Responder, error) {
+	rsp, err := responder.NewNDPResponder(externalInterface)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create NDP responder for link %s: %v", externalInterface.Name, err)
+	}
+	return rsp, nil
+}
+
+func (a *ipAssigner) advertise(ip net.IP) {
+	if utilnet.IsIPv4(ip) {
+		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)
+		if err := arping.GratuitousARPOverIface(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send gratuitous ARP", "ip", ip)
+		}
+	} else {
+		klog.V(2).InfoS("Sending neighbor advertisement", "ip", ip)
+		if err := ndp.NeighborAdvertisement(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send neighbor advertisement", "ip", ip)
+		}
+	}
 }

@@ -14,13 +14,19 @@
 
 package ipassigner
 
-type dummyInterfaceType *struct{}
+import (
+	"net"
 
-// getARPIgnoreForInterface returns 0 on Windows because the ARP query is responded via OpenFlow entries statically,
-// and no need to run an userspace responder.
-func getARPIgnoreForInterface(iface string) (int, error) {
-	return 1, nil
-}
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
+
+	"antrea.io/antrea/pkg/agent/ipassigner/responder"
+	"antrea.io/antrea/pkg/agent/util/arping"
+	"antrea.io/antrea/pkg/agent/util/ndp"
+)
+
+type dummyInterfaceType *struct{}
 
 // ensureDummyDevice creates the dummy device if it doesn't exist.
 func ensureDummyDevice(deviceName string) (dummyInterfaceType, error) {
@@ -37,4 +43,28 @@ func (a *ipAssigner) deleteIPFromDummy(parsedIP net.IP) error {
 
 func (a *ipAssigner) syncIPsOnDummy(ips sets.Set[string]) error {
 	return nil
+}
+
+// getARPResponder returns nil on Windows since the ARP request is responded with OpenFlow entries.
+func getARPResponder(dummyDeviceName string, externalInterface *net.Interface) (responder.Responder, error) {
+	return nil, nil
+}
+
+// getNDPResponder returns nil on Windows since IPv6 is not supported yet.
+func getNDPResponder(externalInterface *net.Interface) (responder.Responder, error) {
+	return nil, nil
+}
+
+func (a *ipAssigner) advertise(ip net.IP) {
+	if utilnet.IsIPv4(ip) {
+		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)
+		if err := arping.GratuitousARPOverIface(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send gratuitous ARP", "ip", ip)
+		}
+	} else {
+		klog.V(2).InfoS("Sending neighbor advertisement", "ip", ip)
+		if err := ndp.GratuitousNDPOverIface(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send neighbor advertisement", "ip", ip)
+		}
+	}
 }
