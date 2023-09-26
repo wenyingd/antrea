@@ -89,3 +89,10 @@ func (f *featurePodConnectivity) l3FwdFlowToRemoteViaRouting(localGatewayMAC net
 	peerPodCIDR *net.IPNet) []binding.Flow {
 	return []binding.Flow{f.l3FwdFlowToRemoteViaGW(localGatewayMAC, *peerPodCIDR)}
 }
+
+func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow {
+	cookieID := f.cookieAllocator.Request(f.category).Raw()
+	return []binding.Flow{
+		f.snatIPFromTunnelFlow(cookieID, snatIP, mark),
+	}
+}

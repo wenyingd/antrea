@@ -878,6 +878,17 @@ func (c *client) Initialize(roundInfo types.RoundInfo,
 // generatePipelines generates table list for every pipeline from all activated features. Note that, tables are not realized
 // in OVS bridge in this function.
 func (c *client) generatePipelines() {
+	dnatCtZones := make(map[binding.Protocol]int)
+	snatCtZones := make(map[binding.Protocol]int)
+	for _, ipProtocol := range c.ipProtocols {
+		if ipProtocol == binding.ProtocolIP {
+			dnatCtZones[ipProtocol] = CtZone
+			snatCtZones[ipProtocol] = SNATCtZone
+		} else {
+			dnatCtZones[ipProtocol] = CtZoneV6
+			snatCtZones[ipProtocol] = SNATCtZoneV6
+		}
+	}
 	if c.nodeType == config.K8sNode {
 		c.featurePodConnectivity = newFeaturePodConnectivity(c.cookieAllocator,
 			c.ipProtocols,
@@ -902,7 +913,9 @@ func (c *client) generatePipelines() {
 			c.enableProxy,
 			c.proxyAll,
 			c.enableDSR,
-			c.connectUplinkToBridge)
+			c.connectUplinkToBridge,
+			dnatCtZones,
+			snatCtZones)
 		c.activatedFeatures = append(c.activatedFeatures, c.featureService)
 		c.traceableFeatures = append(c.traceableFeatures, c.featureService)
 	}
@@ -929,7 +942,7 @@ func (c *client) generatePipelines() {
 	c.traceableFeatures = append(c.traceableFeatures, c.featureNetworkPolicy)
 
 	if c.enableEgress {
-		c.featureEgress = newFeatureEgress(c.cookieAllocator, c.ipProtocols, c.nodeConfig, c.egressConfig)
+		c.featureEgress = newFeatureEgress(c.cookieAllocator, c.ipProtocols, c.nodeConfig, c.egressConfig, dnatCtZones, snatCtZones)
 		c.activatedFeatures = append(c.activatedFeatures, c.featureEgress)
 	}
 
@@ -1006,11 +1019,12 @@ func (c *client) InstallSNATBypassServiceFlows(serviceCIDRs []*net.IPNet) error 
 }
 
 func (c *client) InstallSNATMarkFlows(snatIP net.IP, mark uint32) error {
-	flow := c.featureEgress.snatIPFromTunnelFlow(snatIP, mark)
+	flows := c.featureEgress.snatMarkFlows(snatIP, mark)
+
 	cacheKey := fmt.Sprintf("s%x", mark)
 	c.replayMutex.RLock()
 	defer c.replayMutex.RUnlock()
-	return c.addFlows(c.featureEgress.cachedFlows, cacheKey, []binding.Flow{flow})
+	return c.addFlows(c.featureEgress.cachedFlows, cacheKey, flows)
 }
 
 func (c *client) UninstallSNATMarkFlows(mark uint32) error {

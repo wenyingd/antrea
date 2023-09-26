@@ -30,9 +30,15 @@ type featureEgress struct {
 
 	cachedFlows *flowCategoryCache
 
-	exceptCIDRs map[binding.Protocol][]net.IPNet
-	nodeIPs     map[binding.Protocol]net.IP
-	gatewayMAC  net.HardwareAddr
+	exceptCIDRs   map[binding.Protocol][]net.IPNet
+	nodeIPs       map[binding.Protocol]net.IP
+	gatewayMAC    net.HardwareAddr
+	uplinkMAC     *net.HardwareAddr
+	uplinkPort    uint32
+	hostIfacePort uint32
+
+	dnatCtZones map[binding.Protocol]int
+	snatCtZones map[binding.Protocol]int
 
 	category cookie.Category
 }
@@ -44,7 +50,10 @@ func (f *featureEgress) getFeatureName() string {
 func newFeatureEgress(cookieAllocator cookie.Allocator,
 	ipProtocols []binding.Protocol,
 	nodeConfig *config.NodeConfig,
-	egressConfig *config.EgressConfig) *featureEgress {
+	egressConfig *config.EgressConfig,
+	dnatCtZones map[binding.Protocol]int,
+	snatCtZones map[binding.Protocol]int,
+) *featureEgress {
 	exceptCIDRs := make(map[binding.Protocol][]net.IPNet)
 	for _, cidr := range egressConfig.ExceptCIDRs {
 		if cidr.IP.To4() == nil {
@@ -62,6 +71,15 @@ func newFeatureEgress(cookieAllocator cookie.Allocator,
 			nodeIPs[ipProtocol] = nodeConfig.NodeIPv6Addr.IP
 		}
 	}
+
+	var uplinkMAC *net.HardwareAddr
+	var uplinkPort, hostIfacePort uint32
+	if nodeConfig.UplinkNetConfig != nil {
+		uplinkMAC = &nodeConfig.UplinkNetConfig.MAC
+		uplinkPort = nodeConfig.UplinkNetConfig.OFPort
+		hostIfacePort = nodeConfig.HostInterfaceOFPort
+	}
+
 	return &featureEgress{
 		cachedFlows:     newFlowCategoryCache(),
 		cookieAllocator: cookieAllocator,
@@ -69,6 +87,11 @@ func newFeatureEgress(cookieAllocator cookie.Allocator,
 		ipProtocols:     ipProtocols,
 		nodeIPs:         nodeIPs,
 		gatewayMAC:      nodeConfig.GatewayConfig.MAC,
+		uplinkMAC:       uplinkMAC,
+		uplinkPort:      uplinkPort,
+		hostIfacePort:   hostIfacePort,
+		dnatCtZones:     dnatCtZones,
+		snatCtZones:     snatCtZones,
 		category:        cookie.Egress,
 	}
 }

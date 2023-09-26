@@ -475,8 +475,8 @@ func (c *EgressController) realizeEgressIP(egressName, egressIP string) (uint32,
 			ipState.flowsInstalled = true
 		}
 		if !ipState.ruleInstalled {
-			if err := c.routeClient.AddSNATRule(ipState.egressIP, ipState.mark); err != nil {
-				return 0, fmt.Errorf("error installing SNAT rule for IP %s: %v", ipState.egressIP, err)
+			if err := c.addSNATRule(ipState); err != nil {
+				return 0, err
 			}
 			ipState.ruleInstalled = true
 		}

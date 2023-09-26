@@ -1530,10 +1530,9 @@ func (f *featurePodConnectivity) l3FwdFlowToRemoteViaUplink(remoteGatewayMAC net
 		Done()
 }
 
-// arpResponderFlow generates the flow to reply to the ARP request with a MAC address for the target IP address.
-func (f *featurePodConnectivity) arpResponderFlow(ipAddr net.IP, macAddr net.HardwareAddr) binding.Flow {
+func arpResponderFlow(cookieID uint64, ipAddr net.IP, macAddr net.HardwareAddr) binding.Flow {
 	return ARPResponderTable.ofTable.BuildFlow(priorityNormal).
-		Cookie(f.cookieAllocator.Request(f.category).Raw()).
+		Cookie(cookieID).
 		MatchProtocol(binding.ProtocolARP).
 		MatchARPOp(arpOpRequest).
 		MatchARPTpa(ipAddr).
@@ -1546,6 +1545,12 @@ func (f *featurePodConnectivity) arpResponderFlow(ipAddr net.IP, macAddr net.Har
 		Action().SetARPSpa(ipAddr).
 		Action().OutputInPort().
 		Done()
+}
+
+// arpResponderFlow generates the flow to reply to the ARP request with a MAC address for the target IP address.
+func (f *featurePodConnectivity) arpResponderFlow(ipAddr net.IP, macAddr net.HardwareAddr) binding.Flow {
+	cookieID := f.cookieAllocator.Request(f.category).Raw()
+	return arpResponderFlow(cookieID, ipAddr, macAddr)
 }
 
 // arpResponderStaticFlow generates the flow to reply to any ARP request with the same global virtual MAC. It is used
@@ -2309,10 +2314,10 @@ func (f *featureEgress) snatSkipNodeFlow(nodeIP net.IP) binding.Flow {
 
 // snatIPFromTunnelFlow generates the flow that marks SNAT packets tunnelled from remote Nodes. The SNAT IP matches the
 // packet's tunnel destination IP.
-func (f *featureEgress) snatIPFromTunnelFlow(snatIP net.IP, mark uint32) binding.Flow {
+func (f *featureEgress) snatIPFromTunnelFlow(cookieID uint64, snatIP net.IP, mark uint32) binding.Flow {
 	ipProtocol := getIPProtocol(snatIP)
 	return EgressMarkTable.ofTable.BuildFlow(priorityNormal).
-		Cookie(f.cookieAllocator.Request(f.category).Raw()).
+		Cookie(cookieID).
 		MatchProtocol(ipProtocol).
 		MatchCTStateNew(true).
 		MatchCTStateTrk(true).
@@ -2732,6 +2737,37 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 		// This generates the flows to bypass the packets sourced from local Pods and destined for the except CIDRs for Egress.
 		for _, cidr := range f.exceptCIDRs[ipProtocol] {
 			flows = append(flows, f.snatSkipCIDRFlow(cidr))
+		}
+		if runtime.IsWindowsPlatform() {
+			for _, ipProto := range f.ipProtocols {
+				flows = append(flows,
+					// Perform SNAT on the subsequent request packet in a connection which is marked with EgressSNATCTMark.
+					SNATTable.ofTable.BuildFlow(priorityNormal).
+						Cookie(cookieID).
+						MatchProtocol(ipProto).
+						MatchCTMark(EgressSNATCTMark).
+						MatchCTStateNew(false).
+						MatchCTStateTrk(true).
+						MatchCTStateRpl(false).
+						Action().CT(false, SNATTable.GetNext(), f.snatCtZones[ipProto], nil).
+						NAT().
+						CTDone().
+						Done())
+			}
+			// Output the request packet to OVS bridge interface in a connection which is marked with EgressSNATCTMark.
+			// This is to avoid the Windows stateless SNAT operations configured on antrea-gw0.
+			flows = append(flows,
+				L2ForwardingCalcTable.ofTable.BuildFlow(priorityHigh).
+					Cookie(cookieID).
+					MatchCTStateRpl(false).
+					MatchCTStateTrk(true).
+					MatchCTMark(EgressSNATCTMark).
+					Action().SetDstMAC(*f.uplinkMAC).
+					Action().LoadToRegField(TargetOFPortField, f.hostIfacePort).
+					Action().LoadRegMark(OutputToOFPortRegMark).
+					Action().GotoStage(stageIngressSecurity).
+					Done(),
+			)
 		}
 	}
 	// This generates the flow to match the packets of tracked Egress connection and forward them to stageSwitching.

@@ -14,8 +14,27 @@
 
 package ipassigner
 
-import "errors"
+type dummyInterfaceType *struct{}
 
-func NewIPAssigner(nodeTransportInterface string, dummyDeviceName string) (IPAssigner, error) {
-	return nil, errors.New("IPAssigner is not implemented on Windows")
+// getARPIgnoreForInterface returns 0 on Windows because the ARP query is responded via OpenFlow entries statically,
+// and no need to run an userspace responder.
+func getARPIgnoreForInterface(iface string) (int, error) {
+	return 1, nil
+}
+
+// ensureDummyDevice creates the dummy device if it doesn't exist.
+func ensureDummyDevice(deviceName string) (dummyInterfaceType, error) {
+	return nil, nil
+}
+
+func (a *ipAssigner) addIPOnDummy(parsedIP net.IP) error {
+	return nil
+}
+
+func (a *ipAssigner) deleteIPFromDummy(parsedIP net.IP) error {
+	return nil
+}
+
+func (a *ipAssigner) syncIPsOnDummy(ips sets.Set[string]) error {
+	return nil
 }

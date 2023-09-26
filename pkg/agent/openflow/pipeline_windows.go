@@ -106,3 +106,60 @@ func (f *featurePodConnectivity) l3FwdFlowToRemoteViaRouting(localGatewayMAC net
 	}
 	return flows
 }
+
+func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow {
+	cookieID := f.cookieAllocator.Request(f.category).Raw()
+	flows := []binding.Flow{f.snatIPFromTunnelFlow(cookieID, snatIP, mark)}
+	for _, ipProto := range f.ipProtocols {
+		flows = append(flows,
+			// Commit the new connection into DNAT conntrack zone and set with EgressSNATCTMark if it is configured
+			// with pkt_mark.
+			SNATMarkTable.ofTable.BuildFlow(priorityNormal).
+				Cookie(cookieID).
+				MatchProtocol(ipProto).
+				MatchCTStateNew(true).
+				MatchCTStateTrk(true).
+				MatchPktMark(mark, &mark).
+				Action().CT(true, SNATMarkTable.GetNext(), f.dnatCtZones[ipProto], nil).
+				LoadToCtMark(EgressSNATCTMark).
+				CTDone().
+				Done(),
+			// Perform SNAT on the packet with the corresponding snatIP if mark is set. In the meanwhile,
+			// EgressSNATCTMark is set on the packet which is consumed in L2Forwarding table.
+			SNATTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProto).
+				MatchCTStateNew(true).
+				MatchCTStateTrk(true).
+				MatchPktMark(mark, &mark).
+				Action().CT(true, SNATTable.GetNext(), f.snatCtZones[ipProto], nil).
+				SNAT(&binding.IPRange{StartIP: snatIP, EndIP: snatIP}, nil).
+				LoadToCtMark(EgressSNATCTMark).
+				CTDone().
+				Done(),
+			// Enforce the reply packet into OVS pipeline if it is destined at the Egress snatIP and enters
+			// OVS from the uplink interface.
+			ClassifierTable.ofTable.BuildFlow(priorityHigh).
+				Cookie(cookieID).
+				MatchProtocol(ipProto).
+				MatchInPort(f.uplinkPort).
+				MatchDstIP(snatIP).
+				Action().LoadRegMark(FromUplinkRegMark, RewriteMACRegMark).
+				Action().GotoStage(stageConntrackState).
+				Done(),
+			// Perform unSNAT on the reply packet if it is destined at the Egress snatIP.
+			UnSNATTable.ofTable.BuildFlow(priorityNormal).
+				Cookie(cookieID).
+				MatchProtocol(ipProto).
+				MatchDstIP(snatIP).
+				Action().CT(false, UnSNATTable.GetNext(), f.snatCtZones[ipProto], nil).
+				NAT().
+				CTDone().
+				Done(),
+		)
+		if ipProto == binding.ProtocolIP {
+			flows = append(flows, arpResponderFlow(cookieID, snatIP, *f.uplinkMAC))
+		}
+	}
+	return flows
+}

@@ -73,12 +73,13 @@ func newFeatureService(
 	enableProxy,
 	proxyAll,
 	enableDSR,
-	connectUplinkToBridge bool) *featureService {
+	connectUplinkToBridge bool,
+	dnatCtZones map[binding.Protocol]int,
+	snatCtZones map[binding.Protocol]int,
+) *featureService {
 	gatewayIPs := make(map[binding.Protocol]net.IP)
 	virtualIPs := make(map[binding.Protocol]net.IP)
 	virtualNodePortDNATIPs := make(map[binding.Protocol]net.IP)
-	dnatCtZones := make(map[binding.Protocol]int)
-	snatCtZones := make(map[binding.Protocol]int)
 	nodePortAddresses := make(map[binding.Protocol][]net.IP)
 	serviceCIDRs := make(map[binding.Protocol]net.IPNet)
 	localCIDRs := make(map[binding.Protocol]net.IPNet)
@@ -87,8 +88,6 @@ func newFeatureService(
 			gatewayIPs[ipProtocol] = nodeConfig.GatewayConfig.IPv4
 			virtualIPs[ipProtocol] = config.VirtualServiceIPv4
 			virtualNodePortDNATIPs[ipProtocol] = config.VirtualNodePortDNATIPv4
-			dnatCtZones[ipProtocol] = CtZone
-			snatCtZones[ipProtocol] = SNATCtZone
 			nodePortAddresses[ipProtocol] = serviceConfig.NodePortAddressesIPv4
 			if serviceConfig.ServiceCIDR != nil {
 				serviceCIDRs[ipProtocol] = *serviceConfig.ServiceCIDR
@@ -100,8 +99,6 @@ func newFeatureService(
 			gatewayIPs[ipProtocol] = nodeConfig.GatewayConfig.IPv6
 			virtualIPs[ipProtocol] = config.VirtualServiceIPv6
 			virtualNodePortDNATIPs[ipProtocol] = config.VirtualNodePortDNATIPv6
-			dnatCtZones[ipProtocol] = CtZoneV6
-			snatCtZones[ipProtocol] = SNATCtZoneV6
 			nodePortAddresses[ipProtocol] = serviceConfig.NodePortAddressesIPv6
 			if serviceConfig.ServiceCIDRv6 != nil {
 				serviceCIDRs[ipProtocol] = *serviceConfig.ServiceCIDRv6

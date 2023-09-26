@@ -214,6 +214,10 @@ var (
 	// for L7 NetworkPolicy.
 	// This CT mark is used in CtZone / CtZoneV6.
 	L7NPRedirectCTMark = binding.NewOneBitCTMark(7)
+
+	// CTMark[8]: Mark to indicate SNAT is performed on the connection for Egress.
+	// This CT mark is used in CtZone / CtZoneV6.
+	EgressSNATCTMark = binding.NewOneBitCTMark(8)
 )
 
 // Fields using CT label.

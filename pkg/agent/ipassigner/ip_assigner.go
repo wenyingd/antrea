@@ -14,7 +14,20 @@
 
 package ipassigner
 
-import "k8s.io/apimachinery/pkg/util/sets"
+import (
+	"fmt"
+	"net"
+	"sync"
+
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
+
+	"antrea.io/antrea/pkg/agent/ipassigner/responder"
+	"antrea.io/antrea/pkg/agent/util"
+	"antrea.io/antrea/pkg/agent/util/arping"
+	"antrea.io/antrea/pkg/agent/util/ndp"
+)
 
 // IPAssigner provides methods to assign or unassign IP.
 type IPAssigner interface {
@@ -28,4 +41,204 @@ type IPAssigner interface {
 	InitIPs(sets.Set[string]) error
 	// Run starts the IP assigner.
 	Run(<-chan struct{})
+}
+
+// ipAssigner creates a dummy device and assigns IPs to it.
+// It's supposed to be used in the cases that external IPs should be configured on the system so that they can be used
+// for SNAT (egress scenario) or DNAT (ingress scenario). A dummy device is used because the IPs just need to be present
+// in any device to be functional, and using dummy device avoids touching system managed devices and is easy to know IPs
+// that are assigned by antrea-agent.
+type ipAssigner struct {
+	// externalInterface is the device that GARP (IPv4) and Unsolicited NA (IPv6) will be sent from.
+	externalInterface *net.Interface
+	// dummyDevice is the device that IPs will be assigned to.
+	dummyDevice dummyInterfaceType
+	// assignIPs caches the IPs that are assigned to the dummy device.
+	// TODO: Add a goroutine to ensure that the cache is in sync with the IPs assigned to the dummy device in case the
+	// IPs are removed by users accidentally.
+	assignedIPs  sets.Set[string]
+	mutex        sync.RWMutex
+	arpResponder responder.Responder
+	ndpResponder responder.Responder
+}
+
+func (a *ipAssigner) advertise(ip net.IP) {
+	if utilnet.IsIPv4(ip) {
+		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)
+		if err := arping.GratuitousARPOverIface(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send gratuitous ARP", "ip", ip)
+		}
+	} else {
+		klog.V(2).InfoS("Sending neighbor advertisement", "ip", ip)
+		if err := ndp.NeighborAdvertisement(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send neighbor advertisement", "ip", ip)
+		}
+	}
+}
+
+// NewIPAssigner returns an *ipAssigner.
+func NewIPAssigner(nodeTransportInterface string, dummyDeviceName string) (IPAssigner, error) {
+	ipv4, ipv6, externalInterface, err := util.GetIPNetDeviceByName(nodeTransportInterface)
+	if err != nil {
+		return nil, fmt.Errorf("get IPNetDevice from name %s error: %+v", nodeTransportInterface, err)
+	}
+	a := &ipAssigner{
+		externalInterface: externalInterface,
+		assignedIPs:       sets.New[string](),
+	}
+	if ipv4 != nil {
+		// For the Egress scenario, the external IPs should always be present on the dummy
+		// interface as they are used as tunnel endpoints. If arp_ignore is set to a value
+		// other than 0, the host will not reply to ARP requests received on the transport
+		// interface when the target IPs are assigned on the dummy interface. So a userspace
+		// ARP responder is needed to handle ARP requests for the Egress IPs.
+		arpIgnore, err := getARPIgnoreForInterface(externalInterface.Name)
+		if err != nil {
+			return nil, err
+		}
+		if dummyDeviceName == "" || arpIgnore > 0 {
+			arpResponder, err := responder.NewARPResponder(externalInterface)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create ARP responder for link %s: %v", externalInterface.Name, err)
+			}
+			a.arpResponder = arpResponder
+		}
+	}
+	if ipv6 != nil {
+		ndpResponder, err := responder.NewNDPResponder(externalInterface)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create NDP responder for link %s: %v", externalInterface.Name, err)
+		}
+		a.ndpResponder = ndpResponder
+	}
+	if dummyDeviceName != "" {
+		dummyDevice, err := ensureDummyDevice(dummyDeviceName)
+		if err != nil {
+			return nil, fmt.Errorf("error when ensuring dummy device exists: %v", err)
+		}
+		a.dummyDevice = dummyDevice
+	}
+	return a, nil
+}
+
+// AssignIP ensures the provided IP is assigned to the dummy device and the ARP/NDP responders.
+func (a *ipAssigner) AssignIP(ip string, forceAdvertise bool) error {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP %s", ip)
+	}
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	if a.assignedIPs.Has(ip) {
+		klog.V(2).InfoS("The IP is already assigned", "ip", ip)
+		if forceAdvertise {
+			a.advertise(parsedIP)
+		}
+		return nil
+	}
+
+	if a.dummyDevice != nil {
+		if err := a.addIPOnDummy(parsedIP); err != nil {
+			return err
+		}
+	}
+
+	if utilnet.IsIPv4(parsedIP) && a.arpResponder != nil {
+		if err := a.arpResponder.AddIP(parsedIP); err != nil {
+			return fmt.Errorf("failed to assign IP %v to ARP responder: %v", ip, err)
+		}
+	}
+	if utilnet.IsIPv6(parsedIP) && a.ndpResponder != nil {
+		if err := a.ndpResponder.AddIP(parsedIP); err != nil {
+			return fmt.Errorf("failed to assign IP %v to NDP responder: %v", ip, err)
+		}
+	}
+	// Always advertise the IP when the IP is newly assigned to this Node.
+	a.advertise(parsedIP)
+	a.assignedIPs.Insert(ip)
+	return nil
+}
+
+// UnassignIP ensures the provided IP is not assigned to the dummy device.
+func (a *ipAssigner) UnassignIP(ip string) error {
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return fmt.Errorf("invalid IP %s", ip)
+	}
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+
+	if !a.assignedIPs.Has(ip) {
+		klog.V(2).InfoS("The IP is not assigned", "ip", ip)
+		return nil
+	}
+
+	if a.dummyDevice != nil {
+		if err := a.deleteIPFromDummy(parsedIP); err != nil {
+			return err
+		}
+	}
+
+	if utilnet.IsIPv4(parsedIP) && a.arpResponder != nil {
+		if err := a.arpResponder.RemoveIP(parsedIP); err != nil {
+			return fmt.Errorf("failed to remove IP %v from ARP responder: %v", ip, err)
+		}
+	}
+	if utilnet.IsIPv6(parsedIP) && a.ndpResponder != nil {
+		if err := a.ndpResponder.RemoveIP(parsedIP); err != nil {
+			return fmt.Errorf("failed to remove IP %v from NDP responder: %v", ip, err)
+		}
+	}
+
+	a.assignedIPs.Delete(ip)
+	return nil
+}
+
+// AssignedIPs return the IPs that are assigned to the dummy device.
+func (a *ipAssigner) AssignedIPs() sets.Set[string] {
+	a.mutex.RLock()
+	defer a.mutex.RUnlock()
+	// Return a copy.
+	return a.assignedIPs.Union(nil)
+}
+
+// InitIPs loads the IPs from the dummy device and replaces the IPs that are assigned to it
+// with the given ones. This function also adds the given IPs to the ARP/NDP responder if
+// applicable. It can be used to recover the IP assigner to the desired state after Agent restarts.
+func (a *ipAssigner) InitIPs(ips sets.Set[string]) error {
+	a.mutex.Lock()
+	defer a.mutex.Unlock()
+	if a.dummyDevice != nil {
+		if err := a.syncIPsOnDummy(ips); err != nil {
+			return err
+		}
+	}
+	for ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		var err error
+		if utilnet.IsIPv4(ip) && a.arpResponder != nil {
+			err = a.arpResponder.AddIP(ip)
+		}
+		if utilnet.IsIPv6(ip) && a.ndpResponder != nil {
+			err = a.ndpResponder.AddIP(ip)
+		}
+		if err != nil {
+			return err
+		}
+		a.advertise(ip)
+	}
+	a.assignedIPs = ips.Union(nil)
+	return nil
+}
+
+// Run starts the ARP responder and NDP responder.
+func (a *ipAssigner) Run(ch <-chan struct{}) {
+	if a.arpResponder != nil {
+		go a.arpResponder.Run(ch)
+	}
+	if a.ndpResponder != nil {
+		go a.ndpResponder.Run(ch)
+	}
+	<-ch
 }

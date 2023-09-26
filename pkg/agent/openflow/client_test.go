@@ -2583,7 +2583,7 @@ func Test_client_ReplayFlows(t *testing.T) {
 	replayedFlows := make([]string, 0)
 	// Feature Egress replays flows.
 	snatIP := net.ParseIP("192.168.77.100")
-	addFlowInCache(fc.featureEgress.cachedFlows, "egressFlows", []binding.Flow{fc.featureEgress.snatIPFromTunnelFlow(snatIP, uint32(100))})
+	addFlowInCache(fc.featureEgress.cachedFlows, "egressFlows", fc.featureEgress.snatMarkFlows(snatIP, uint32(100)))
 	replayedFlows = append(replayedFlows,
 		"cookie=0x1040000000000, table=EgressMark, priority=200,ct_state=+new+trk,ip,tun_dst=192.168.77.100 actions=set_field:0x64/0xff->pkt_mark,set_field:0x20/0xf0->reg0,goto_table:L2ForwardingCalc",
 	)
