@@ -202,16 +202,8 @@ func NewCluster(
 	return c, nil
 }
 
-func shouldJoinCluster(node *corev1.Node) bool {
-	// non-Linux Nodes should not join the memberlist cluster as all features relying on it is only supported on Linux.
-	return linuxNodeSelector.Matches(labels.Set(node.Labels))
-}
-
 func (c *Cluster) handleCreateNode(obj interface{}) {
 	node := obj.(*corev1.Node)
-	if !shouldJoinCluster(node) {
-		return
-	}
 	// Ignore the Node itself.
 	if node.Name == c.nodeName {
 		return
@@ -244,9 +236,6 @@ func (c *Cluster) handleDeleteNode(obj interface{}) {
 			return
 		}
 	}
-	if !shouldJoinCluster(node) {
-		return
-	}
 	affectedEIPs := c.filterEIPsFromNodeLabels(node)
 	c.enqueueExternalIPPools(affectedEIPs)
 	klog.V(2).InfoS("Processed Node DELETE event", "nodeName", node.Name, "affectedExternalIPPoolNum", affectedEIPs.Len())
@@ -254,9 +243,6 @@ func (c *Cluster) handleDeleteNode(obj interface{}) {
 
 func (c *Cluster) handleUpdateNode(oldObj, newObj interface{}) {
 	node := newObj.(*corev1.Node)
-	if !shouldJoinCluster(node) {
-		return
-	}
 	oldNode := oldObj.(*corev1.Node)
 	if reflect.DeepEqual(node.GetLabels(), oldNode.GetLabels()) {
 		klog.V(2).InfoS("Processed Node UPDATE event, labels not changed", "nodeName", node.Name)
