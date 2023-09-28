@@ -185,7 +185,6 @@ func NewEgressController(
 		egressStates:         map[string]*egressState{},
 		egressIPStates:       map[string]*egressIPState{},
 		egressBindings:       map[string]*egressBinding{},
-		localIPDetector:      ipassigner.NewLocalIPDetector(),
 		idAllocator:          newIDAllocator(minEgressMark, maxEgressMark),
 		cluster:              cluster,
 		serviceCIDRInterface: serviceCIDRInterface,
@@ -198,6 +197,7 @@ func NewEgressController(
 		return nil, fmt.Errorf("initializing egressIP assigner failed: %v", err)
 	}
 	c.ipAssigner = ipAssigner
+	c.localIPDetector = ipassigner.NewLocalIPDetector(ipAssigner)
 
 	c.egressIPScheduler = NewEgressIPScheduler(cluster, egressInformer, nodeInformers, maxEgressIPsPerNode)
 

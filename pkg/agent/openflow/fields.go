@@ -55,6 +55,7 @@ var (
 	ToTunnelRegMark     = binding.NewRegMark(PktDestinationField, tunnelVal)
 	ToGatewayRegMark    = binding.NewRegMark(PktDestinationField, gatewayVal)
 	ToUplinkRegMark     = binding.NewRegMark(PktDestinationField, uplinkVal)
+	ToBridgeRegMark     = binding.NewRegMark(PktDestinationField, bridgeVal)
 	// reg0[9]: Field to indicate whether the packet's source / destination MAC address needs to be rewritten.
 	RewriteMACRegMark    = binding.NewOneBitRegMark(0, 9)
 	NotRewriteMACRegMark = binding.NewOneBitZeroRegMark(0, 9)
@@ -100,6 +101,9 @@ var (
 	// packetIn.TableId where the flow with "SendToController" action is located as we may install the packetIn flows
 	// in a single table, e.g., Antrea-native policy logging flows.
 	PacketInTableField = binding.NewRegField(2, 0, 7)
+	// Field to store the Egress mark which is used to map to the Egress IP. This field is only used on Windows as
+	// Windows OVS does not support field pkt_mark.
+	PacketMarkField = binding.NewRegField(2, 8, 15)
 
 	// reg3(NXM_NX_REG3)
 	// Field to store the selected Service Endpoint IP

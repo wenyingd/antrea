@@ -14,11 +14,21 @@
 
 package ipassigner
 
+import (
+	"sync"
+)
+
 // Not implemented yet. The feature gate verification will protect this from being run.
-type localIPDetector struct{}
+type localIPDetector struct {
+	mutex       sync.RWMutex
+	ipAssigner  IPAssigner
+	cacheSynced bool
+}
 
 func (d *localIPDetector) IsLocalIP(ip string) bool {
-	return false
+	d.mutex.RLock()
+	defer d.mutex.RUnlock()
+	return d.ipAssigner.AssignedIPs().Has(ip)
 }
 
 func (d *localIPDetector) Run(stopCh <-chan struct{}) {
@@ -30,9 +40,9 @@ func (d *localIPDetector) AddEventHandler(handler LocalIPEventHandler) {
 }
 
 func (d *localIPDetector) HasSynced() bool {
-	return false
+	return true
 }
 
-func NewLocalIPDetector() *localIPDetector {
-	return &localIPDetector{}
+func NewLocalIPDetector(assigner IPAssigner) *localIPDetector {
+	return &localIPDetector{ipAssigner: assigner}
 }

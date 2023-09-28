@@ -34,7 +34,7 @@ type localIPDetector struct {
 	eventHandlers []LocalIPEventHandler
 }
 
-func NewLocalIPDetector() *localIPDetector {
+func NewLocalIPDetector(assigner IPAssigner) *localIPDetector {
 	return &localIPDetector{localIPs: sets.New[string]()}
 }
 

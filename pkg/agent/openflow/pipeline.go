@@ -2312,22 +2312,6 @@ func (f *featureEgress) snatSkipNodeFlow(nodeIP net.IP) binding.Flow {
 		Done()
 }
 
-// snatIPFromTunnelFlow generates the flow that marks SNAT packets tunnelled from remote Nodes. The SNAT IP matches the
-// packet's tunnel destination IP.
-func (f *featureEgress) snatIPFromTunnelFlow(cookieID uint64, snatIP net.IP, mark uint32) binding.Flow {
-	ipProtocol := getIPProtocol(snatIP)
-	return EgressMarkTable.ofTable.BuildFlow(priorityNormal).
-		Cookie(cookieID).
-		MatchProtocol(ipProtocol).
-		MatchCTStateNew(true).
-		MatchCTStateTrk(true).
-		MatchTunnelDst(snatIP).
-		Action().LoadPktMarkRange(mark, snatPktMarkRange).
-		Action().LoadRegMark(ToGatewayRegMark).
-		Action().GotoStage(stageSwitching).
-		Done()
-}
-
 // snatRuleFlow generates the flow that applies the SNAT rule for a local Pod. If the SNAT IP exists on the local Node,
 // it sets the packet mark with the ID of the SNAT IP, for the traffic from local Pods to external; if the SNAT IP is
 // on a remote Node, it tunnels the packets to the remote Node.
@@ -2335,17 +2319,7 @@ func (f *featureEgress) snatRuleFlow(ofPort uint32, snatIP net.IP, snatMark uint
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	ipProtocol := getIPProtocol(snatIP)
 	if snatMark != 0 {
-		// Local SNAT IP.
-		return EgressMarkTable.ofTable.BuildFlow(priorityNormal).
-			Cookie(cookieID).
-			MatchProtocol(ipProtocol).
-			MatchCTStateNew(true).
-			MatchCTStateTrk(true).
-			MatchInPort(ofPort).
-			Action().LoadPktMarkRange(snatMark, snatPktMarkRange).
-			Action().LoadRegMark(ToGatewayRegMark).
-			Action().GotoStage(stageSwitching).
-			Done()
+		return f.podLocalSNATFlow(cookieID, ipProtocol, ofPort, snatIP, snatMark)
 	}
 	// SNAT IP should be on a remote Node.
 	return EgressMarkTable.ofTable.BuildFlow(priorityNormal).
@@ -2741,6 +2715,17 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 		if runtime.IsWindowsPlatform() {
 			for _, ipProto := range f.ipProtocols {
 				flows = append(flows,
+					// Enforce the subsequent request packets in a connection which is marked with EgressSNATCTMark to
+					// go into SNATTable.
+					EgressMarkTable.ofTable.BuildFlow(priorityNormal).
+						Cookie(cookieID).
+						MatchProtocol(ipProto).
+						MatchCTMark(EgressSNATCTMark).
+						MatchCTStateNew(false).
+						MatchCTStateTrk(true).
+						MatchCTStateRpl(false).
+						Action().NextTable().
+						Done(),
 					// Perform SNAT on the subsequent request packet in a connection which is marked with EgressSNATCTMark.
 					SNATTable.ofTable.BuildFlow(priorityNormal).
 						Cookie(cookieID).
@@ -2749,6 +2734,7 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 						MatchCTStateNew(false).
 						MatchCTStateTrk(true).
 						MatchCTStateRpl(false).
+						Action().LoadRegMark(ToBridgeRegMark).
 						Action().CT(false, SNATTable.GetNext(), f.snatCtZones[ipProto], nil).
 						NAT().
 						CTDone().
@@ -2759,9 +2745,7 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 			flows = append(flows,
 				L2ForwardingCalcTable.ofTable.BuildFlow(priorityHigh).
 					Cookie(cookieID).
-					MatchCTStateRpl(false).
-					MatchCTStateTrk(true).
-					MatchCTMark(EgressSNATCTMark).
+					MatchRegMark(ToBridgeRegMark).
 					Action().SetDstMAC(*f.uplinkMAC).
 					Action().LoadToRegField(TargetOFPortField, f.hostIfacePort).
 					Action().LoadRegMark(OutputToOFPortRegMark).

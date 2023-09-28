@@ -119,7 +119,7 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 				MatchProtocol(ipProto).
 				MatchCTStateNew(true).
 				MatchCTStateTrk(true).
-				MatchPktMark(mark, &mark).
+				MatchRegFieldWithValue(PacketMarkField, mark).
 				Action().CT(true, SNATMarkTable.GetNext(), f.dnatCtZones[ipProto], nil).
 				LoadToCtMark(EgressSNATCTMark).
 				CTDone().
@@ -131,10 +131,10 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 				MatchProtocol(ipProto).
 				MatchCTStateNew(true).
 				MatchCTStateTrk(true).
-				MatchPktMark(mark, &mark).
+				MatchRegFieldWithValue(PacketMarkField, mark).
+				Action().LoadRegMark(ToBridgeRegMark).
 				Action().CT(true, SNATTable.GetNext(), f.snatCtZones[ipProto], nil).
 				SNAT(&binding.IPRange{StartIP: snatIP, EndIP: snatIP}, nil).
-				LoadToCtMark(EgressSNATCTMark).
 				CTDone().
 				Done(),
 			// Enforce the reply packet into OVS pipeline if it is destined at the Egress snatIP and enters
@@ -144,7 +144,7 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 				MatchProtocol(ipProto).
 				MatchInPort(f.uplinkPort).
 				MatchDstIP(snatIP).
-				Action().LoadRegMark(FromUplinkRegMark, RewriteMACRegMark).
+				Action().LoadRegMark(RewriteMACRegMark, FromUplinkRegMark).
 				Action().GotoStage(stageConntrackState).
 				Done(),
 			// Perform unSNAT on the reply packet if it is destined at the Egress snatIP.
@@ -158,8 +158,43 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 				Done(),
 		)
 		if ipProto == binding.ProtocolIP {
-			flows = append(flows, arpResponderFlow(cookieID, snatIP, *f.uplinkMAC))
+			flows = append(flows,
+				ARPSpoofGuardTable.ofTable.BuildFlow(priorityHigh).
+					Cookie(cookieID).
+					MatchInPort(f.uplinkPort).
+					MatchProtocol(binding.ProtocolARP).
+					MatchARPTpa(snatIP).
+					Action().NextTable().
+					Done(),
+				arpResponderFlow(cookieID, snatIP, *f.uplinkMAC))
 		}
 	}
 	return flows
+}
+
+func (f *featureEgress) podLocalSNATFlow(cookieID uint64, ipProtocol binding.Protocol, ofPort uint32, snatIP net.IP, snatMark uint32) binding.Flow {
+	return EgressMarkTable.ofTable.BuildFlow(priorityNormal).
+		Cookie(cookieID).
+		MatchProtocol(ipProtocol).
+		MatchCTStateNew(true).
+		MatchCTStateTrk(true).
+		MatchInPort(ofPort).
+		Action().LoadToRegField(PacketMarkField, snatMark).
+		Action().NextTable().
+		Done()
+}
+
+// snatIPFromTunnelFlow generates the flow that marks SNAT packets tunnelled from remote Nodes. The SNAT IP matches the
+// packet's tunnel destination IP.
+func (f *featureEgress) snatIPFromTunnelFlow(cookieID uint64, snatIP net.IP, mark uint32) binding.Flow {
+	ipProtocol := getIPProtocol(snatIP)
+	return EgressMarkTable.ofTable.BuildFlow(priorityNormal).
+		Cookie(cookieID).
+		MatchProtocol(ipProtocol).
+		MatchCTStateNew(true).
+		MatchCTStateTrk(true).
+		MatchTunnelDst(snatIP).
+		Action().LoadToRegField(PacketMarkField, mark).
+		Action().NextTable().
+		Done()
 }
