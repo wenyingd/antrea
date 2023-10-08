@@ -2747,9 +2747,8 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 					Cookie(cookieID).
 					MatchRegMark(ToBridgeRegMark).
 					Action().SetDstMAC(*f.uplinkMAC).
-					Action().LoadToRegField(TargetOFPortField, f.hostIfacePort).
-					Action().LoadRegMark(OutputToOFPortRegMark).
-					Action().GotoStage(stageIngressSecurity).
+					// hack to ensure output packet to bridge interface
+					Action().Output(f.hostIfacePort).
 					Done(),
 			)
 		}
