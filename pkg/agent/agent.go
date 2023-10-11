@@ -798,7 +798,7 @@ func (i *Initializer) setupDefaultTunnelInterface() error {
 	localIP := i.getTunnelPortLocalIP()
 	localIPStr := ""
 	if localIP != nil {
-		localIPStr = localIP.String()
+		localIPStr = "flow"
 	}
 
 	// The correct OVS tunnel type to use GRE with an IPv6 overlay is
@@ -831,7 +831,7 @@ func (i *Initializer) setupDefaultTunnelInterface() error {
 			tunnelIface.TunnelInterfaceConfig.Type == i.networkConfig.TunnelType &&
 			tunnelIface.TunnelInterfaceConfig.DestinationPort == i.networkConfig.TunnelPort &&
 			tunnelIface.TunnelInterfaceConfig.LocalIP.Equal(localIP) {
-			klog.V(2).Infof("Tunnel port %s already exists on OVS bridge", tunnelPortName)
+			klog.V(2).InfoS("Tunnel port already exists on OVS bridge", "portName", tunnelPortName)
 			if shouldEnableCsum != tunnelIface.TunnelInterfaceConfig.Csum {
 				klog.InfoS("Updating csum for tunnel port", "port", tunnelPortName, "csum", shouldEnableCsum)
 				if err := i.setTunnelCsum(tunnelPortName, shouldEnableCsum); err != nil {
@@ -840,6 +840,7 @@ func (i *Initializer) setupDefaultTunnelInterface() error {
 				tunnelIface.TunnelInterfaceConfig.Csum = shouldEnableCsum
 			}
 			i.nodeConfig.TunnelOFPort = uint32(tunnelIface.OFPort)
+			i.nodeConfig.TunnelLocalIP = localIP
 			return nil
 		}
 
@@ -885,6 +886,7 @@ func (i *Initializer) setupDefaultTunnelInterface() error {
 		tunnelIface = interfacestore.NewTunnelInterface(tunnelPortName, i.networkConfig.TunnelType, i.networkConfig.TunnelPort, localIP, shouldEnableCsum, ovsPortConfig)
 		i.ifaceStore.AddInterface(tunnelIface)
 		i.nodeConfig.TunnelOFPort = uint32(tunPort)
+		i.nodeConfig.TunnelLocalIP = localIP
 	}
 	return nil
 }

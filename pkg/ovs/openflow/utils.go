@@ -402,6 +402,14 @@ func matchTunDstToString(field *openflow15.MatchField, isIPv6 bool) string {
 	return fmt.Sprintf("%s=%s", matchKey, getFieldDataString(field))
 }
 
+func matchTunSrcToString(field *openflow15.MatchField, isIPv6 bool) string {
+	matchKey := "tun_src"
+	if isIPv6 {
+		matchKey = "tun_ipv6_src"
+	}
+	return fmt.Sprintf("%s=%s", matchKey, getFieldDataString(field))
+}
+
 func matchTunIDToString(field *openflow15.MatchField) string {
 	return fmt.Sprintf("tun_id=%s", getFieldDataString(field))
 }
@@ -1013,6 +1021,12 @@ func getFlowModMatch(flowMod *openflow15.FlowMod) string {
 		parts = append(parts, matchTunDstToString(field, false))
 	}
 	if field, ok := matchMap["tun_ipv6_dst"]; ok {
+		parts = append(parts, matchTunDstToString(field, true))
+	}
+	if field, ok := matchMap["tun_src"]; ok {
+		parts = append(parts, matchTunSrcToString(field, false))
+	}
+	if field, ok := matchMap["tun_ipv6_src"]; ok {
 		parts = append(parts, matchTunDstToString(field, true))
 	}
 	if field, ok := matchMap["tun_id"]; ok {

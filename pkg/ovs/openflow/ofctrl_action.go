@@ -243,6 +243,13 @@ func (a *ofFlowAction) SetDstIP(addr net.IP) FlowBuilder {
 }
 
 // SetTunnelDst is an action to modify packet tunnel destination address to the specified address.
+func (a *ofFlowAction) SetTunnelSrc(addr net.IP) FlowBuilder {
+	setTunSrcAct := &ofctrl.SetTunnelSrcAction{IP: addr}
+	a.builder.ApplyAction(setTunSrcAct)
+	return a.builder
+}
+
+// SetTunnelDst is an action to modify packet tunnel destination address to the specified address.
 func (a *ofFlowAction) SetTunnelDst(addr net.IP) FlowBuilder {
 	setTunDstAct := &ofctrl.SetTunnelDstAction{IP: addr}
 	a.builder.ApplyAction(setTunDstAct)

@@ -86,12 +86,13 @@ func TestFlowModToString(t *testing.T) {
 					SetIdleTimeout(3600).
 					SetHardTimeout(3600).
 					Action().DecTTL().
+					Action().SetTunnelSrc(ipSrc).
 					Action().SetTunnelDst(tunDst).
 					Action().SetTunnelID(0x123456).
 					Action().NextTable().
 					Done()
 			},
-			expectedFlow: "cookie=0x12345678, table=1, idle_timeout=3600, hard_timeout=3600, priority=100,ip,in_port=3,dl_src=10:1a:1b:1c:1d:1f,dl_dst=20:2a:2b:2c:2d:2f actions=dec_ttl,set_field:192.10.20.30->tun_dst,set_field:1193046->tunnel_id,goto_table:2",
+			expectedFlow: "cookie=0x12345678, table=1, idle_timeout=3600, hard_timeout=3600, priority=100,ip,in_port=3,dl_src=10:1a:1b:1c:1d:1f,dl_dst=20:2a:2b:2c:2d:2f actions=dec_ttl,set_field:192.168.10.2->tun_src,set_field:192.10.20.30->tun_dst,set_field:1193046->tunnel_id,goto_table:2",
 		}, {
 			name: "Set VLAN",
 			flowFunc: func(fb *ofFlowBuilder) Flow {

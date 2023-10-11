@@ -139,7 +139,7 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 				Done(),
 			// Enforce the reply packet into OVS pipeline if it is destined at the Egress snatIP and enters
 			// OVS from the uplink interface.
-			ClassifierTable.ofTable.BuildFlow(priorityHigh).
+			SpoofGuardTable.ofTable.BuildFlow(priorityHigh).
 				Cookie(cookieID).
 				MatchProtocol(ipProto).
 				MatchInPort(f.uplinkPort).
@@ -159,7 +159,7 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 		)
 		if ipProto == binding.ProtocolIP {
 			flows = append(flows,
-				ARPSpoofGuardTable.ofTable.BuildFlow(priorityHigh).
+				ClassifierTable.ofTable.BuildFlow(priorityHigh).
 					Cookie(cookieID).
 					MatchInPort(f.uplinkPort).
 					MatchProtocol(binding.ProtocolARP).

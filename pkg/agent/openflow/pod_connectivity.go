@@ -39,6 +39,7 @@ type featurePodConnectivity struct {
 	uplinkPort    uint32
 	hostIfacePort uint32
 	tunnelPort    uint32
+	setTunnelSrc  bool
 	ctZones       map[binding.Protocol]int
 	localCIDRs    map[binding.Protocol]net.IPNet
 	nodeIPs       map[binding.Protocol]net.IP
@@ -115,6 +116,7 @@ func newFeaturePodConnectivity(
 		uplinkPort:            uplinkPort,
 		hostIfacePort:         nodeConfig.HostInterfaceOFPort,
 		tunnelPort:            nodeConfig.TunnelOFPort,
+		setTunnelSrc:          nodeConfig.TunnelLocalIP != nil,
 		ctZones:               ctZones,
 		localCIDRs:            localCIDRs,
 		nodeIPs:               nodeIPs,

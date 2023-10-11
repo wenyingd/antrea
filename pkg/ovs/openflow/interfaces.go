@@ -236,6 +236,7 @@ type Action interface {
 	SetSrcIP(addr net.IP) FlowBuilder
 	SetDstIP(addr net.IP) FlowBuilder
 	SetTunnelDst(addr net.IP) FlowBuilder
+	SetTunnelSrc(addr net.IP) FlowBuilder
 	SetTunnelID(tunnelID uint64) FlowBuilder
 	PopVLAN() FlowBuilder
 	PushVLAN(etherType uint16) FlowBuilder

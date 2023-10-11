@@ -164,6 +164,8 @@ type NodeConfig struct {
 	NodeTransportInterfaceMTU int
 	// TunnelOFPort is the OpenFlow port number of tunnel interface allocated by OVS. With noEncap mode, the value is 0.
 	TunnelOFPort uint32
+	// TunnelLocalIP is the IP address used as the source of tunnel. It is set only on Windows.
+	TunnelLocalIP net.IP
 	// HostInterfaceOFPort is the OpenFlow port number of the host interface allocated by OVS. The host interface is the
 	// one which the IP/MAC of the uplink is moved to. If the host interface is the OVS bridge interface (br-int), the
 	// value is config.BridgeOFPort.

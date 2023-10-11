@@ -1439,10 +1439,15 @@ func (f *featurePodConnectivity) l3FwdFlowsToRemoteViaTun(localGatewayMAC net.Ha
 			Cookie(f.cookieAllocator.Request(f.category).Raw()).
 			MatchProtocol(ipProtocol)
 		builder = matcher(builder)
-		return builder.
+		builder = builder.
 			Action().SetSrcMAC(localGatewayMAC).  // Rewrite src MAC to local gateway MAC.
 			Action().SetDstMAC(GlobalVirtualMAC). // Rewrite dst MAC to virtual MAC.
-			Action().SetTunnelDst(tunnelPeer).    // Flow based tunnel. Set tunnel destination.
+			Action().SetTunnelDst(tunnelPeer)     // Flow based tunnel. Set tunnel destination.
+		if f.setTunnelSrc {
+			localIP := f.nodeIPs[ipProtocol]
+			builder = builder.Action().SetTunnelSrc(localIP) // Flow based tunnel. Set tunnel source.
+		}
+		return builder.
 			Action().LoadRegMark(ToTunnelRegMark).
 			Action().GotoTable(L3DecTTLTable.GetID()).
 			Done()
