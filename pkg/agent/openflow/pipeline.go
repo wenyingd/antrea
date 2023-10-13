@@ -160,8 +160,9 @@ var (
 	L3DecTTLTable     = newTable("L3DecTTL", stageRouting, pipelineIP)
 
 	// Tables in stagePostRouting:
-	SNATMarkTable = newTable("SNATMark", stagePostRouting, pipelineIP)
-	SNATTable     = newTable("SNAT", stagePostRouting, pipelineIP)
+	SNATMarkTable    = newTable("SNATMark", stagePostRouting, pipelineIP)
+	SNATTable        = newTable("SNAT", stagePostRouting, pipelineIP)
+	SNATPredictTable = newTable("SNATPredict", stagePostRouting, pipelineIP)
 
 	// Tables in stageSwitching:
 	L2ForwardingCalcTable = newTable("L2ForwardingCalc", stageSwitching, pipelineIP)
@@ -1558,23 +1559,31 @@ func (f *featurePodConnectivity) arpResponderFlow(ipAddr net.IP, macAddr net.Har
 	return arpResponderFlow(cookieID, ipAddr, macAddr)
 }
 
-// arpResponderStaticFlow generates the flow to reply to any ARP request with the same global virtual MAC. It is used
-// in policy-only mode, where traffic are routed via IP not MAC.
-func (f *featurePodConnectivity) arpResponderStaticFlow() binding.Flow {
-	return ARPResponderTable.ofTable.BuildFlow(priorityNormal).
-		Cookie(f.cookieAllocator.Request(f.category).Raw()).
+func arpResponderStaticFlow(cookieID uint64, macAddr net.HardwareAddr, matchMutate func(builder binding.FlowBuilder) binding.FlowBuilder) binding.Flow {
+	builder := ARPResponderTable.ofTable.BuildFlow(priorityNormal).
+		Cookie(cookieID).
 		MatchProtocol(binding.ProtocolARP).
-		MatchARPOp(arpOpRequest).
-		Action().Move(binding.NxmFieldSrcMAC, binding.NxmFieldDstMAC).
-		Action().SetSrcMAC(GlobalVirtualMAC).
+		MatchARPOp(arpOpRequest)
+	if matchMutate != nil {
+		builder = matchMutate(builder)
+	}
+	return builder.Action().Move(binding.NxmFieldSrcMAC, binding.NxmFieldDstMAC).
+		Action().SetSrcMAC(macAddr).
 		Action().LoadARPOperation(arpOpReply).
 		Action().Move(binding.NxmFieldARPSha, binding.NxmFieldARPTha).
-		Action().SetARPSha(GlobalVirtualMAC).
+		Action().SetARPSha(macAddr).
 		Action().Move(binding.NxmFieldARPTpa, SwapField.GetNXFieldName()).
 		Action().Move(binding.NxmFieldARPSpa, binding.NxmFieldARPTpa).
 		Action().Move(SwapField.GetNXFieldName(), binding.NxmFieldARPSpa).
 		Action().OutputInPort().
 		Done()
+}
+
+// arpResponderStaticFlow generates the flow to reply to any ARP request with the same global virtual MAC. It is used
+// in policy-only mode, where traffic are routed via IP not MAC.
+func (f *featurePodConnectivity) arpResponderStaticFlow() binding.Flow {
+	cookieID := f.cookieAllocator.Request(f.category).Raw()
+	return arpResponderStaticFlow(cookieID, GlobalVirtualMAC, nil)
 }
 
 // podIPSpoofGuardFlow generates the flow to check IP packets from local Pods. Packets from the Antrea gateway will not be
@@ -2719,6 +2728,13 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 		}
 		if runtime.IsWindowsPlatform() {
 			for _, ipProto := range f.ipProtocols {
+				isIPv6 := true
+				if ipProto == binding.ProtocolIP {
+					flows = append(flows, arpResponderStaticFlow(cookieID, *f.uplinkMAC, func(builder binding.FlowBuilder) binding.FlowBuilder {
+						return builder.MatchRegMark(FromEgressRegMark)
+					}))
+					isIPv6 = false
+				}
 				flows = append(flows,
 					// Enforce the subsequent request packets in a connection which is marked with EgressSNATCTMark to
 					// go into SNATTable.
@@ -2731,7 +2747,7 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 						MatchCTStateRpl(false).
 						Action().NextTable().
 						Done(),
-					// Perform SNAT on the subsequent request packet in a connection which is marked with EgressSNATCTMark.
+					// Perform SNAT on the subsequent request packets in a connection which are marked with EgressSNATCTMark.
 					SNATTable.ofTable.BuildFlow(priorityNormal).
 						Cookie(cookieID).
 						MatchProtocol(ipProto).
@@ -2739,11 +2755,37 @@ func (f *featureEgress) externalFlows() []binding.Flow {
 						MatchCTStateNew(false).
 						MatchCTStateTrk(true).
 						MatchCTStateRpl(false).
-						Action().LoadRegMark(ToBridgeRegMark).
 						Action().CT(false, SNATTable.GetNext(), f.snatCtZones[ipProto], nil).
 						NAT().
 						CTDone().
-						Done())
+						Done(),
+					SNATPredictTable.ofTable.BuildFlow(priorityNormal).
+						Cookie(cookieID).
+						MatchProtocol(ipProto).
+						MatchCTMark(EgressSNATCTMark).
+						MatchCTStateRpl(false).
+						MatchCTStateTrk(true).
+						Action().LoadRegMark(ToBridgeRegMark).
+						Action().Learn(SpoofGuardTable.GetID(), priorityHigh, 10, 0, 0, 0, cookieID).
+						DeleteLearned().
+						MatchEthernetProtocol(isIPv6).
+						MatchSrcIPFromLearnedDst(isIPv6).
+						MatchDstIPFromLearnedSrc(isIPv6).
+						LoadRegMark(FromEgressRegMark).
+						Done().
+						Action().NextTable().
+						Done(),
+					// Perform unSNAT on the reply packet if it is destined at the Egress snatIP.
+					UnSNATTable.ofTable.BuildFlow(priorityNormal).
+						Cookie(cookieID).
+						MatchProtocol(ipProto).
+						MatchRegMark(FromEgressRegMark).
+						Action().LoadRegMark(RewriteMACRegMark).
+						Action().CT(false, UnSNATTable.GetNext(), f.snatCtZones[ipProto], nil).
+						NAT().
+						CTDone().
+						Done(),
+				)
 			}
 			// Output the request packet to OVS bridge interface in a connection which is marked with EgressSNATCTMark.
 			// This is to avoid the Windows stateless SNAT operations configured on antrea-gw0.
@@ -3061,6 +3103,11 @@ func (f *featurePodConnectivity) hostBridgeLocalFlows() []binding.Flow {
 	return []binding.Flow{
 		// This generates the flow to forward the packets from uplink port to bridge local port.
 		ClassifierTable.ofTable.BuildFlow(priorityNormal).
+			Cookie(cookieID).
+			MatchInPort(f.uplinkPort).
+			Action().ResubmitToTables(SpoofGuardTable.GetID(), UnSNATTable.GetID()).
+			Done(),
+		SpoofGuardTable.ofTable.BuildFlow(priorityNormal).
 			Cookie(cookieID).
 			MatchInPort(f.uplinkPort).
 			Action().Output(f.hostIfacePort).

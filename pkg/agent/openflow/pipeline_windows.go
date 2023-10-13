@@ -132,41 +132,22 @@ func (f *featureEgress) snatMarkFlows(snatIP net.IP, mark uint32) []binding.Flow
 				MatchCTStateNew(true).
 				MatchCTStateTrk(true).
 				MatchRegFieldWithValue(PacketMarkField, mark).
-				Action().LoadRegMark(ToBridgeRegMark).
 				Action().CT(true, SNATTable.GetNext(), f.snatCtZones[ipProto], nil).
 				SNAT(&binding.IPRange{StartIP: snatIP, EndIP: snatIP}, nil).
-				CTDone().
-				Done(),
-			// Enforce the reply packet into OVS pipeline if it is destined at the Egress snatIP and enters
-			// OVS from the uplink interface.
-			SpoofGuardTable.ofTable.BuildFlow(priorityHigh).
-				Cookie(cookieID).
-				MatchProtocol(ipProto).
-				MatchInPort(f.uplinkPort).
-				MatchDstIP(snatIP).
-				Action().LoadRegMark(RewriteMACRegMark, FromUplinkRegMark).
-				Action().GotoStage(stageConntrackState).
-				Done(),
-			// Perform unSNAT on the reply packet if it is destined at the Egress snatIP.
-			UnSNATTable.ofTable.BuildFlow(priorityNormal).
-				Cookie(cookieID).
-				MatchProtocol(ipProto).
-				MatchDstIP(snatIP).
-				Action().CT(false, UnSNATTable.GetNext(), f.snatCtZones[ipProto], nil).
-				NAT().
+				LoadToCtMark(EgressSNATCTMark).
 				CTDone().
 				Done(),
 		)
 		if ipProto == binding.ProtocolIP {
 			flows = append(flows,
-				ClassifierTable.ofTable.BuildFlow(priorityHigh).
+				ARPSpoofGuardTable.ofTable.BuildFlow(priorityHigh).
 					Cookie(cookieID).
 					MatchInPort(f.uplinkPort).
 					MatchProtocol(binding.ProtocolARP).
 					MatchARPTpa(snatIP).
+					Action().LoadRegMark(FromEgressRegMark).
 					Action().NextTable().
-					Done(),
-				arpResponderFlow(cookieID, snatIP, *f.uplinkMAC))
+					Done())
 		}
 	}
 	return flows

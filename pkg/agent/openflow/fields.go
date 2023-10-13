@@ -26,6 +26,7 @@ var (
 	uplinkVal   = uint32(4)
 	bridgeVal   = uint32(5)
 	tcReturnVal = uint32(6)
+	egressVal   = uint32(7)
 
 	outputToPortVal       = uint32(1)
 	outputToControllerVal = uint32(2)
@@ -38,6 +39,7 @@ var (
 	//   - 4: from uplink port.
 	//   - 5: from bridge local port.
 	//   - 6: from traffic control return port.
+	//   - 7: from Egress access scenario.
 	PktSourceField      = binding.NewRegField(0, 0, 3)
 	FromTunnelRegMark   = binding.NewRegMark(PktSourceField, tunnelVal)
 	FromGatewayRegMark  = binding.NewRegMark(PktSourceField, gatewayVal)
@@ -45,6 +47,7 @@ var (
 	FromUplinkRegMark   = binding.NewRegMark(PktSourceField, uplinkVal)
 	FromBridgeRegMark   = binding.NewRegMark(PktSourceField, bridgeVal)
 	FromTCReturnRegMark = binding.NewRegMark(PktSourceField, tcReturnVal)
+	FromEgressRegMark   = binding.NewRegMark(PktSourceField, egressVal)
 	// reg0[4..7]: Field to store the packet destination. Marks in this field include:
 	//   - 1: to tunnel port.
 	//   - 2: to Antrea gateway port.

@@ -17,13 +17,8 @@ package ipassigner
 import (
 	"net"
 
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/klog/v2"
-	utilnet "k8s.io/utils/net"
-
 	"antrea.io/antrea/pkg/agent/ipassigner/responder"
-	"antrea.io/antrea/pkg/agent/util/arping"
-	"antrea.io/antrea/pkg/agent/util/ndp"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 type dummyInterfaceType *struct{}
@@ -56,15 +51,5 @@ func getNDPResponder(externalInterface *net.Interface) (responder.Responder, err
 }
 
 func (a *ipAssigner) advertise(ip net.IP) {
-	if utilnet.IsIPv4(ip) {
-		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)
-		if err := arping.GratuitousARPOverIface(ip, a.externalInterface); err != nil {
-			klog.ErrorS(err, "Failed to send gratuitous ARP", "ip", ip)
-		}
-	} else {
-		klog.V(2).InfoS("Sending neighbor advertisement", "ip", ip)
-		if err := ndp.GratuitousNDPOverIface(ip, a.externalInterface); err != nil {
-			klog.ErrorS(err, "Failed to send neighbor advertisement", "ip", ip)
-		}
-	}
+	return
 }

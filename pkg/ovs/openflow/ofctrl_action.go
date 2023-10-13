@@ -570,6 +570,18 @@ func (a *ofLearnAction) MatchLearnedSrcIP(isIPv6 bool) LearnAction {
 	return a
 }
 
+// MatchSrcIPFromLearnedDst makes the learned flow use the nw_dst of current IP packet as nw_src.
+func (a *ofLearnAction) MatchSrcIPFromLearnedDst(isIPv6 bool) LearnAction {
+	matchRegName, fromRegName := NxmFieldSrcIPv4, NxmFieldDstIPv4
+	learnBits := uint16(4 * 8)
+	if isIPv6 {
+		matchRegName, fromRegName = NxmFieldSrcIPv6, NxmFieldDstIPv6
+		learnBits = 16 * 8
+	}
+	a.nxLearn.AddMatch(&ofctrl.LearnField{Name: matchRegName}, learnBits, &ofctrl.LearnField{Name: fromRegName}, nil)
+	return a
+}
+
 // MatchLearnedDstIP makes the learned flow match the nw_dst of current IP packet.
 func (a *ofLearnAction) MatchLearnedDstIP(isIPv6 bool) LearnAction {
 	regName := NxmFieldDstIPv4
@@ -579,6 +591,18 @@ func (a *ofLearnAction) MatchLearnedDstIP(isIPv6 bool) LearnAction {
 		learnBits = 16 * 8
 	}
 	a.nxLearn.AddMatch(&ofctrl.LearnField{Name: regName}, learnBits, &ofctrl.LearnField{Name: regName}, nil)
+	return a
+}
+
+// MatchDstIPFromLearnedSrc makes the learned flow use the nw_dst of current IP packet as nw_src.
+func (a *ofLearnAction) MatchDstIPFromLearnedSrc(isIPv6 bool) LearnAction {
+	matchRegName, fromRegName := NxmFieldDstIPv4, NxmFieldSrcIPv4
+	learnBits := uint16(4 * 8)
+	if isIPv6 {
+		matchRegName, fromRegName = NxmFieldDstIPv6, NxmFieldSrcIPv6
+		learnBits = 16 * 8
+	}
+	a.nxLearn.AddMatch(&ofctrl.LearnField{Name: matchRegName}, learnBits, &ofctrl.LearnField{Name: fromRegName}, nil)
 	return a
 }
 

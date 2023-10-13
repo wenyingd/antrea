@@ -282,6 +282,7 @@ func (f *featureEgress) getRequiredTables() []*Table {
 			UnSNATTable,
 			SNATMarkTable,
 			SNATTable,
+			SNATPredictTable,
 			L2ForwardingCalcTable,
 		)
 	}

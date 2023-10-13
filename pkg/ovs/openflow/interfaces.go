@@ -325,7 +325,9 @@ type LearnAction interface {
 	MatchLearnedDstPort(protocol Protocol) LearnAction
 	MatchLearnedSrcPort(protocol Protocol) LearnAction
 	MatchLearnedSrcIP(isIPv6 bool) LearnAction
+	MatchSrcIPFromLearnedDst(isIPv6 bool) LearnAction
 	MatchLearnedDstIP(isIPv6 bool) LearnAction
+	MatchDstIPFromLearnedSrc(isIPv6 bool) LearnAction
 	MatchRegMark(marks ...*RegMark) LearnAction
 	LoadRegMark(marks ...*RegMark) LearnAction
 	LoadFieldToField(fromField, toField *RegField) LearnAction
