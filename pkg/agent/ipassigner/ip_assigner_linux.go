@@ -149,14 +149,6 @@ func getARPResponder(dummyDeviceName string, externalInterface *net.Interface) (
 	return nil, nil
 }
 
-func getNDPResponder(externalInterface *net.Interface) (responder.Responder, error) {
-	rsp, err := responder.NewNDPResponder(externalInterface)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create NDP responder for link %s: %v", externalInterface.Name, err)
-	}
-	return rsp, nil
-}
-
 func (a *ipAssigner) advertise(ip net.IP) {
 	if utilnet.IsIPv4(ip) {
 		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)

@@ -233,6 +233,7 @@ func (i *Initializer) prepareOVSBridgeOnHNSNetwork() error {
 		if _, err = i.ovsBridgeClient.CreateInternalPort(brName, config.AutoAssignedOFPort, "", externalIDs); err != nil {
 			return err
 		}
+		i.nodeConfig.NodeTransportInterfaceName = brName
 	}
 
 	// If uplink is already exists, return.

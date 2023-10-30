@@ -3,9 +3,9 @@ package arping
 import (
 	"fmt"
 	"net"
-	"time"
 
-	"github.com/google/gopacket/pcap"
+	"github.com/mdlayher/arp"
+	"github.com/mdlayher/ethernet"
 	"k8s.io/klog/v2"
 )
 
@@ -17,17 +17,18 @@ func GratuitousARPOverIface(srcIP net.IP, iface *net.Interface) error {
 		return fmt.Errorf("IPv6 is not supported yet")
 	}
 
-	srcMac := iface.HardwareAddr
-	broadcastMac := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	request := newARPRequest(srcMac, ipv4, broadcastMac, ipv4)
-
-	handle, err := pcap.OpenLive(iface.Name, 65535, true, time.Second)
+	arpPacket, err := arp.NewPacket(arp.OperationRequest, iface.HardwareAddr, srcIP, ethernet.Broadcast, srcIP)
 	if err != nil {
-		klog.ErrorS(err, "Failed to open network interface", "name", iface.Name)
-		return err
+		return fmt.Errorf("failed to generate GARP packet with IP %s: %v", srcIP.String(), err)
 	}
-	defer handle.Close()
-	if err := handle.WritePacketData(request); err != nil {
+
+	conn, err := arp.Dial(iface)
+	if err != nil {
+		return fmt.Errorf("creating ARP responder for %q: %s", iface.Name, err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteTo(arpPacket, iface.HardwareAddr); err != nil {
 		klog.ErrorS(err, "Failed to send GARP packet")
 		return err
 	}

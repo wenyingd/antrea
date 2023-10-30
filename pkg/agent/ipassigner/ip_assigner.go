@@ -215,3 +215,11 @@ func (a *ipAssigner) Run(ch <-chan struct{}) {
 	}
 	<-ch
 }
+
+func getNDPResponder(externalInterface *net.Interface) (responder.Responder, error) {
+	rsp, err := responder.NewNDPResponder(externalInterface)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create NDP responder for link %s: %v", externalInterface.Name, err)
+	}
+	return rsp, nil
+}

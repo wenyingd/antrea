@@ -15,10 +15,16 @@
 package ipassigner
 
 import (
+	"fmt"
 	"net"
 
-	"antrea.io/antrea/pkg/agent/ipassigner/responder"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
+
+	"antrea.io/antrea/pkg/agent/ipassigner/responder"
+	"antrea.io/antrea/pkg/agent/util/arping"
+	"antrea.io/antrea/pkg/agent/util/ndp"
 )
 
 type dummyInterfaceType *struct{}
@@ -41,15 +47,24 @@ func (a *ipAssigner) syncIPsOnDummy(ips sets.Set[string]) error {
 }
 
 // getARPResponder returns nil on Windows since the ARP request is responded with OpenFlow entries.
-func getARPResponder(dummyDeviceName string, externalInterface *net.Interface) (responder.Responder, error) {
-	return nil, nil
-}
-
-// getNDPResponder returns nil on Windows since IPv6 is not supported yet.
-func getNDPResponder(externalInterface *net.Interface) (responder.Responder, error) {
-	return nil, nil
+func getARPResponder(_ string, externalInterface *net.Interface) (responder.Responder, error) {
+	rsp, err := responder.NewARPResponder(externalInterface)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ARP responder for link %s: %v", externalInterface.Name, err)
+	}
+	return rsp, nil
 }
 
 func (a *ipAssigner) advertise(ip net.IP) {
-	return
+	if utilnet.IsIPv4(ip) {
+		klog.V(2).InfoS("Sending gratuitous ARP", "ip", ip)
+		if err := arping.GratuitousARPOverIface(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send gratuitous ARP", "ip", ip)
+		}
+	} else {
+		klog.V(2).InfoS("Sending neighbor advertisement", "ip", ip)
+		if err := ndp.GratuitousNDPOverIface(ip, a.externalInterface); err != nil {
+			klog.ErrorS(err, "Failed to send neighbor advertisement", "ip", ip)
+		}
+	}
 }
