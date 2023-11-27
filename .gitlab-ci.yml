@@ -14,9 +14,10 @@ default:
       echo "Ensuring go version"
       mkdir -p ~/.local/go/
       export GOPATH=~/.local/go/
-      go install golang.org/dl/go${GO_VERSION}@latest
-      ${GOPATH}/bin/go${GO_VERSION} download
-      ln -sf ${GOPATH}/bin/go${GO_VERSION} ${GOPATH}/bin/go
+      export GO_VERSION_FULL=$(curl "https://go.dev/dl/?mode=json&include=all" | jq --arg go_version_prefix go${GO_VERSION} -r '. | map(select(. | .version | startswith($go_version_prefix)))|first|.version')
+      go install golang.org/dl/${GO_VERSION_FULL}@latest
+      ${GOPATH}/bin/${GO_VERSION_FULL} download
+      ln -sf ${GOPATH}/bin/${GO_VERSION_FULL} ${GOPATH}/bin/go
       export PATH=${GOPATH}/bin:$PATH
       echo "Using $(go version)"
     - |
