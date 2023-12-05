@@ -119,6 +119,8 @@ RUN tdnf install -y iptables rpm && \
       libcap-ng \
       libgcc-atomic \
       logrotate \
+      gzip \
+      net-tools \
       openssl \
       python3 \
       python3-curses \

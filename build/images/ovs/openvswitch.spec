@@ -31,6 +31,7 @@ Requires:       python3-libs
 Requires:       python3-six
 Requires:       python3-xml
 Requires:       gawk
+Requires:       logrotate gzip
 
 %description
 Open vSwitch provides standard network bridging functions and
