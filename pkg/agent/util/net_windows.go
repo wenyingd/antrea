@@ -550,6 +550,10 @@ func adapterIPExists(ip net.IP, mac net.HardwareAddr, namePrefix string) (*net.I
 	return nil, false, fmt.Errorf("unable to find a network adapter with MAC %s, IP %s, and name prefix %s", mac.String(), ip.String(), namePrefix)
 }
 
+func AdapterIPExists(ip net.IP, mac net.HardwareAddr, namePrefix string) (*net.Interface, bool, error) {
+	return adapterIPExists(ip, mac, namePrefix)
+}
+
 // EnableRSCOnVSwitch enables RSC in the vSwitch to reduce host CPU utilization and increase throughput for virtual
 // workloads by coalescing multiple TCP segments into fewer, but larger segments.
 func EnableRSCOnVSwitch(vSwitch string) error {
