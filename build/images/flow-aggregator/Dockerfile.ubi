@@ -2,7 +2,7 @@
 # - Pre-built Antrea binaries in bin/.
 
 ARG BUILD_INFO
-FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubi8/ubi:8.8-1032
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubi9/ubi:9.3-1552
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="The docker image for the flow aggregator"

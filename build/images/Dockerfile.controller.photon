@@ -14,7 +14,7 @@
 
 ARG BUILD_TAG
 
-FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/photon:3.0-05f9d3d8d
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/photon:5.0-8f8225ff2
 ARG BUILD_INFO
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"

@@ -15,11 +15,15 @@
 # - openvswitch-$OVS_VERSION.tar.gz - archive of the source code of OpenvSwitch.
 FROM quay.io/centos/centos:stream9 as ovs-rpms
 
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubi9/ubi:9.3-1552 as ovs-rpms
 ARG OVS_VERSION
 ARG IPSEC
 
 COPY CentOS.repo /tmp/CentOS.repo
-RUN rm -f /etc/yum.repos.d/* && cp /tmp/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
+RUN rm -f /etc/yum.repos.d/* && mv /tmp/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
+    # Disable the default redhat.repo. This substitutes `subscription-manager config --rhsm.manage_repos=0`
+    # as subscription-manager is not supported running in containers.
+    sed -i.bak "s/^manage_repos = .$/manage_repos = 0/g" /etc/rhsm/rhsm.conf && \
     yum clean all -y && yum -y install wget git yum-utils python3 rpm-build
 
 COPY apply-patches.sh /
@@ -39,8 +43,8 @@ RUN tar -xzf /tmp/openvswitch-$OVS_VERSION.tar.gz -C /tmp && \
     if ${IPSEC}; then cp /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/*ipsec*.rpm /tmp/ovs-rpms; fi && \
     rm -rf /tmp/openvswitch*
 
-FROM registry.access.redhat.com/ubi9
-ARG OVS_VERSION
+
+FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubi9/ubi:9.3-1552
 ARG IPSEC
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
@@ -50,16 +54,14 @@ RUN --mount=type=bind,from=ovs-rpms,source=/tmp/,target=/tmp/build \
     # Disable the default redhat.repo. This substitutes `subscription-manager config --rhsm.manage_repos=0`
     # as subscription-manager is not supported running in containers.
     sed -i.bak "s/^manage_repos = .$/manage_repos = 0/g" /etc/rhsm/rhsm.conf && \
-    # Change Repository from UBI to CentOS because UBI repository does not contain
-    # enough packages required by OVS installation.
-    # Using the official RHEL repository would be the best choice but it's not publicly accessible.
-    rm -f /etc/yum.repos.d/* && cp /tmp/build/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
-    curl https://www.centos.org/keys/RPM-GPG-KEY-CentOS-Official -o /etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial && \
-    curl https://www.centos.org/keys/RPM-GPG-KEY-CentOS-SIG-Extras -o /etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-SIG-Extras && \
-    yum install iptables-nft logrotate epel-release -y && \
-    pushd /tmp/build/ovs-rpms && \
-    yum install openvswitch-${OVS_VERSION}-*.rpm openvswitch-ipsec-${OVS_VERSION}-*.rpm python3-openvswitch-${OVS_VERSION}-*.rpm -y && \
-    popd && \
+    # Exclude redhat-release to avoid the error "The operation would result in removing the
+    # following protected packages: redhat-release".
+    yum update --exclude redhat-release -y && \
+    rm -rf /tmp/ovs-rpms/network-scripts-* && \
+    yum install /tmp/ovs-rpms/* -y && \
+    yum install -y https://build-artifactory.eng.vmware.com/artifactory/nsx-ujo-local/antrea/epel/epel-release-latest-9.noarch.rpm \
+    https://build-artifactory.eng.vmware.com/artifactory/nsx-ujo-local/antrea/epel/epel-next-release-latest-9.noarch.rpm && \
+    yum install iptables logrotate -y && \
     mv /etc/logrotate.d/openvswitch /etc/logrotate.d/openvswitch-switch && \
     sed -i "/rotate /a\    #size 100M" /etc/logrotate.d/openvswitch-switch && \
         if ${IPSEC}; then \

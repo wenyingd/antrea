@@ -49,7 +49,7 @@ DOWNLOAD_OVS=false
 SUPPORT_DISTROS=("ubuntu" "ubi" "debian" "photon" "windows")
 RPM_REPO_URL=""
 USE_PUBLIC_PHOTON=false
-PHOTON_BASE_DOCKER_IMG="nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/photon:3.0-05f9d3d8d"
+PHOTON_BASE_DOCKER_IMG="nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/photon:5.0-8f8225ff2"
 
 while [[ $# -gt 0 ]]
 do
