@@ -17,16 +17,11 @@ FROM antrea/base-ubuntu:${BUILD_TAG}
 ARG BUILD_INFO
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
-LABEL description="The development Docker image to deploy the antrea-agent."
+LABEL description="The Docker image to deploy the antrea-agent."
 LABEL build-info="${BUILD_INFO}"
 
 USER root
 
 COPY build/images/scripts/* /usr/local/bin/
-COPY bin/antrea-agent /usr/local/bin/
-COPY bin/antrea-cni /usr/local/bin/
-COPY bin/antctl /usr/local/bin/
-COPY bin/antrea-agent-tweaker /usr/local/bin/
-COPY bin/antrea-resource-init /usr/local/bin/
-
+COPY bin/antctl bin/antrea-agent bin/antrea-cni bin/antrea-agent-tweaker /usr/local/bin/
 RUN echo "${BUILD_INFO}" > /build-info

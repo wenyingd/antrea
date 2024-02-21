@@ -29,8 +29,8 @@ spec:
         - "antrea-resource-init -f /etc/antrea/init-resources.yaml && sleep infinity"
         command:
         - sh
-        image: {{ include "antreaAgentImage" . | quote }}
-        imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
+        image: {{ include "antreaControllerImage" . | quote }}
+        imagePullPolicy: {{ include "antreaControllerImagePullPolicy" . }}
         name: antrea-resource-init
         volumeMounts:
         - mountPath: /etc/antrea/init-resources.yaml

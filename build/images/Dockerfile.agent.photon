@@ -13,15 +13,16 @@
 # limitations under the License.
 
 ARG BUILD_TAG
-FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubuntu:22.04
+
+FROM antrea/base-photon:${BUILD_TAG}
 ARG BUILD_INFO
 
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
-LABEL description="The Docker image to deploy the antrea-controller."
+LABEL description="The Docker image to deploy the antrea-agent."
 LABEL build-info="${BUILD_INFO}"
 
 USER root
 
 COPY build/images/scripts/* /usr/local/bin/
-COPY bin/antctl bin/antrea-controller bin/antrea-resource-init /usr/local/bin/
+COPY bin/antctl bin/antrea-agent bin/antrea-cni bin/antrea-agent-tweaker /usr/local/bin/
 RUN echo "${BUILD_INFO}" > /build-info
