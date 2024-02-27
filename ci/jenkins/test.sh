@@ -567,8 +567,8 @@ function deliver_antrea {
     echo "====== Delivering Antrea to all Nodes ======"
     docker save -o antrea-ubuntu.tar antrea/antrea-agent-ubuntu:latest antrea/antrea-controller-ubuntu:latest
     docker save -o flow-aggregator.tar antrea/flow-aggregator:latest
-    docker pull harbor-repo.vmware.com/dockerhub-proxy-cache/antrea/perftool
-    docker save -o perftool.tar harbor-repo.vmware.com/dockerhub-proxy-cache/antrea/perftool
+    docker pull nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/perftool:iperf-3.9
+    docker save -o perftool.tar nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/perftool:iperf-3.9
 
     if [[ $TESTBED_TYPE == "flexible-ipam" ]]; then
         kubectl get nodes -o wide --no-headers=true | awk '{print $6}' | while read IP; do

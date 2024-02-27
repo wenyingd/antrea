@@ -9,8 +9,8 @@ default:
     - |
       echo "Pulling golang image"
       export GO_VERSION=$(cat build/images/deps/go-version)
-      docker pull harbor-repo.vmware.com/dockerhub-proxy-cache/library/golang:${GO_VERSION}
-      docker tag harbor-repo.vmware.com/dockerhub-proxy-cache/library/golang:${GO_VERSION} golang:${GO_VERSION}
+      docker pull nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/golang:${GO_VERSION}
+      docker tag nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/golang:${GO_VERSION} golang:${GO_VERSION}
       echo "Ensuring go version"
       mkdir -p ~/.local/go/
       export GOPATH=~/.local/go/

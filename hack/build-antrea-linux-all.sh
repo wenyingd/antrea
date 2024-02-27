@@ -135,8 +135,8 @@ if $PULL; then
     else
         docker pull ${DOCKER_REGISTRY}/antrea/ubuntu:22.04
         docker tag ${DOCKER_REGISTRY}/antrea/ubuntu:22.04 ubuntu:22.04
-        docker pull ${DOCKER_REGISTRY}/antrea/golang:$GO_VERSION
-        docker tag ${DOCKER_REGISTRY}/antrea/golang:$GO_VERSION golang:$GO_VERSION
+        docker pull nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/golang:$GO_VERSION
+        docker tag nsx-ujo-docker-local.artifactory.eng.vmware.com/antrea/golang:$GO_VERSION golang:$GO_VERSION
     fi
     if [ "$DISTRO" == "ubi" ]; then
         docker pull $PLATFORM_ARG quay.io/centos/centos:stream9
