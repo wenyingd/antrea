@@ -8,4 +8,9 @@ LABEL build-info="${BUILD_INFO}"
 USER root
 
 COPY bin/antrea-mc-controller /
+
+RUN echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye main" > /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-updates main" >> /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-security-remote bullseye-security main" >> /etc/apt/sources.list && \
+    apt-get update && apt -y upgrade
 RUN echo "${BUILD_INFO}" > /build-info

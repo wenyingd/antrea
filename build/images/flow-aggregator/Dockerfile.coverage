@@ -37,7 +37,7 @@ COPY --from=flow-aggregator-build /antrea/test/e2e/utils/run_cov_binary.sh /
 ENV GOCOVERDIR=/tmp/coverage
 RUN mkdir -p $GOCOVERDIR
 
-RUN apt-get update \
+RUN apt-get update && apt -y upgrade \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

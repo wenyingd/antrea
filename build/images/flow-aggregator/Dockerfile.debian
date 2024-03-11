@@ -12,8 +12,11 @@ LABEL build-info="${BUILD_INFO}"
 COPY bin/flow-aggregator /
 COPY bin/antctl /usr/local/bin/
 
-# install ca-certificates
-RUN apt-get update \
+# update packages and install ca-certificates
+RUN echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye main" > /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-remote bullseye-updates main" >> /etc/apt/sources.list && \
+    echo "deb http://build-artifactory.eng.vmware.com/debian-security-remote bullseye-security main" >> /etc/apt/sources.list && \
+    apt-get update && apt -y upgrade \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

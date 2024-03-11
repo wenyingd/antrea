@@ -8,4 +8,12 @@ LABEL build-info="${BUILD_INFO}"
 USER root
 
 COPY bin/antrea-mc-controller /
+COPY build/images/ovs/CentOS.repo /tmp/CentOS.repo
+
+RUN rm -f /etc/yum.repos.d/* && mv /tmp/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
+    # Disable the default redhat.repo. This substitutes `subscription-manager config --rhsm.manage_repos=0`
+    # as subscription-manager is not supported running in containers.
+    sed -i.bak "s/^manage_repos = .$/manage_repos = 0/g" /etc/rhsm/rhsm.conf && \
+    yum update -y --exclude redhat-release -y && yum remove -y vim-minimal && yum clean all -y
+
 RUN echo "${BUILD_INFO}" > /build-info

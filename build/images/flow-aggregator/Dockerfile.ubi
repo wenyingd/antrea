@@ -10,8 +10,13 @@ LABEL build-info="${BUILD_INFO}"
 
 COPY bin/flow-aggregator /
 COPY bin/antctl /usr/local/bin/
+COPY build/images/ovs/CentOS.repo /tmp/CentOS.repo
 
-RUN yum install -y ca-certificates && yum clean all -y
+RUN rm -f /etc/yum.repos.d/* && mv /tmp/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
+    # Disable the default redhat.repo. This substitutes `subscription-manager config --rhsm.manage_repos=0`
+    # as subscription-manager is not supported running in containers.
+    sed -i.bak "s/^manage_repos = .$/manage_repos = 0/g" /etc/rhsm/rhsm.conf && \
+    yum update -y --exclude redhat-release -y && yum install -y ca-certificates && yum remove -y vim-minimal && yum clean all -y
 
 ENTRYPOINT ["/flow-aggregator"]
 RUN echo "${BUILD_INFO}" > /build-info
