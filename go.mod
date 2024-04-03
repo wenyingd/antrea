@@ -6,7 +6,7 @@ require (
 	antrea.io/libOpenflow v0.8.0
 	antrea.io/ofnet v0.6.0
 	github.com/ClickHouse/clickhouse-go v1.5.4
-	github.com/DATA-DOG/go-sqlmock v1.5.0
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/Mellanox/sriovnet v1.1.0
 	github.com/Microsoft/go-winio v0.4.16-0.20201130162521-d1ffc52c7331
 	github.com/Microsoft/hcsshim v0.8.9
