@@ -49,12 +49,13 @@ function switch_windows_buildx() {
         return
     fi
     trap 'docker buildx use --default ${original_buildx_instance}' EXIT
+    local_buildx_image="dockerhub.artifactory.eng.vmware.com/moby/buildkit:buildx-stable-1"
     set +e
     docker buildx ls | grep "${windows_buildx_name}" > /dev/null 2>&1
     if [ $? -eq 0 ] ; then
         docker buildx use --builder windows/amd64 "${windows_buildx_name}"
     else
-        docker buildx create --name "${windows_buildx_name}" --use --platform windows/amd64
+        docker buildx create --name "${windows_buildx_name}" --use --platform windows/amd64 --driver-opt image="$local_buildx_image"
     fi
     set -e
 }

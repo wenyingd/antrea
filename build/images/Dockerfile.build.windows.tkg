@@ -1,0 +1,13 @@
+FROM mcr-docker-remote.artifactory.eng.vmware.com/oss/kubernetes/windows-host-process-containers-base-image:v1.0.0
+
+ARG LOCAL_PATH
+
+WORKDIR /k
+
+COPY ${LOCAL_PATH}/antrea /k/antrea
+
+WORKDIR /
+
+COPY ${LOCAL_PATH}/openvswitch /openvswitch
+
+ENV PATH="C:\Windows\system32;C:\Windows;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\wbem;"

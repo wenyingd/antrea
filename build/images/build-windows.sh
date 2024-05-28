@@ -23,15 +23,17 @@ THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
 source $THIS_DIR/build-utils.sh
 
-_usage="Usage: $0 [--pull] [--push] [--agent-tag]
+_usage="Usage: $0 [--pull] [--push] [--local-dir ] [--agent-tag]
 Build the antrea base image.
         --pull                 Always attempt to pull a newer version of Window OVS image.
         --push                 Push the built image to the registry
+        --local-dir            Use local agent binary and OVS files to build the image.
         --agent-tag            Antrea Agent image tag"
 
 PULL_OPTION=""
 PUSH=false
 BUILD_TAG="latest"
+LOCAL_DIR=""
 
 while [[ $# -gt 0 ]]
 do
@@ -41,6 +43,10 @@ case $key in
     --pull)
     PULL_OPTION="--pull"
     shift
+    ;;
+    --local-dir)
+    LOCAL_DIR="$2"
+    shift 2
     ;;
     --push)
     PUSH=true
@@ -72,11 +78,16 @@ OVS_VERSION=$(head -n 1 deps/ovs-version-windows)
 registry="antrea"
 image_name="antrea-windows"
 image="${registry}/${image_name}"
+doker_file_name="Dockerfile.build.windows"
 BUILD_ARGS="--build-arg GO_VERSION=${GO_VERSION} --build-arg OVS_VERSION=${OVS_VERSION} --build-arg CNI_BINARIES_VERSION=${CNI_BINARIES_VERSION}"
+if [[ ! -z "${LOCAL_DIR}" ]]; then
+    BUILD_ARGS="--build-arg LOCAL_PATH=${LOCAL_DIR}"
+    doker_file_name="Dockerfile.build.windows.tkg"
+fi
 
 ANTREA_DIR=${THIS_DIR}/../../
 pushd $ANTREA_DIR > /dev/null
-docker_file="build/images/Dockerfile.build.windows"
+docker_file="build/images/${doker_file_name}"
 docker_build_and_push_windows "${image}" "${docker_file}" "${BUILD_ARGS}" "${BUILD_TAG}" $PUSH "${PULL_OPTION}"
 popd > /dev/null
 
