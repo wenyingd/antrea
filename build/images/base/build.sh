@@ -258,7 +258,7 @@ elif [ "$DISTRO" == "photon" ]; then
         echoerr "Cannot specify both --rpm-repo-url and --use-public-photon"
         exit 1
     fi
-    docker_build_and_push "antrea/base-debian" Dockerfile.photon    
+    docker_build_and_push "antrea/base-photon" Dockerfile.photon
 fi
 if $PUSH; then
     docker push antrea/cni-binaries:$CNI_BINARIES_VERSION

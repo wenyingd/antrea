@@ -58,7 +58,7 @@ RUN --mount=type=bind,from=ovs-rpms,source=/tmp/,target=/tmp/build \
     # following protected packages: redhat-release".
     yum update --exclude redhat-release -y && \
     rm -rf /tmp/ovs-rpms/network-scripts-* && \
-    yum install /tmp/ovs-rpms/* -y && \
+    yum install /tmp/build/ovs-rpms/* -y && \
     yum install -y https://build-artifactory.eng.vmware.com/artifactory/nsx-ujo-local/antrea/epel/epel-release-latest-9.noarch.rpm \
     https://build-artifactory.eng.vmware.com/artifactory/nsx-ujo-local/antrea/epel/epel-next-release-latest-9.noarch.rpm && \
     yum install iptables logrotate -y && \
