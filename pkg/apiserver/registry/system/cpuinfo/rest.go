@@ -34,8 +34,9 @@ func NewREST() *REST {
 }
 
 var (
-	_ rest.Scoper = &REST{}
-	_ rest.Getter = &REST{}
+	_ rest.Scoper               = &REST{}
+	_ rest.Getter               = &REST{}
+	_ rest.SingularNameProvider = &REST{}
 )
 
 type REST struct {
@@ -59,4 +60,8 @@ func (r *REST) Get(_ context.Context, _ string, _ *metav1.GetOptions) (runtime.O
 
 func (r *REST) NamespaceScoped() bool {
 	return false
+}
+
+func (r *REST) GetSingularName() string {
+	return "cpuinfo"
 }
