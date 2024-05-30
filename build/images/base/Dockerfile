@@ -70,6 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ipset jq iprout
         apt install -y /tmp/suricata*.deb --no-install-recommends && \
         apt-mark hold suricata; \
     else \
+        SURICATA_VERSION=$(echo ${SURICATA_VERSION} | cut -d'.' -f1-2); \
         add-apt-repository ppa:oisf/suricata-${SURICATA_VERSION} && apt-get update && apt-get install -y suricata; \
     fi && \
     apt-get remove -y gpg-agent software-properties-common && apt-get autoremove -y && rm -rf /var/cache/apt/* /var/lib/apt/lists/* && \
