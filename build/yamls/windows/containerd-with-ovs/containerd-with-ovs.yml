@@ -34,7 +34,7 @@ spec:
         - $env:CONTAINER_SANDBOX_MOUNT_POINT/var/lib/antrea-windows/Install-OVSDriver.ps1
         command:
         - powershell
-        image: antrea/antrea-windows:latest
+        image: antrea-windows
         imagePullPolicy: IfNotPresent
         name: install-ovs-driver
         volumeMounts:

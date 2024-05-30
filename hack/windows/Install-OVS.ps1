@@ -5,22 +5,12 @@
   .PARAMETER DownloadURL
   The URL of the OpenvSwitch package to be downloaded.
 
-  .PARAMETER DownloadDir
-  The path of the directory to be used to download OpenvSwitch package. The default path is the working directory.
-
   .PARAMETER OVSInstallDir
   The target installation directory. The default path is "C:\openvswitch".
 
-  .PARAMETER CheckFileHash
-  Skips checking file hash. The default value is true.
-
   .PARAMETER LocalFile
   Specifies the path of a local OpenvSwitch package to be used for installation.
-  When the param is used, "DownloadURL" and "DownloadDir" params will be ignored.
-
-  .PARAMETER ImportCertificate
-  Specifies if a certificate file is needed for OVS package. If true, certificate
-  will be retrieved from OVSExt.sys and a package.cer file will be generated.
+  When the param is used, "DownloadURL" is ignored.
 
   .PARAMETER InstallUserspace
   Specifies whether OVS userspace processes are included in the installation. If false, these processes will not 
@@ -30,62 +20,79 @@
   Specifies the path of a local SSL package to be used for installation.
 #>
 Param(
-    [parameter(Mandatory = $false)] [string] $DownloadDir,
     [parameter(Mandatory = $false)] [string] $DownloadURL,
     [parameter(Mandatory = $false)] [string] $OVSInstallDir = "C:\openvswitch",
-    [parameter(Mandatory = $false)] [bool] $CheckFileHash = $true,
     [parameter(Mandatory = $false)] [string] $LocalFile,
-    [parameter(Mandatory = $false)] [bool] $ImportCertificate = $true,
     [parameter(Mandatory = $false)] [bool] $InstallUserspace = $true,
     [parameter(Mandatory = $false)] [string] $LocalSSLFile
 )
 
 $ErrorActionPreference = "Stop"
-$OVSDownloadURL = "https://downloads.antrea.io/ovs/ovs-3.0.5-antrea.1-win64.zip"
+$DefaultOVSDownloadURL = "https://downloads.antrea.io/ovs/ovs-3.0.5-antrea.1-win64.zip"
 # Use a SHA256 hash to ensure that the downloaded archive is correct.
-$OVSPublishedHash = '813a0c32067f40ce4aca9ceb7cd745a120e26906e9266d13cc8bf75b147bb6a5'
+$DefaultOVSPublishedHash = '813a0c32067f40ce4aca9ceb7cd745a120e26906e9266d13cc8bf75b147bb6a5'
+# $MininalVCRedistVersion is the minimal version required by the provided Windows OVS binary. If a higher
+# version of VC redistributable file exists on the Windows host, we can skip the installation.
+$MininalVCRedistVersion="14.12.25810"
+
 $WorkDir = [System.IO.Path]::GetDirectoryName($myInvocation.MyCommand.Definition)
-$OVSDownloadDir = $WorkDir
+$InstallLog = "$WorkDir\install_ovs.log"
 $PowerShellModuleBase = "C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+$OVSZip=""
 
-if (!$LocalFile) {
-    $OVSZip = "$OVSDownloadDir\ovs-win64.zip"
-} else {
-    $OVSZip = $LocalFile
-    $DownloadDir = Split-Path -Path $LocalFile
-}
+function PrepareOVSLocalFiles() {
+    $OVSDownloadURL = $DefaultOVSDownloadURL
+    $desiredOVSPublishedHash = $DefaultOVSPublishedHash
+    if ($LocalFile -ne "") {
+        if (-not (Test-Path $LocalFile)){
+            Log "Path $LocalFile doesn't exist, exit"
+            exit 1
+        }
 
-if ($DownloadDir -ne "") {
-    $OVSDownloadDir = $DownloadDir
-}
+        $ovsFile = Get-Item $LocalFile
+        if ($ovsFile -is [System.IO.DirectoryInfo])  {
+            return $ovsFile.FullName
+        }
 
-$InstallLog = "$OVSDownloadDir\install_ovs.log"
+        # $ovsFile as a zip file is supported
+        $attributes = $ovsFile.Attributes
+        if (("$attributes" -eq "Archive") -and ($ovsFile.Extension -eq ".zip" ) ) {
+            $OVSZip = $LocalFile
+            $OVSDownloadURL = ""
+            $OVSPublishedHash = ""
+        } else {
+            Log "Unsupported local file $LocalFile with attributes '$attributes'"
+            exit 1
+        }
+    } else {
+        $OVSZip = "$WorkDir\ovs-win64.zip"
+        if ($DownloadURL -ne "" -and $DownloadURL -ne "$OVSDownloadURL") {
+            $OVSDownloadURL = $DownloadURL
+            $desiredOVSPublishedHash = ""
+        }
+    }
 
-if ($DownloadURL -ne "") {
-    $OVSDownloadURL = $DownloadURL
-    # For user-provided URLs, do not verify the hash for the archive.
-    $OVSPublishedHash = ""
+    # Extract zip file to $OVSInstallDir
+    if (Test-Path -Path $OVSInstallDir) {
+        Log "$OVSInstallDir already exists, exit OVS installation."
+        exit 1
+    }
+    $removeZipFile = $false
+    if ($OVSDownloadURL -ne "") {
+        DownloadOVS -localZipFile $OVSZip -downloadURL $OVSDownloadURL -desiredHash $desiredOVSPublishedHash
+        $removeZipFile = $true
+    }
+    $ovsInstallParentPath = Split-Path -Path $OVSInstallDir -Parent
+    Expand-Archive -Path $OVSZip -DestinationPath $ovsInstallParentPath | Out-Null
+    if ($removeZipFile) {
+        rm $OVSZip
+    }
+    return $OVSInstallDir
 }
 
 function Log($Info) {
     $time = $(get-date -Format g)
     "$time $Info `n`r" | Tee-Object $InstallLog -Append | Write-Host
-}
-
-function CreatePath($Path){
-    if ($(Test-Path $Path)) {
-        mv $Path $($Path + "_bak")
-    }
-    mkdir -p $Path | Out-Null
-}
-
-function SetEnvVar($key, $value) {
-    [Environment]::SetEnvironmentVariable($key, $value, [EnvironmentVariableTarget]::Machine)
-}
-
-function WaitExpandFiles($Src, $Dest) {
-    Log "Extract $Src to $Dest"
-    Expand-Archive -Path $Src -DestinationPath $Dest | Out-Null
 }
 
 function ServiceExists($ServiceName) {
@@ -107,24 +114,21 @@ function CheckIfOVSInstalled() {
 }
 
 function DownloadOVS() {
-    if ($LocalFile -ne "") {
-        Log "Skipping OVS download, using local file: $LocalFile"
-        return
-    }
-
-    If (!(Test-Path $OVSDownloadDir)) {
-        mkdir -p $OVSDownloadDir
-    }
-    Log "Downloading OVS package from $OVSDownloadURL to $OVSZip"
-    curl.exe -sLo $OVSZip $OVSDownloadURL
+    param (
+        [parameter(Mandatory = $true)] [string] $localZipFile,
+        [parameter(Mandatory = $true)] [string] $downloadURL,
+        [parameter(Mandatory = $true)] [string] $desiredHash
+    )
+    Log "Downloading OVS package from $downloadURL to $localZipFile"
+    curl.exe -sLo $localZipFile $downloadURL
     If (!$?) {
-        Log "Download OVS failed, URL: $OVSDownloadURL"
+        Log "Download OVS failed, URL: $downloadURL"
         exit 1
     }
 
-    if ($CheckFileHash) {
-        $FileHash = Get-FileHash $OVSZip
-        If ($OVSPublishedHash -ne "" -And $FileHash.Hash -ne $OVSPublishedHash) {
+    if ($desiredHash-ne "") {
+        $fileHash = Get-FileHash $localZipFile
+        If ($fileHash.Hash -ne $desiredHash) {
             Log "SHA256 mismatch for OVS download"
             exit 1
         }
@@ -134,50 +138,81 @@ function DownloadOVS() {
 }
 
 function InstallOVS() {
-    # unzip OVS.
-    WaitExpandFiles $OVSZip $OVSDownloadDir
-    # Copy OVS package to target dir.
-    Log "Copying OVS package from $OVSDownloadDir\openvswitch to $OVSInstallDir"
-    mv "$OVSDownloadDir\openvswitch" $OVSInstallDir
-    if (!$LocalFile) {
-        rm $OVSZip
-    }
-    # Create log and run dir.
-    $OVS_LOG_PATH = $OVSInstallDir + "\var\log\openvswitch"
-    CreatePath $OVS_LOG_PATH
-    $OVSRunDir = $OVSInstallDir + "\var\run\openvswitch"
-    CreatePath $OVSRunDir
-    $OVSDriverDir = "$OVSInstallDir\driver"
-
-    # Install OVS driver certificate.
-    $DriverFile="$OVSDriverDir\OVSExt.sys"
-    if ($ImportCertificate) {
-        $CertificateFile = "$OVSDriverDir\package.cer"
-        if (!(Test-Path $CertificateFile)) {
-            Log "No existing OVS driver certificate found, generating a new one."
-            $ExportType = [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert;
-            $Cert = (Get-AuthenticodeSignature $DriverFile).SignerCertificate;
-            [System.IO.File]::WriteAllBytes($CertificateFile, $Cert.Export($ExportType));
-        }
-        Log "Installing OVS driver certificate."
-        Import-Certificate -FilePath "$CertificateFile" -CertStoreLocation cert:\LocalMachine\TrustedPublisher
-        Import-Certificate -FilePath "$CertificateFile" -CertStoreLocation cert:\LocalMachine\Root
-    }
-
-    # Install Microsoft Visual C++ Redistributable Package.
-    if (Test-Path $OVSInstallDir\redist) {
-        Log "Installing Microsoft Visual C++ Redistributable Package."
-        $RedistFiles = Get-ChildItem "$OVSInstallDir\redist" -Filter *.exe
-        $RedistFiles | ForEach-Object {
-            Log "Installing $_"
-            Start-Process -FilePath $_.FullName -Args '/install /passive /norestart' -Verb RunAs -Wait
-        }
-    }
-
+    param (
+        [parameter(Mandatory = $true)] [string] $OVSInstallDir
+    )
     # Install powershell modules
-    if (Test-Path $OVSInstallDir\scripts) {
+    $OVSScriptsPath = "${OVSInstallDir}\scripts"
+    CheckAndInstallScripts -OVSScriptsPath $OVSScriptsPath
+
+    # Install VC redistributables.
+    $OVSRedistDir="${OVSInstallDir}\redist"
+    # Check if the VC redistributable is already installed. If not installed, or the installed version
+    # is lower than $MininalVCRedistVersion, install VC redistributable files provided in the container.
+    CheckAndInstallVCRedists -VCRedistPath $OVSRedistDir -VCRedistsVersion $MininalVCRedistVersion
+
+    # Install OVS driver.
+    $OVSDriverDir = "${OVSInstallDir}\driver"
+    Log "Installing OVS kernel driver"
+    CheckAndInstallOVSDriver -OVSDriverPath $OVSDriverDir
+
+    if ($InstallUserspace -eq $true) {
+        InstallOVSServices -OVSInstallPath $OVSInstallDir
+    }
+}
+
+function InstallOVSServices() {
+    param (
+        [parameter(Mandatory = $true)] [string] $OVSInstallPath
+    )
+
+    # Remove the existing OVS Services to avoid issues.
+    If (ServiceExists("ovs-vswitchd")) {
+        stop-service ovs-vswitchd
+        sc.exe delete ovs-vswitchd
+    }
+    if (ServiceExists("ovsdb-server")) {
+        stop-service ovsdb-server
+        sc.exe delete ovsdb-server
+    }
+
+    $usrBinPath="${OVSInstallPath}\usr\bin"
+    $usrSbinPath="${OVSInstallPath}\usr\sbin"
+    $OVSBinPaths="${usrBinPath};${usrSbinPath}"
+    InstallOpenSSLFiles "$OVSBinPaths"
+
+    # Create log and run dir.
+    $OVSLogDir = "${OVSInstallPath}\var\log\openvswitch"
+    if (-not (Test-Path $OVSLogDir)) {
+        mkdir -p $OVSLogDir | Out-Null
+    }
+    $OVSRunDir = "${OVSInstallPath}\var\run\openvswitch"
+    if (-not (Test-Path $OVSRunDir)) {
+        mkdir -p $OVSRunDir | Out-Null
+    }
+
+    # Install OVS Services and configure OVSDB.
+    ConfigOVS -OVSInstallPath $OVSInstallPath
+
+    # Add OVS usr/bin and usr/sbin to System path.
+    $envPaths = $env:Path -split ";" | Select-Object -Unique
+    if (-not $envPaths.Contains($usrBinPath)) {
+        $envPaths += $usrBinPath
+    }
+    if (-not $envPaths.Contains($usrSbinPath)) {
+        $envPaths += $usrSbinPath
+    }
+    $env:Path = [system.String]::Join(";", $envPaths)
+    [Environment]::SetEnvironmentVariable("Path", $env:Path, [EnvironmentVariableTarget]::Machine)
+}
+
+function CheckAndInstallScripts {
+    param (
+        [Parameter(Mandatory = $true)] [String]$OVSScriptsPath
+    )
+    if (Test-Path $OVSScriptsPath) {
         Log "Installing powershell modules."
-        $PSModuleFiles = Get-ChildItem "$OVSInstallDir\scripts" -Filter *.psm1
+        $PSModuleFiles = Get-ChildItem "$OVSScriptsPath" -Filter *.psm1
         $PSModuleFiles | ForEach-Object {
             $PSModulePath = Join-Path -Path $PowerShellModuleBase -ChildPath $_.BaseName
             if (!(Test-Path $PSModulePath)) {
@@ -187,31 +222,253 @@ function InstallOVS() {
             }
         }
     }
-
-    # Install OVS kernel driver.
-    Log "Installing OVS kernel driver"
-    $VMMSStatus = $(Get-Service vmms -ErrorAction SilentlyContinue).Status
-    if (!$VMMSStatus) {
-        $VMMSStatus = "not exist"
-    }
-    Log "Hyper-V Virtual Machine Management service status: $VMMSStatus"
-    if ($VMMSStatus -eq "Running") {
-        cmd /c "cd $OVSDriverDir && install.cmd"
-    } else {
-        cd $OVSDriverDir ; netcfg -l .\ovsext.inf -c s -i OVSExt; cd $WorkDir
-    }
-    if (!$?) {
-        Log "Install OVS kernel driver failed, exit"
-        exit 1
-    }
-    $OVS_BIN_PATH="$OVSInstallDir\usr\bin;$OVSInstallDir\usr\sbin"
-    $env:Path += ";$OVS_BIN_PATH"
-    SetEnvVar "Path" $env:Path
 }
 
-function InstallDependency() {
+function CheckAndInstallVCRedists {
+    param (
+        [Parameter(Mandatory = $true)] [String]$VCRedistPath,
+        [Parameter(Mandatory = $true)] [String]$VCRedistsVersion
+    )
+    $mininalVersion = [version]$VCRedistsVersion
+    $existingVCRedists = getInstalledVcRedists
+    foreach ($redist in $existingVCRedists) {
+        $installedVersion = [version]$redist.Version
+        # VC redists files with a higher version are installed, return.
+        if ($installedVersion -ge $mininalVersion) {
+            return
+        }
+    }
+    # Install the provided VC redistributable files.
+    Get-ChildItem $VCRedistPath -Filter *.exe | ForEach-Object {
+        Start-Process -FilePath $_.FullName -Args '/install /passive /norestart' -Verb RunAs -Wait
+    }
+}
+
+function CheckAndInstallOVSDriver {
+    param (
+        [Parameter(Mandatory = $true)]
+        [String]$OVSDriverPath
+    )
+
+    $expVersion = [version]$(Get-Item $OVSDriverPath\ovsext.sys).VersionInfo.ProductVersion
+    $ovsInstalled = $(netcfg -q ovsext) -like "*is installed*"
+    $installedDrivers = getInstalledOVSDrivers
+
+    # OVSext driver with the desired version is already installed, return
+    if ($ovsInstalled -and ($installedDrivers.Length -eq 1) -and ($installedDrivers[0].DriverVersion -eq $expVersion)){
+        return
+    }
+
+    # Uninstall the existing driver which is with a different version.
+    if ($ovsInstalled) {
+        netcfg -u ovsext
+    }
+
+    # Clean up the installed ovsext drivers packages.
+    foreach ($driver in $installedDrivers) {
+        $publishdName = $driver.PublishedName
+        pnputil.exe -d $publishdName
+    }
+
+    # Import OVSext driver certificate to TrustedPublisher and Root.
+    $DriverFile="$OVSDriverPath\ovsext.sys"
+    $CertificateFile = "$OVSDriverPath\package.cer"
+    $ExportType = [System.Security.Cryptography.X509Certificates.X509ContentType]::Cert
+    $Cert = (Get-AuthenticodeSignature $DriverFile).SignerCertificate
+    [System.IO.File]::WriteAllBytes($CertificateFile, $Cert.Export($ExportType))
+    Import-Certificate -FilePath "$CertificateFile" -CertStoreLocation cert:\LocalMachine\TrustedPublisher
+    Import-Certificate -FilePath "$CertificateFile" -CertStoreLocation cert:\LocalMachine\Root
+
+    # Install the OVSext driver with the desired version
+    $result = netcfg -l $OVSDriverPath/ovsext.inf -c s -i OVSExt
+    if ($result -like '*failed*') {
+        Write-Host "Failed to install OVSExt driver: $result"
+        exit 1
+    }
+    Log "OVSExt driver has been installed"
+}
+
+function getInstalledVcRedists {
+    # Get all installed Visual C++ Redistributables installed components
+    $VcRedists = listInstalledSoftware -SoftwareLike 'Microsoft Visual C++'
+
+    # Add Architecture property to each entry
+    $VcRedists | ForEach-Object { If ( $_.Name.ToLower().Contains("x64") ) `
+        { $_ | Add-Member -NotePropertyName "Architecture" -NotePropertyValue "x64" } }
+
+    return $vcRedists
+}
+
+function listInstalledSoftware {
+    param (
+        [parameter(Mandatory = $false)] [string] $SoftwareLike
+    )
+    Begin {
+        $SoftwareOutput = @()
+        $InstalledSoftware = (Get-ItemProperty -Path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*)
+    }
+    Process {
+        Try
+        {
+            if ($SoftwareLike -ne "") {
+                $nameFilter = "${SoftwareLike}*"
+                $InstalledSoftware = $InstalledSoftware |
+                        Where-Object {$_.DisplayName -like "$nameFilter"}
+            }
+
+            $SoftwareOutput = $InstalledSoftware |
+                    Select-Object -Property @{
+                        Name = 'Date Installed'
+                        Exp  = {
+                            $_.Installdate
+                        }
+                    }, @{
+                        Name = 'Version'
+                        Exp  = {
+                            $_.DisplayVersion
+                        }
+                    }, @{
+                        Name = 'Name'
+                        Exp = {
+                            $_.DisplayName
+                        }
+                    }, UninstallString
+        }
+        Catch
+        {
+            # get error record
+            [Management.Automation.ErrorRecord]$e = $_
+
+            # retrieve information about runtime error
+            $info = New-Object -TypeName PSObject -Property @{
+                Exception = $e.Exception.Message
+                Reason    = $e.CategoryInfo.Reason
+                Target    = $e.CategoryInfo.TargetName
+                Script    = $e.InvocationInfo.ScriptName
+                Line      = $e.InvocationInfo.ScriptLineNumber
+                Column    = $e.InvocationInfo.OffsetInLine
+            }
+
+            # output information. Post-process collected info, and log info (optional)
+            $info
+        }
+    }
+
+    End{
+        $SoftwareOutput | Sort-Object -Property Name
+    }
+}
+
+# getInstalledOVSDrivers lists the existing drivers on Windows host, and uses "ovsext" as a filter
+# on the "OriginalName" field of the drivers. As the output of "pnputil.exe" is not structured, the
+# function translates to structured objects first, and then apply the filter.
+#
+# A sample of the command output is like this,
+#
+# $ pnputil.exe /enum-drivers
+# Microsoft PnP Utility
+#
+# Published Name:     oem3.inf
+# Original Name:      efifw.inf
+# Provider Name:      VMware, Inc.
+# Class Name:         Firmware
+# Class GUID:         {f2e7dd72-6468-4e36-b6f1-6488f42c1b52}
+# Driver Version:     04/24/2017 1.0.0.0
+# Signer Name:        Microsoft Windows Hardware Compatibility Publisher
+#
+# Published Name:     oem5.inf
+# Original Name:      pvscsi.inf
+# Provider Name:      VMware, Inc.
+# Class Name:         Storage controllers
+# Class GUID:         {4d36e97b-e325-11ce-bfc1-08002be10318}
+# Driver Version:     04/06/2018 1.3.10.0
+# Signer Name:        Microsoft Windows Hardware Compatibility Publishe
+#
+# Published Name:     oem9.inf
+# Original Name:      vmci.inf
+# Provider Name:      VMware, Inc.
+# Class Name:         System devices
+# Class GUID:         {4d36e97d-e325-11ce-bfc1-08002be10318}
+# Driver Version:     07/11/2019 9.8.16.0
+# Signer Name:        Microsoft Windows Hardware Compatibility Publisher
+#
+function getInstalledOVSDrivers {
+    $pnputilOutput = pnputil.exe /enum-drivers
+    $drivers = @()
+    $lines = $pnputilOutput -split "`r`n"
+    $driverlines = @()
+    foreach ($line in $lines) {
+        # Ignore the title line "Microsoft PnP Utility" from the output.
+        if ($line -like "*Microsoft PnP Utility*") {
+            continue
+        }
+        if ($line.Trim() -eq "") {
+            if ($driverlines.Count -gt 0) {
+                $driver = $(parseDriver $driverlines)
+                $drivers += $driver
+                $driverlines = @()
+            }
+            continue
+        }
+        $driverlines += $line
+    }
+    if ($driverlines.Count -gt 0) {
+        $driver = parseDriver $driverlines
+        $drivers += $driver
+    }
+    $drivers = $drivers | Where-Object { $_.OriginalName -like "ovsext*"}
+    return $drivers
+}
+
+function parseDriver {
+    param (
+        [String[]]$driverlines
+    )
+    $driver = [PSCustomObject]@{
+        PublishedName = $null
+        ProviderName = $null
+        ClassName = $null
+        DriverVersion = $null
+        InstalledDate = $null
+        SignerName = $null
+        ClassGUID = $null
+        OriginalName = $null
+    }
+    $driverlines | ForEach-Object {
+        if ($_ -match "Published Name\s*:\s*(.+)") {
+            $driver.PublishedName = $matches[1].Trim()
+        }
+        elseif ($_ -match "Provider Name\s*:\s*(.+)") {
+            $driver.ProviderName = $matches[1].Trim()
+        }
+        elseif ($_ -match "Class Name\s*:\s*(.+)") {
+            $driver.ClassName = $matches[1].Trim()
+        }
+        elseif ($_ -match "Driver Version\s*:\s*(.+)") {
+            $dateAndVersion = $matches[1].Trim() -split " "
+            $driver.DriverVersion = [version]$dateAndVersion[1]
+            $driver.InstalledDate = $dateAndVersion[0]
+        }
+        elseif ($_ -match "Signer Name\s*:\s*(.+)") {
+            $driver.SignerName = $matches[1].Trim()
+        }
+        elseif ($_ -match "Class GUID\s*:\s*(.+)") {
+            $driver.ClassGUID = $matches[1].Trim()
+        }
+        elseif ($_ -match "Original Name\s*:\s*(.+)") {
+            $driver.OriginalName = $matches[1].Trim()
+        }
+    }
+    return $driver
+}
+
+function InstallOpenSSLFiles {
+    param (
+        [parameter(Mandatory = $true)] [string] $destinationPaths
+    )
+
     # Check if SSL library has been installed
-    $paths = $env:Path.Split(";")
+    $paths = $destinationPaths.Split(";")
     foreach($path in $paths) {
         if ((Test-Path "$path/ssleay32.dll" -PathType Leaf) -and (Test-Path "$path/libeay32.dll" -PathType Leaf)) {
             Log "Found existing SSL library."
@@ -244,49 +501,50 @@ function InstallDependency() {
         Expand-Archive $SSLZip -DestinationPath openssl
         rm $SSLZip
     }
-    cp -Force openssl/*.dll $OVSInstallDir\usr\sbin\
+    $destinationPaths -Split ";" | Foreach-Object {
+        cp -Force openssl/*.dll $_\
+    }
     rm -Recurse -Force openssl
 }
 
 function ConfigOVS() {
+    param (
+        [parameter(Mandatory = $true)] [string] $OVSInstallPath
+    )
+    # Antrea Pod runs as NT AUTHORITY\SYSTEM user on Windows, antrea-ovs container writes
+    # PID and conf.db files to $OVSInstallDir on Windows Node when it is running.
+    icacls $OVSInstallPath /grant "NT AUTHORITY\SYSTEM:(OI)(CI)F" /T
+
     # Create ovsdb config file
-    $OVS_DB_SCHEMA_PATH = "$OVSInstallDir\usr\share\openvswitch\vswitch.ovsschema"
-    $OVS_DB_PATH = "$OVSInstallDir\etc\openvswitch\conf.db"
+    $OVS_DB_SCHEMA_PATH = "$OVSInstallPath\usr\share\openvswitch\vswitch.ovsschema"
+    $OVS_DB_PATH = "$OVSInstallPath\etc\openvswitch\conf.db"
     if ($(Test-Path $OVS_DB_SCHEMA_PATH) -and !$(Test-Path $OVS_DB_PATH)) {
         Log "Creating ovsdb file"
-        ovsdb-tool create "$OVS_DB_PATH" "$OVS_DB_SCHEMA_PATH"
+        & $OVSInstallPath\usr\bin\ovsdb-tool.exe create "$OVS_DB_PATH" "$OVS_DB_SCHEMA_PATH"
     }
     # Create and start ovsdb-server service.
     Log "Create and start ovsdb-server service"
-    sc.exe create ovsdb-server binPath= "$OVSInstallDir\usr\sbin\ovsdb-server.exe $OVSInstallDir\etc\openvswitch\conf.db  -vfile:info --remote=punix:db.sock  --remote=ptcp:6640  --log-file  --pidfile --service" start= auto
+    sc.exe create ovsdb-server binPath= "$OVSInstallPath\usr\sbin\ovsdb-server.exe $OVSInstallPath\etc\openvswitch\conf.db  -vfile:info --remote=punix:db.sock  --remote=ptcp:6640  --log-file  --pidfile --service" start= auto
     sc.exe failure ovsdb-server reset= 0 actions= restart/0/restart/0/restart/0
     Start-Service ovsdb-server
     # Create and start ovs-vswitchd service.
     Log "Create and start ovs-vswitchd service."
-    sc.exe create ovs-vswitchd binpath="$OVSInstallDir\usr\sbin\ovs-vswitchd.exe  --pidfile -vfile:info --log-file  --service" start= auto depend= "ovsdb-server"
+    sc.exe create ovs-vswitchd binpath="$OVSInstallPath\usr\sbin\ovs-vswitchd.exe  --pidfile -vfile:info --log-file  --service" start= auto depend= "ovsdb-server"
     sc.exe failure ovs-vswitchd reset= 0 actions= restart/0/restart/0/restart/0
     Start-Service ovs-vswitchd
     # Set OVS version.
-    $OVS_VERSION=$(Get-Item $OVSInstallDir\driver\OVSExt.sys).VersionInfo.ProductVersion
+    $OVS_VERSION=$(Get-Item $OVSInstallPath\driver\OVSExt.sys).VersionInfo.ProductVersion
     Log "Set OVS version to: $OVS_VERSION"
-    ovs-vsctl --no-wait set Open_vSwitch . ovs_version=$OVS_VERSION
+    & $OVSInstallPath\usr\bin\ovs-vsctl.exe --no-wait set Open_vSwitch . ovs_version=$OVS_VERSION
 }
 
+if (($LocalFile -ne "") -and ($DownloadURL -ne "")) {
+    Log "LocalFile and DownloadURL are mutually exclusive, exit"
+    exit 1
+}
 Log "Installation log location: $InstallLog"
 
-CheckIfOVSInstalled
+$OVSPath = PrepareOVSLocalFiles
+InstallOVS -OVSInstallDir $OVSPath
 
-DownloadOVS
-
-InstallOVS
-
-if ($InstallUserspace -eq $true) {
-    InstallDependency
-
-    ConfigOVS
-}
-
-# Antrea Pod runs as NT AUTHORITY\SYSTEM user on Windows, antrea-ovs container writes
-# pid and conf.db files to $OVSInstallDir on Windows host Node during runtime.
-icacls $OVSInstallDir /grant "NT AUTHORITY\SYSTEM:(OI)(CI)F" /T
 Log "OVS Installation Complete!"
