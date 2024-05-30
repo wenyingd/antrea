@@ -117,10 +117,6 @@ if [ "$PLATFORM" != "" ] && $PUSH; then
     exit 1
 fi
 
-if [ "$DISTRO" != "ubuntu" ] && [ "$DISTRO" != "ubi" ] && [ "$DISTRO" != "windows" ]; then
-    echoerr "Invalid distribution $DISTRO"
-    exit 1
-fi
 
 OVS_VERSION_FILE="../deps/ovs-version"
 if [ "$DISTRO" == "windows" ]; then
