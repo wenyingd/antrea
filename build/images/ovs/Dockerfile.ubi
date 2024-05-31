@@ -13,8 +13,6 @@
 # limitations under the License.
 
 # - openvswitch-$OVS_VERSION.tar.gz - archive of the source code of OpenvSwitch.
-FROM quay.io/centos/centos:stream9 as ovs-rpms
-
 FROM nsx-ujo-docker-local.artifactory.eng.vmware.com/interworking/ubi9/ubi:9.3-1552 as ovs-rpms
 ARG OVS_VERSION
 ARG IPSEC
@@ -39,7 +37,8 @@ RUN tar -xzf /tmp/openvswitch-$OVS_VERSION.tar.gz -C /tmp && \
     # As Antrea runs OVS as root, we disable libcapng to make logrotate also run as root.
     # See https://github.com/openvswitch/ovs/blob/v2.17.7/rhel/openvswitch-fedora.spec.in#L26-L27.
     RPMBUILD_OPT="--without libcapng --without check" make rpm-fedora && mkdir -p /tmp/ovs-rpms && \
-    find /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/*.rpm -not -name "*ipsec*" -exec cp -vr '{}' /tmp/ovs-rpms \; && \
+    cp /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/openvswitch-$OVS_VERSION*.rpm /tmp/ovs-rpms && \
+    cp /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/python3-openvswitch-$OVS_VERSION*.rpm /tmp/ovs-rpms && \
     if ${IPSEC}; then cp /tmp/openvswitch-$OVS_VERSION/rpm/rpmbuild/RPMS/*/*ipsec*.rpm /tmp/ovs-rpms; fi && \
     rm -rf /tmp/openvswitch*
 
@@ -50,18 +49,17 @@ ARG IPSEC
 LABEL maintainer="Antrea <projectantrea-dev@googlegroups.com>"
 LABEL description="A Docker image based on UBI9 which includes Open vSwitch built from source."
 
+COPY CentOS.repo /tmp/CentOS.repo
 RUN --mount=type=bind,from=ovs-rpms,source=/tmp/,target=/tmp/build \
+    rm -f /etc/yum.repos.d/* && cp /tmp/CentOS.repo /etc/yum.repos.d/CentOS.repo && \
     # Disable the default redhat.repo. This substitutes `subscription-manager config --rhsm.manage_repos=0`
     # as subscription-manager is not supported running in containers.
     sed -i.bak "s/^manage_repos = .$/manage_repos = 0/g" /etc/rhsm/rhsm.conf && \
     # Exclude redhat-release to avoid the error "The operation would result in removing the
     # following protected packages: redhat-release".
     yum update --exclude redhat-release -y && \
-    rm -rf /tmp/ovs-rpms/network-scripts-* && \
+    yum install iptables-nft logrotate -y && \
     yum install /tmp/build/ovs-rpms/* -y && \
-    yum install -y https://build-artifactory.eng.vmware.com/artifactory/nsx-ujo-local/antrea/epel/epel-release-latest-9.noarch.rpm \
-    https://build-artifactory.eng.vmware.com/artifactory/nsx-ujo-local/antrea/epel/epel-next-release-latest-9.noarch.rpm && \
-    yum install iptables logrotate -y && \
     mv /etc/logrotate.d/openvswitch /etc/logrotate.d/openvswitch-switch && \
     sed -i "/rotate /a\    #size 100M" /etc/logrotate.d/openvswitch-switch && \
         if ${IPSEC}; then \

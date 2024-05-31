@@ -35,6 +35,7 @@ RUN yum install ipset jq yum-plugin-copr -y && \
     if ${INSTALL_SURICATA_FROM_PACKAGE}; then \
         yum install -y /tmp/suricata*.rpm --setopt=install_weak_deps=False ; \
     else \
+        SURICATA_VERSION=$(echo ${SURICATA_VERSION} | cut -d'.' -f1-2); \
         # Skip installing weak dependencies (geolite2-city and geolite2-country) for Suricata as they are not required for Antrea's use case.
         yum copr enable @oisf/suricata-${SURICATA_VERSION} -y && yum install suricata --setopt=install_weak_deps=False -y && \
         yum remove yum-plugin-copr -y; \
