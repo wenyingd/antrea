@@ -18,15 +18,30 @@
 package cniserver
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
+	"antrea.io/libOpenflow/openflow15"
 	current "github.com/containernetworking/cni/pkg/types/100"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apitypes "k8s.io/apimachinery/pkg/types"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/cniserver/ipam"
 	"antrea.io/antrea/pkg/agent/interfacestore"
+	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/types"
+	"antrea.io/antrea/pkg/util/channel"
 	"antrea.io/antrea/pkg/util/k8s"
+)
+
+const (
+	podNotReadyTimeInSeconds = 30
 )
 
 // connectInterfaceToOVSAsync waits for an interface to be created and connects it to OVS br-int asynchronously
@@ -34,29 +49,15 @@ import (
 // CNI call completes.
 func (pc *podConfigurator) connectInterfaceToOVSAsync(ifConfig *interfacestore.InterfaceConfig, containerAccess *containerAccessArbitrator) error {
 	ovsPortName := ifConfig.InterfaceName
+	// Add the OVS port into unReadyPorts. This operation is performed before we update OVSDB, otherwise we
+	// need to think about the race condition between the current goroutine with the listener.
+	// Note, we may add OVS port into "unReadyOVSPorts" map even if the update OVSDB operation is failed,
+	// because it is also a case that the Pod's networking is not ready.
+	pc.podIfMonitor.addUnReadyPodInterface(ifConfig)
 	return pc.ifConfigurator.addPostInterfaceCreateHook(ifConfig.ContainerID, ovsPortName, containerAccess, func() error {
 		if err := pc.ovsBridgeClient.SetInterfaceType(ovsPortName, "internal"); err != nil {
 			return err
 		}
-		ofPort, err := pc.ovsBridgeClient.GetOFPort(ovsPortName, true)
-		if err != nil {
-			return err
-		}
-		containerID := ifConfig.ContainerID
-		klog.V(2).Infof("Setting up Openflow entries for container %s", containerID)
-		if err := pc.ofClient.InstallPodFlows(ovsPortName, ifConfig.IPs, ifConfig.MAC, uint32(ofPort), ifConfig.VLANID, nil); err != nil {
-			return fmt.Errorf("failed to add Openflow entries for container %s: %v", containerID, err)
-		}
-		// Update interface config with the ofPort.
-		ifConfig.OVSPortConfig.OFPort = ofPort
-		// Notify the Pod update event to required components.
-		event := types.PodUpdate{
-			PodName:      ifConfig.PodName,
-			PodNamespace: ifConfig.PodNamespace,
-			IsAdd:        true,
-			ContainerID:  ifConfig.ContainerID,
-		}
-		pc.podUpdateNotifier.Notify(event)
 		return nil
 	})
 }
@@ -133,4 +134,170 @@ func (pc *podConfigurator) reconcileMissingPods(ifConfigs []*interfacestore.Inte
 			klog.Errorf("Failed to reconcile Pod %s: %v", pod, err)
 		}
 	}
+}
+
+type unReadyPodInfo struct {
+	podName      string
+	podNamespace string
+	annotated    bool
+	createTime   time.Time
+}
+
+type podIfaceMonitor struct {
+	kubeClient        clientset.Interface
+	ifaceStore        interfacestore.InterfaceStore
+	ofClient          openflow.Client
+	podUpdateNotifier channel.Notifier
+
+	// unReadyInterfaces is a map to store the OVS ports which is waiting for the PortStatus from OpenFlow switch.
+	// The key in the map is the OVS port name, and its value is unReadyPodInfo.
+	// It is used only on Windows now.
+	unReadyInterfaces sync.Map
+	statusCh          chan *openflow15.PortStatus
+}
+
+func newPodInterfaceMonitor(kubeClient clientset.Interface,
+	ofClient openflow.Client,
+	ifaceStore interfacestore.InterfaceStore,
+	podUpdateNotifier channel.Notifier,
+) *podIfaceMonitor {
+	statusCh := make(chan *openflow15.PortStatus)
+	ofClient.SubscribeOFPortStatusMessage(statusCh)
+	return &podIfaceMonitor{
+		kubeClient:        kubeClient,
+		ofClient:          ofClient,
+		ifaceStore:        ifaceStore,
+		podUpdateNotifier: podUpdateNotifier,
+		unReadyInterfaces: sync.Map{},
+		statusCh:          statusCh,
+	}
+}
+
+func (m *podIfaceMonitor) monitorUnReadyInterface(stopCh <-chan struct{}) {
+	klog.Info("Started the monitor to wait for new OpenFlow ports")
+	go func() {
+		for {
+			select {
+			case <-stopCh:
+				return
+			case status := <-m.statusCh:
+				klog.V(2).InfoS("Received PortStatus message", "message", status)
+				// Update Pod OpenFlow entries only after the OpenFlow port state is live.
+				if status.Desc.State == openflow15.PS_LIVE {
+					m.updateUnReadyPod(status)
+				}
+			case <-time.Tick(time.Second * 5):
+				m.checkUnReadyPods()
+			}
+		}
+	}()
+}
+
+func (m *podIfaceMonitor) updatePodFlows(ifName string, ofPort int32) error {
+	ifConfig, found := m.ifaceStore.GetInterfaceByName(ifName)
+	if !found {
+		klog.Info("Interface config is not found", "name", ifName)
+		return nil
+	}
+	containerID := ifConfig.ContainerID
+
+	// Update interface config with the ofPort.
+	ifConfig.OVSPortConfig.OFPort = ofPort
+	m.ifaceStore.UpdateInterface(ifConfig)
+
+	// Install OpenFlow entries for the Pod.
+	klog.V(2).Infof("Setting up Openflow entries for container %s", containerID)
+	if err := m.ofClient.InstallPodFlows(ifName, ifConfig.IPs, ifConfig.MAC, uint32(ofPort), ifConfig.VLANID, nil); err != nil {
+		return fmt.Errorf("failed to add Openflow entries for container %s: %v", containerID, err)
+	}
+
+	// Notify the Pod update event to required components.
+	event := types.PodUpdate{
+		PodName:      ifConfig.PodName,
+		PodNamespace: ifConfig.PodNamespace,
+		IsAdd:        true,
+		ContainerID:  ifConfig.ContainerID,
+	}
+	m.podUpdateNotifier.Notify(event)
+
+	// Remove the annotation from Pod if exists.
+	m.updatePodUnreadyAnnotation(ifConfig.PodNamespace, ifConfig.PodName, false)
+	return nil
+}
+
+func (m *podIfaceMonitor) updatePodUnreadyAnnotation(podNamespace, podName string, addAnnotation bool) {
+	pod, err := m.kubeClient.CoreV1().Pods(podNamespace).Get(context.Background(), podName, metav1.GetOptions{})
+	if err != nil {
+		klog.ErrorS(err, "Failed to get Pod when trying to update 'unready' annotations", "Namespace", podNamespace, "Name", podName)
+		return
+	}
+
+	annotated := false
+	if pod.Annotations != nil {
+		_, annotated = pod.Annotations[types.PodNotReadyAnnotationKey]
+	}
+
+	if addAnnotation && !annotated {
+		// Add the annotation on Pod with '"pod.antrea.io/not-ready": ""'
+		patch, _ := json.Marshal(map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]interface{}{types.PodNotReadyAnnotationKey: ""},
+			},
+		})
+		m.kubeClient.CoreV1().Pods(podNamespace).Patch(context.Background(), podName, apitypes.MergePatchType, patch, metav1.PatchOptions{})
+	} else if !addAnnotation && annotated {
+		// Remove the annotation on Pod with '"pod.antrea.io/not-ready": ""'
+		patch, _ := json.Marshal(map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]interface{}{types.PodNotReadyAnnotationKey: nil},
+			},
+		})
+		m.kubeClient.CoreV1().Pods(podNamespace).Patch(context.Background(), podName, apitypes.MergePatchType, patch, metav1.PatchOptions{})
+	}
+}
+
+func (m *podIfaceMonitor) updateUnReadyPod(status *openflow15.PortStatus) {
+	ovsPort := string(bytes.Trim(status.Desc.Name, "\x00"))
+	obj, found := m.unReadyInterfaces.Load(ovsPort)
+	if !found {
+		klog.InfoS("OVS port is not found", "ovsPort", ovsPort)
+		return
+	}
+	podInfo := obj.(*unReadyPodInfo)
+	ofPort := status.Desc.PortNo
+	if err := m.updatePodFlows(ovsPort, int32(ofPort)); err != nil {
+		klog.ErrorS(err, "Failed to update Pod's OpenFlow entries", "PodName", podInfo.podName, "PodNamespace", podInfo.podNamespace, "OVSPort", ovsPort)
+		return
+	}
+	// Delete the Pod from unReadyPods
+	m.unReadyInterfaces.Delete(ovsPort)
+}
+
+func (m *podIfaceMonitor) checkUnReadyPods() {
+	m.unReadyInterfaces.Range(func(key, value any) bool {
+		podInfo := value.(*unReadyPodInfo)
+		if !podInfo.annotated && time.Now().Sub(podInfo.createTime).Seconds() > podNotReadyTimeInSeconds {
+			m.updatePodUnreadyAnnotation(podInfo.podNamespace, podInfo.podName, true)
+			podInfo.annotated = true
+			m.unReadyInterfaces.Store(key, podInfo)
+		}
+		return true
+	})
+}
+
+func (m *podIfaceMonitor) addUnReadyPodInterface(ifConfig *interfacestore.InterfaceConfig) {
+	klog.InfoS("Added OVS port into unready interfaces", "ovsPort", ifConfig.InterfaceName,
+		"podName", ifConfig.PodName, "podNamespace", ifConfig.PodNamespace)
+	m.unReadyInterfaces.Store(ifConfig.InterfaceName, &unReadyPodInfo{
+		podName:      ifConfig.PodName,
+		podNamespace: ifConfig.PodNamespace,
+		annotated:    false,
+		createTime:   time.Now(),
+	})
+}
+
+// getPortStatusCh returns the channel used to receive OpenFlow.PortStatus message.
+// This function is added for test.
+func (m *podIfaceMonitor) getPortStatusCh() chan *openflow15.PortStatus {
+	return m.statusCh
 }

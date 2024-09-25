@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"antrea.io/libOpenflow/openflow15"
 	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/hcn"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
@@ -258,6 +259,7 @@ func (t *hnsTestUtil) addHostInterface() {
 }
 
 func newMockCNIServer(t *testing.T, controller *gomock.Controller, podUpdateNotifier *channel.SubscribableChannel) *CNIServer {
+	kubeClient := fakeclientset.NewClientset()
 	mockOVSBridgeClient = ovsconfigtest.NewMockOVSBridgeClient(controller)
 	mockOFClient = openflowtest.NewMockClient(controller)
 	mockRoute = routetest.NewMockInterface(controller)
@@ -269,7 +271,8 @@ func newMockCNIServer(t *testing.T, controller *gomock.Controller, podUpdateNoti
 	gwMAC, _ := net.ParseMAC("00:00:11:11:11:11")
 	gateway := &config.GatewayConfig{Name: "", IPv4: gwIPv4, MAC: gwMAC}
 	cniServer.nodeConfig = &config.NodeConfig{Name: "node1", PodIPv4CIDR: nodePodCIDRv4, GatewayConfig: gateway}
-	cniServer.podConfigurator, _ = newPodConfigurator(mockOVSBridgeClient, mockOFClient, mockRoute, ifaceStore, gwMAC, "system", false, false, podUpdateNotifier)
+	mockOFClient.EXPECT().SubscribeOFPortStatusMessage(gomock.Any()).AnyTimes()
+	cniServer.podConfigurator, _ = newPodConfigurator(kubeClient, mockOVSBridgeClient, mockOFClient, mockRoute, ifaceStore, gwMAC, "system", false, false, podUpdateNotifier)
 	cniServer.podConfigurator.ifConfigurator.(*ifConfigurator).winnet = mockWinnet
 	return cniServer
 }
@@ -371,6 +374,8 @@ func TestCmdAdd(t *testing.T) {
 			defer testUtil.restore()
 			waiter := newAsyncWaiter(tc.podName, tc.infraContainerID)
 			server := newMockCNIServer(t, controller, waiter.notifier)
+			ofPortNumber := uint32(100)
+			portStatusCh := server.podConfigurator.podIfMonitor.getPortStatusCh()
 			requestMsg, ovsPortName := prepareSetup(t, ipamType, tc.podName, tc.containerID, tc.infraContainerID, tc.netns, nil)
 			if tc.endpointExists {
 				server.podConfigurator.ifConfigurator.(*ifConfigurator).addEndpoint(getHnsEndpoint(generateUUID(), ovsPortName))
@@ -390,8 +395,19 @@ func TestCmdAdd(t *testing.T) {
 			ovsPortID := generateUUID()
 			if tc.connectOVS {
 				mockOVSBridgeClient.EXPECT().CreatePort(ovsPortName, ovsPortName, gomock.Any()).Return(ovsPortID, nil).Times(1)
-				mockOVSBridgeClient.EXPECT().SetInterfaceType(ovsPortName, "internal").Return(nil).Times(1)
-				mockOVSBridgeClient.EXPECT().GetOFPort(ovsPortName, true).Return(int32(100), nil).Times(1)
+				mockOVSBridgeClient.EXPECT().SetInterfaceType(ovsPortName, "internal").Return(nil).Times(1).Do(
+					func() {
+						time.Sleep(time.Millisecond * 50)
+						portStatusCh <- &openflow15.PortStatus{
+							Reason: openflow15.PR_MODIFY,
+							Desc: openflow15.Port{
+								PortNo: ofPortNumber,
+								Length: 72,
+								Name:   []byte(ovsPortName),
+								State:  openflow15.PS_LIVE,
+							},
+						}
+					})
 				mockOFClient.EXPECT().InstallPodFlows(ovsPortName, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil)
 				mockRoute.EXPECT().AddLocalAntreaFlexibleIPAMPodRule(gomock.Any()).Return(nil).Times(1)
 			}
@@ -724,6 +740,7 @@ func newAsyncWaiter(podName, containerID string) *asyncWaiter {
 
 func TestReconcile(t *testing.T) {
 	controller := gomock.NewController(t)
+	kubeClient := fakeclientset.NewClientset(pod1, pod2, pod3)
 	mockOVSBridgeClient = ovsconfigtest.NewMockOVSBridgeClient(controller)
 	mockOFClient = openflowtest.NewMockClient(controller)
 	ifaceStore = interfacestore.NewInterfaceStore()
@@ -739,13 +756,12 @@ func TestReconcile(t *testing.T) {
 
 	cniServer := newCNIServer(t)
 	cniServer.routeClient = mockRoute
-	kubeClient := fakeclientset.NewSimpleClientset(pod1, pod2, pod3)
 	cniServer.kubeClient = kubeClient
 	for _, containerIface := range []*interfacestore.InterfaceConfig{normalInterface, staleInterface, unconnectedInterface} {
 		ifaceStore.AddInterface(containerIface)
 	}
 	waiter := newAsyncWaiter(unconnectedInterface.PodName, unconnectedInterface.ContainerID)
-	cniServer.podConfigurator, _ = newPodConfigurator(mockOVSBridgeClient, mockOFClient, mockRoute, ifaceStore, gwMAC, "system", false, false, waiter.notifier)
+	cniServer.podConfigurator, _ = newPodConfigurator(kubeClient, mockOVSBridgeClient, mockOFClient, mockRoute, ifaceStore, gwMAC, "system", false, false, waiter.notifier)
 	cniServer.nodeConfig = &config.NodeConfig{Name: nodeName}
 
 	// Re-install Pod1 flows

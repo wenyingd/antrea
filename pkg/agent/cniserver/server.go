@@ -660,7 +660,7 @@ func (s *CNIServer) Initialize(
 ) error {
 	var err error
 	s.podConfigurator, err = newPodConfigurator(
-		ovsBridgeClient, ofClient, s.routeClient, ifaceStore, s.nodeConfig.GatewayConfig.MAC,
+		s.kubeClient, ovsBridgeClient, ofClient, s.routeClient, ifaceStore, s.nodeConfig.GatewayConfig.MAC,
 		ovsBridgeClient.GetOVSDatapathType(), ovsBridgeClient.IsHardwareOffloadEnabled(),
 		s.disableTXChecksumOffload, podUpdateNotifier)
 	if err != nil {
@@ -675,6 +675,8 @@ func (s *CNIServer) Initialize(
 func (s *CNIServer) Run(stopCh <-chan struct{}) {
 	klog.InfoS("Starting CNI server")
 	defer klog.InfoS("Shutting down CNI server")
+
+	s.podConfigurator.podIfMonitor.monitorUnReadyInterface(stopCh)
 
 	listener, err := util.ListenLocalSocket(s.cniSocket)
 	if err != nil {

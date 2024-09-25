@@ -25,6 +25,7 @@ import (
 	"github.com/containernetworking/cni/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/cniserver/ipam"
@@ -76,9 +77,11 @@ type podConfigurator struct {
 	// isSecondaryNetwork is true if this instance of podConfigurator is used to configure
 	// Pod secondary network interfaces.
 	isSecondaryNetwork bool
+	podIfMonitor       *podIfaceMonitor
 }
 
 func newPodConfigurator(
+	kubeClient clientset.Interface,
 	ovsBridgeClient ovsconfig.OVSBridgeClient,
 	ofClient openflow.Client,
 	routeClient route.Interface,
@@ -93,6 +96,7 @@ func newPodConfigurator(
 	if err != nil {
 		return nil, err
 	}
+	ifMonitor := newPodInterfaceMonitor(kubeClient, ofClient, ifaceStore, podUpdateNotifier)
 	return &podConfigurator{
 		ovsBridgeClient:   ovsBridgeClient,
 		ofClient:          ofClient,
@@ -101,6 +105,7 @@ func newPodConfigurator(
 		gatewayMAC:        gatewayMAC,
 		ifConfigurator:    ifConfigurator,
 		podUpdateNotifier: podUpdateNotifier,
+		podIfMonitor:      ifMonitor,
 	}, nil
 }
 

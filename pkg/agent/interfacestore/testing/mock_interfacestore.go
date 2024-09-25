@@ -277,3 +277,15 @@ func (mr *MockInterfaceStoreMockRecorder) ListInterfaces() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListInterfaces", reflect.TypeOf((*MockInterfaceStore)(nil).ListInterfaces))
 }
+
+// UpdateInterface mocks base method.
+func (m *MockInterfaceStore) UpdateInterface(arg0 *interfacestore.InterfaceConfig) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "UpdateInterface", arg0)
+}
+
+// UpdateInterface indicates an expected call of UpdateInterface.
+func (mr *MockInterfaceStoreMockRecorder) UpdateInterface(arg0 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateInterface", reflect.TypeOf((*MockInterfaceStore)(nil).UpdateInterface), arg0)
+}
