@@ -23,7 +23,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -38,6 +37,7 @@ import (
 	"k8s.io/client-go/util/keyutil"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/clock"
 
 	antreaapis "antrea.io/antrea/pkg/apis"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
@@ -58,11 +58,12 @@ const (
 	ovsConfigCACertificateKey = "ca_cert"
 	ovsConfigPrivateKeyKey    = "private_key"
 	ovsConfigCertificateKey   = "certificate"
+
+	// certificateWaitTimeout controls the amount of time we wait for certificate approval in
+	// one iteration.
+	certificateWaitTimeout = 15 * time.Minute
 )
 
-// certificateWaitTimeout controls the amount of time we wait for certificate
-// approval in one iteration.
-var certificateWaitTimeout = 15 * time.Minute
 var defaultCertificatesPath = "/var/run/openvswitch"
 
 // Controller is responsible for requesting certificates by CertificateSigningRequest and configure them to OVS
@@ -70,10 +71,12 @@ type Controller struct {
 	kubeClient      clientset.Interface
 	ovsBridgeClient ovsconfig.OVSBridgeClient
 	nodeName        string
-	queue           workqueue.RateLimitingInterface
+	queue           workqueue.TypedRateLimitingInterface[string]
 
 	rotateCertificate  func() (*certificateKeyPair, error)
 	certificateKeyPair *certificateKeyPair
+
+	clock clock.WithTicker
 
 	// caPath and is initialized with NewIPSecCertificateController and should not
 	// be changed once Controller starts.
@@ -97,11 +100,24 @@ func NewIPSecCertificateController(
 	ovsBridgeClient ovsconfig.OVSBridgeClient,
 	nodeName string,
 ) *Controller {
+	return newIPSecCertificateControllerWithCustomClock(kubeClient, ovsBridgeClient, nodeName, clock.RealClock{})
+}
+
+func newIPSecCertificateControllerWithCustomClock(kubeClient clientset.Interface,
+	ovsBridgeClient ovsconfig.OVSBridgeClient,
+	nodeName string, clock clock.WithTicker) *Controller {
 	controller := &Controller{
-		kubeClient:            kubeClient,
-		ovsBridgeClient:       ovsBridgeClient,
-		nodeName:              nodeName,
-		queue:                 workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "IPsecCertificateController"),
+		kubeClient:      kubeClient,
+		ovsBridgeClient: ovsBridgeClient,
+		nodeName:        nodeName,
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name:  "IPsecCertificateController",
+				Clock: clock,
+			},
+		),
+		clock:                 clock,
 		caPath:                filepath.Join(defaultCertificatesPath, "ca", "ca.crt"),
 		certificateFolderPath: defaultCertificatesPath,
 	}
@@ -117,16 +133,12 @@ func (c *Controller) worker() {
 }
 
 func (c *Controller) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
-	defer c.queue.Done(obj)
-	if key, ok := obj.(string); !ok {
-		c.queue.Forget(obj)
-		klog.ErrorS(nil, "Unexpected object in work queue", "object", obj)
-		return true
-	} else if err := c.syncConfigurations(); err == nil {
+	defer c.queue.Done(key)
+	if err := c.syncConfigurations(); err == nil {
 		c.queue.Forget(key)
 	} else {
 		c.queue.AddRateLimited(key)
@@ -144,7 +156,7 @@ type certificateKeyPair struct {
 	rotationDeadline time.Time
 }
 
-func (pair *certificateKeyPair) validate() error {
+func (pair *certificateKeyPair) validate(clock clock.Clock) error {
 	if pair == nil {
 		return fmt.Errorf("certificate and key pair is nil")
 	}
@@ -167,6 +179,7 @@ func (pair *certificateKeyPair) validate() error {
 		KeyUsages: []x509.ExtKeyUsage{
 			x509.ExtKeyUsageIPSECTunnel,
 		},
+		CurrentTime: clock.Now(),
 	}
 	if _, err := certificate.Verify(verifyOptions); err != nil {
 		return err
@@ -250,7 +263,7 @@ func loadCertAndKeyFromFiles(caPath, certPath, keyPath string) (*certificateKeyP
 }
 
 func (c *Controller) syncConfigurations() error {
-	startTime := time.Now()
+	startTime := c.clock.Now()
 	defer func() {
 		d := time.Since(startTime)
 		klog.V(2).InfoS("Finished syncing IPsec certificate configurations", "duration", d)
@@ -258,20 +271,20 @@ func (c *Controller) syncConfigurations() error {
 
 	var deadline time.Time
 	// Validate the existing certificate and key pair.
-	if err := c.certificateKeyPair.validate(); err != nil {
+	if err := c.certificateKeyPair.validate(c.clock); err != nil {
 		klog.ErrorS(err, "Verifying current certificate configurations failed")
-		deadline = time.Now()
+		deadline = c.clock.Now()
 	} else {
 		deadline = c.certificateKeyPair.nextRotationDeadline()
 	}
 	// Current certificate is about to expire.
-	if sleepInterval := time.Until(deadline); sleepInterval <= 0 {
+	if sleepInterval := deadline.Sub(c.clock.Now()); sleepInterval <= 0 {
 		klog.InfoS("Start rotating IPsec certificate")
 		newCertKeyPair, err := c.rotateCertificate()
 		if err != nil {
 			return fmt.Errorf("failed to rotate certificate: %w", err)
 		}
-		if err := newCertKeyPair.validate(); err != nil {
+		if err := newCertKeyPair.validate(c.clock); err != nil {
 			newCertKeyPair.cleanup()
 			return fmt.Errorf("failed to validate new certificate: %w", err)
 		}
@@ -285,7 +298,8 @@ func (c *Controller) syncConfigurations() error {
 		deadline = c.certificateKeyPair.nextRotationDeadline()
 	}
 	// Re-queue after the interval to renew the certificate.
-	c.queue.AddAfter(workerItemKey, time.Until(deadline))
+	addAfter := deadline.Sub(c.clock.Now())
+	c.queue.AddAfter(workerItemKey, addAfter)
 	// Sync OVS bridge configurations.
 	if err := c.syncOVSConfigurations(c.certificateKeyPair.certificatePath,
 		c.certificateKeyPair.privateKeyPath, caCertificatePath); err != nil {
@@ -303,7 +317,7 @@ func (c *Controller) HasSynced() bool {
 }
 
 func loadRootCA(caPath string) ([]*x509.Certificate, error) {
-	pemBlock, err := ioutil.ReadFile(caPath)
+	pemBlock, err := os.ReadFile(caPath)
 	if err != nil {
 		return nil, err
 	}
@@ -331,7 +345,7 @@ func loadPrivateKey(privateKeyPath string) (crypto.Signer, error) {
 	_, err := os.Stat(privateKeyPath)
 	if err == nil {
 		// Load the private key contents from file.
-		keyPEMBytes, err = ioutil.ReadFile(privateKeyPath)
+		keyPEMBytes, err = os.ReadFile(privateKeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read key file %s: %v", privateKeyPath, err)
 		}
@@ -356,7 +370,7 @@ func loadCertificate(certPath string) ([]*x509.Certificate, error) {
 	_, err := os.Stat(certPath)
 	if err == nil {
 		// Load the certificate from file.
-		certPEMBytes, err = ioutil.ReadFile(certPath)
+		certPEMBytes, err = os.ReadFile(certPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read certificate file %s: %w", certPath, err)
 		}

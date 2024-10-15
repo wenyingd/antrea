@@ -21,9 +21,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	interfacestoretest "antrea.io/antrea/pkg/agent/interfacestore/testing"
 	queriertest "antrea.io/antrea/pkg/agent/querier/testing"
@@ -55,7 +56,7 @@ var podNames = []string{
 	"pod1",
 }
 
-var responses = []Response{
+var responses = []apis.PodInterfaceResponse{
 	{
 		PodName:       podNames[0],
 		PodNamespace:  "namespaceA",
@@ -140,32 +141,30 @@ func parseMAC(mac string) net.HardwareAddr {
 
 func TestPodInterfaceQuery(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	testcases := map[string]struct {
 		query           string
 		expectedStatus  int
-		expectedContent []Response
+		expectedContent []apis.PodInterfaceResponse
 	}{
 		"Hit Pod interface query, namespace provided": {
 			query:           "?name=pod1&&namespace=namespaceA",
 			expectedStatus:  http.StatusOK,
-			expectedContent: []Response{responses[1]},
+			expectedContent: []apis.PodInterfaceResponse{responses[1]},
 		},
 		"Miss Pod interface query, namespace provided": {
 			query:           "?name=pod1&&namespace=namespaceB",
 			expectedStatus:  http.StatusNotFound,
-			expectedContent: []Response{},
+			expectedContent: []apis.PodInterfaceResponse{},
 		},
 		"Hit Pod interface list query, namespace not provided": {
 			query:           "?name=pod0",
 			expectedStatus:  http.StatusOK,
-			expectedContent: []Response{responses[0], responses[2]},
+			expectedContent: []apis.PodInterfaceResponse{responses[0], responses[2]},
 		},
 		"Miss Pod interface list query, namespace not provided": {
 			query:           "?name=pod2",
 			expectedStatus:  http.StatusNotFound,
-			expectedContent: []Response{},
+			expectedContent: []apis.PodInterfaceResponse{},
 		},
 	}
 
@@ -185,7 +184,7 @@ func TestPodInterfaceQuery(t *testing.T) {
 		assert.Equal(t, tc.expectedStatus, recorder.Code, k)
 
 		if tc.expectedStatus == http.StatusOK {
-			var received []Response
+			var received []apis.PodInterfaceResponse
 			err = json.Unmarshal(recorder.Body.Bytes(), &received)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedContent, received)
@@ -195,27 +194,25 @@ func TestPodInterfaceQuery(t *testing.T) {
 
 func TestPodInterfaceListQuery(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	testcases := map[string]struct {
 		query           string
 		expectedStatus  int
-		expectedContent []Response
+		expectedContent []apis.PodInterfaceResponse
 	}{
 		"Hit pod interfaces in a namespace list query": {
 			query:           "?name=&&namespace=namespaceA",
 			expectedStatus:  http.StatusOK,
-			expectedContent: []Response{responses[0], responses[1]},
+			expectedContent: []apis.PodInterfaceResponse{responses[0], responses[1]},
 		},
 		"Miss pod interfaces in a namespaces list query": {
 			query:           "?name=&&namespace=namespaceC",
 			expectedStatus:  http.StatusOK,
-			expectedContent: []Response(nil),
+			expectedContent: []apis.PodInterfaceResponse(nil),
 		},
 		"Hit all pod interfaces in all namespace list query": {
 			query:           "?name=&&namespace=",
 			expectedStatus:  http.StatusOK,
-			expectedContent: []Response{responses[0], responses[1], responses[2]},
+			expectedContent: []apis.PodInterfaceResponse{responses[0], responses[1], responses[2]},
 		},
 	}
 
@@ -235,7 +232,7 @@ func TestPodInterfaceListQuery(t *testing.T) {
 		assert.Equal(t, tc.expectedStatus, recorder.Code, k)
 
 		if tc.expectedStatus == http.StatusOK {
-			var received []Response
+			var received []apis.PodInterfaceResponse
 			err = json.Unmarshal(recorder.Body.Bytes(), &received)
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedContent, received)

@@ -37,7 +37,9 @@ spec:
         {{- end }}
     spec:
       hostNetwork: true
+      {{- if .Values.agent.dnsPolicy }}
       dnsPolicy: {{ .Values.agent.dnsPolicy }}
+      {{- end }}
       priorityClassName: {{ .Values.agent.priorityClassName }}
       {{- with .Values.agent.nodeSelector }}
       nodeSelector:
@@ -65,25 +67,12 @@ spec:
       {{- end }}
       serviceAccountName: antrea-agent
       initContainers:
-        {{- if .Values.whereabouts.enable }}
-        - name: install-whereabouts-config
-          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
-          resources:
-            requests:
-              cpu: "100m"
-          command: ["install_whereabouts_config"]
-          volumeMounts:
-          - name: whereabouts-cni-conf
-            mountPath: /host/etc/cni/net.d/whereabouts.d
-          - name: whereabouts-secret
-            mountPath: /var/run/secrets/whereabouts
-        {{- end }}
       {{- if eq .Values.trafficEncapMode "networkPolicyOnly" }}
       containers:
       {{- end }}
         - name: install-cni
-          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "antreaAgentImage" . | quote }}
+          imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
           resources: {{- .Values.agent.installCNI.resources | toYaml | nindent 12 }}
           {{- if eq .Values.trafficEncapMode "networkPolicyOnly" }}
           command: ["install_cni_chaining"]
@@ -91,16 +80,31 @@ spec:
           {{- else }}
           command: ["install_cni"]
           {{- end }}
+          {{- with .Values.agent.installCNI.securityContext }}
           securityContext:
+            {{- if .privileged }}
+            privileged: true
+            {{- else }}
+            {{- with .capabilities }}
             capabilities:
               add:
-                # SYS_MODULE is required to load the OVS kernel module.
-                - SYS_MODULE
+                {{- toYaml . | nindent 16 }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
           env:
+            {{- range $k, $v := .Values.agent.installCNI.extraEnv }}
+            - name: {{ $k | quote }}
+              value: {{ $v | quote }}
+            {{- end }}
             # SKIP_CNI_BINARIES takes in values as a comma separated list of
             # binaries that need to be skipped for installation, e.g. "portmap, bandwidth".
             - name: SKIP_CNI_BINARIES
               value: {{ join "," .Values.cni.skipBinaries | quote }}
+            {{- if .Values.agent.dontLoadKernelModules }}
+            - name: SKIP_LOADING_KERNEL_MODULES
+              value: "1"
+            {{- end }}
           volumeMounts:
           - name: antrea-config
             mountPath: /etc/antrea/antrea-cni.conflist
@@ -110,10 +114,12 @@ spec:
             mountPath: /host/etc/cni/net.d
           - name: host-cni-bin
             mountPath: /host/opt/cni/bin
+          {{- if not .Values.agent.dontLoadKernelModules }}
           # For loading the OVS kernel module.
           - name: host-lib-modules
             mountPath: /lib/modules
             readOnly: true
+          {{- end }}
           # For changing the default permissions of the run directory.
           - name: host-var-run-antrea
             mountPath: /var/run/antrea
@@ -121,11 +127,18 @@ spec:
       containers:
       {{- end }}
         - name: antrea-agent
-          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "antreaAgentImage" . | quote }}
+          imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
           {{- if ((.Values.testing).coverage) }}
-          command: ["/bin/sh"]
-          args: ["-c", "sleep 2; antrea-agent-coverage -test.run=TestBincoverRunMain -test.coverprofile=antrea-agent.cov.out -args-file=/agent-arg-file; while true; do sleep 5 & wait $!; done"]
+          args:
+            - "antrea-agent"
+            - "--config=/etc/antrea/antrea-agent.conf"
+            - "--logtostderr=false"
+            - "--log_dir=/var/log/antrea"
+            - "--alsologtostderr"
+            - "--log_file_max_size=100"
+            - "--log_file_max_num=4"
+            - "--v=4"
           {{- else}}
           command: ["antrea-agent"]
           # Log to both "/var/log/antrea/" and stderr (so "kubectl logs" can work).-
@@ -175,12 +188,12 @@ spec:
               name: api
               protocol: TCP
           livenessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - container_liveness_probe agent
-            initialDelaySeconds: 5
+            httpGet:
+              host: localhost
+              path: /livez
+              port: api
+              scheme: HTTPS
+            initialDelaySeconds: 10
             timeoutSeconds: 5
             periodSeconds: 10
             failureThreshold: 5
@@ -198,9 +211,18 @@ spec:
             # scenario, otherwise the DaemonSet controller would restart all agents at once, as opposed to performing a
             # rolling update. Set failureThreshold to 8 so it can tolerate 70s of disconnection.
             failureThreshold: 8
+          {{- with .Values.agent.antreaAgent.securityContext }}
           securityContext:
-            # antrea-agent needs to perform sysctl configuration.
+            {{- if .privileged }}
             privileged: true
+            {{- else }}
+            {{- with .capabilities }}
+            capabilities:
+              add:
+                {{- toYaml . | nindent 16 }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
           volumeMounts:
           - name: antrea-config
             mountPath: /etc/antrea/antrea-agent.conf
@@ -238,18 +260,12 @@ spec:
             mountPropagation: HostToContainer
           - name: xtables-lock
             mountPath: /run/xtables.lock
-          {{- if .Values.whereabouts.enable }}
-          - name: whereabouts-cni-conf
-            mountPath: /host/etc/cni/net.d/whereabouts.d
-          - name: whereabouts-secret
-            mountPath: /var/run/secrets/whereabouts
-          {{- end }}
           {{- with .Values.agent.antreaAgent.extraVolumeMounts }}
           {{- toYaml . | trim | nindent 10 }}
           {{- end }}
         - name: antrea-ovs
-          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "antreaAgentImage" . | quote }}
+          imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
           resources: {{- .Values.agent.antreaOVS.resources | toYaml | nindent 12 }}
           command: ["start_ovs"]
           args:
@@ -261,14 +277,25 @@ spec:
             {{- with .Values.agent.antreaOVS.extraArgs }}
             {{- toYaml . | trim | nindent 12 }}
             {{- end }}
+          {{- if .Values.agent.antreaOVS.extraEnv }}
+          env:
+            {{- range $k, $v := .Values.agent.antreaOVS.extraEnv }}
+            - name: {{ $k | quote }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.agent.antreaOVS.securityContext }}
           securityContext:
-            # capabilities required by OVS daemons
+            {{- if .privileged }}
+            privileged: true
+            {{- else }}
+            {{- with .capabilities }}
             capabilities:
               add:
-                - SYS_NICE
-                - NET_ADMIN
-                - SYS_ADMIN
-                - IPC_LOCK
+                {{- toYaml . | nindent 16 }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
           livenessProbe:
             exec:
               # docker CRI doesn't honor timeoutSeconds, add "timeout" to the command as a workaround.
@@ -290,8 +317,8 @@ spec:
             subPath: openvswitch
         {{- if eq .Values.trafficEncryptionMode "ipsec" }}
         - name: antrea-ipsec
-          image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "antreaAgentImage" . | quote }}
+          imagePullPolicy: {{ include "antreaAgentImagePullPolicy" . }}
           resources: {{- .Values.agent.antreaIPsec.resources | toYaml | nindent 12 }}
           command: ["start_ovs_ipsec"]
           livenessProbe:
@@ -302,10 +329,18 @@ spec:
                 - timeout 5 container_liveness_probe ovs-ipsec
             initialDelaySeconds: 5
             periodSeconds: 5
+          {{- with .Values.agent.antreaIPsec.securityContext }}
           securityContext:
+            {{- if .privileged }}
+            privileged: true
+            {{- else }}
+            {{- with .capabilities }}
             capabilities:
               add:
-              - NET_ADMIN
+                {{- toYaml . | nindent 16 }}
+            {{- end }}
+            {{- end }}
+          {{- end }}
           volumeMounts:
           - name: host-var-run-antrea
             mountPath: /var/run/openvswitch
@@ -353,21 +388,15 @@ spec:
             path: /var/log/antrea
             # we use subPath to create logging subdirectories for different component (e.g. OVS)
             type: DirectoryOrCreate
+        {{- if not .Values.agent.dontLoadKernelModules }}
         - name: host-lib-modules
           hostPath:
             path: /lib/modules
+        {{- end }}
         - name: xtables-lock
           hostPath:
             path: /run/xtables.lock
             type: FileOrCreate
         {{- with .Values.agent.extraVolumes }}
         {{- toYaml . | trim | nindent 8 }}
-        {{- end }}
-        {{- if .Values.whereabouts.enable }}
-        - hostPath:
-            path: /host/etc/cni/net.d/whereabouts.d
-          name: whereabouts-cni-conf
-        - name: whereabouts-secret
-          secret:
-            secretName: whereabouts-cni-secret
         {{- end }}

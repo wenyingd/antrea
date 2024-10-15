@@ -18,10 +18,12 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/interfacestore"
+	"antrea.io/antrea/pkg/agent/memberlist"
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/proxy"
 	"antrea.io/antrea/pkg/apis/crd/v1beta1"
@@ -42,6 +44,9 @@ type AgentQuerier interface {
 	GetOVSCtlClient() ovsctl.OVSCtlClient
 	GetProxier() proxy.Proxier
 	GetNetworkPolicyInfoQuerier() querier.AgentNetworkPolicyInfoQuerier
+	GetMemberlistCluster() memberlist.Interface
+	GetNodeLister() corelisters.NodeLister
+	GetBGPPolicyInfoQuerier() querier.AgentBGPPolicyInfoQuerier
 }
 
 type agentQuerier struct {
@@ -54,6 +59,10 @@ type agentQuerier struct {
 	proxier                  proxy.Proxier
 	networkPolicyInfoQuerier querier.AgentNetworkPolicyInfoQuerier
 	apiPort                  int
+	nplRange                 string
+	memberlistCluster        memberlist.Interface
+	nodeLister               corelisters.NodeLister
+	bgpPolicyInfoQuerier     querier.AgentBGPPolicyInfoQuerier
 }
 
 func NewAgentQuerier(
@@ -66,6 +75,10 @@ func NewAgentQuerier(
 	proxier proxy.Proxier,
 	networkPolicyInfoQuerier querier.AgentNetworkPolicyInfoQuerier,
 	apiPort int,
+	nplRange string,
+	memberlistCluster memberlist.Interface,
+	nodeLister corelisters.NodeLister,
+	bgpPolicyInfoQuerier querier.AgentBGPPolicyInfoQuerier,
 ) *agentQuerier {
 	return &agentQuerier{
 		nodeConfig:               nodeConfig,
@@ -76,7 +89,22 @@ func NewAgentQuerier(
 		ovsBridgeClient:          ovsBridgeClient,
 		proxier:                  proxier,
 		networkPolicyInfoQuerier: networkPolicyInfoQuerier,
-		apiPort:                  apiPort}
+		apiPort:                  apiPort,
+		nplRange:                 nplRange,
+		memberlistCluster:        memberlistCluster,
+		nodeLister:               nodeLister,
+		bgpPolicyInfoQuerier:     bgpPolicyInfoQuerier,
+	}
+}
+
+// GetNodeLister returns NodeLister.
+func (aq agentQuerier) GetNodeLister() corelisters.NodeLister {
+	return aq.nodeLister
+}
+
+// GetMemberlistCluster returns MemberlistCluster Interface.
+func (aq agentQuerier) GetMemberlistCluster() memberlist.Interface {
+	return aq.memberlistCluster
 }
 
 // GetNodeConfig returns NodeConfig.
@@ -205,7 +233,7 @@ func (aq agentQuerier) GetAgentInfo(agentInfo *v1beta1.AntreaAgentInfo, partial 
 	}
 	agentInfo.AgentConditions = aq.getAgentConditions(ovsConnected)
 
-	// Some other fields are needed when partial if false.
+	// Some other fields are needed when partial is false.
 	if !partial {
 		agentInfo.Version = querier.GetVersion()
 		agentInfo.PodRef = querier.GetSelfPod()
@@ -221,5 +249,11 @@ func (aq agentQuerier) GetAgentInfo(agentInfo *v1beta1.AntreaAgentInfo, partial 
 		agentInfo.NodeSubnets = nodeSubnets
 		agentInfo.OVSInfo.BridgeName = aq.nodeConfig.OVSBridge
 		agentInfo.APIPort = aq.apiPort
+		agentInfo.NodePortLocalPortRange = aq.nplRange
 	}
+}
+
+// GetBGPPolicyInfoQuerier returns AgentBGPPolicyInfoQuerier.
+func (aq agentQuerier) GetBGPPolicyInfoQuerier() querier.AgentBGPPolicyInfoQuerier {
+	return aq.bgpPolicyInfoQuerier
 }

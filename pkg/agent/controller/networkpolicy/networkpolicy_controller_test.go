@@ -15,17 +15,21 @@
 package networkpolicy
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
@@ -33,19 +37,31 @@ import (
 	"k8s.io/component-base/metrics/legacyregistry"
 
 	"antrea.io/antrea/pkg/agent/config"
+	"antrea.io/antrea/pkg/agent/controller/networkpolicy/l7engine"
 	"antrea.io/antrea/pkg/agent/metrics"
 	"antrea.io/antrea/pkg/agent/openflow"
 	proxytypes "antrea.io/antrea/pkg/agent/proxy/types"
 	agenttypes "antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
-	"antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	"antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/pkg/client/clientset/versioned"
 	"antrea.io/antrea/pkg/client/clientset/versioned/fake"
 	"antrea.io/antrea/pkg/querier"
 	"antrea.io/antrea/pkg/util/channel"
+	"antrea.io/antrea/pkg/util/wait"
 )
 
 const testNamespace = "ns1"
+
+var mockOFTables = map[*openflow.Table]uint8{
+	openflow.AntreaPolicyEgressRuleTable:  uint8(5),
+	openflow.EgressRuleTable:              uint8(6),
+	openflow.EgressDefaultTable:           uint8(7),
+	openflow.AntreaPolicyIngressRuleTable: uint8(12),
+	openflow.IngressRuleTable:             uint8(13),
+	openflow.IngressDefaultTable:          uint8(14),
+	openflow.OutputTable:                  uint8(28),
+}
 
 type antreaClientGetter struct {
 	clientset versioned.Interface
@@ -59,12 +75,40 @@ func newTestController() (*Controller, *fake.Clientset, *mockReconciler) {
 	clientset := &fake.Clientset{}
 	podUpdateChannel := channel.NewSubscribableChannel("PodUpdate", 100)
 	ch2 := make(chan string, 100)
-	groupIDAllocator := openflow.NewGroupAllocator(false)
+	groupIDAllocator := openflow.NewGroupAllocator()
 	groupCounters := []proxytypes.GroupCounter{proxytypes.NewGroupCounter(groupIDAllocator, ch2)}
-	controller, _ := NewNetworkPolicyController(&antreaClientGetter{clientset}, nil, nil, "node1", podUpdateChannel, nil, groupCounters, ch2, true, true, true, false, true, testAsyncDeleteInterval, "8.8.8.8:53", config.K8sNode, true, false, config.HostGatewayOFPort, config.DefaultTunOFPort)
+	fs := afero.NewMemMapFs()
+	l7reconciler := l7engine.NewReconciler()
+	controller, _ := NewNetworkPolicyController(&antreaClientGetter{clientset},
+		nil,
+		nil,
+		nil,
+		fs,
+		"node1",
+		podUpdateChannel,
+		nil,
+		groupCounters,
+		ch2,
+		true,
+		true,
+		false,
+		true,
+		true,
+		false,
+		nil,
+		testAsyncDeleteInterval,
+		"8.8.8.8:53",
+		config.K8sNode,
+		true,
+		false,
+		config.DefaultHostGatewayOFPort,
+		config.DefaultTunOFPort,
+		&config.NodeConfig{},
+		wait.NewGroup(),
+		l7reconciler)
 	reconciler := newMockReconciler()
-	controller.reconciler = reconciler
-	controller.antreaPolicyLogger = nil
+	controller.podReconciler = reconciler
+	controller.auditLogger = nil
 	return controller, clientset, reconciler
 }
 
@@ -136,14 +180,16 @@ var _ Reconciler = &mockReconciler{}
 
 func newAddressGroup(name string, addresses []v1beta2.GroupMember) *v1beta2.AddressGroup {
 	return &v1beta2.AddressGroup{
-		ObjectMeta:   v1.ObjectMeta{Name: name},
+		TypeMeta:     v1.TypeMeta{Kind: "AddressGroup", APIVersion: "controlplane.antrea.io/v1beta2"},
+		ObjectMeta:   v1.ObjectMeta{Name: name, UID: types.UID(name)},
 		GroupMembers: addresses,
 	}
 }
 
 func newAppliedToGroup(name string, pods []v1beta2.GroupMember) *v1beta2.AppliedToGroup {
 	return &v1beta2.AppliedToGroup{
-		ObjectMeta:   v1.ObjectMeta{Name: name},
+		TypeMeta:     v1.TypeMeta{Kind: "AppliedToGroup", APIVersion: "controlplane.antrea.io/v1beta2"},
+		ObjectMeta:   v1.ObjectMeta{Name: name, UID: types.UID(name)},
 		GroupMembers: pods,
 	}
 }
@@ -155,6 +201,7 @@ func newNetworkPolicy(name string, uid types.UID, from, to, appliedTo []string, 
 	}
 	networkPolicyRule1 := newPolicyRule(dir, from, to, services)
 	return &v1beta2.NetworkPolicy{
+		TypeMeta:        v1.TypeMeta{Kind: "NetworkPolicy", APIVersion: "controlplane.antrea.io/v1beta2"},
 		ObjectMeta:      v1.ObjectMeta{UID: uid, Name: string(uid)},
 		Rules:           []v1beta2.NetworkPolicyRule{networkPolicyRule1},
 		AppliedToGroups: appliedTo,
@@ -203,15 +250,7 @@ func newNetworkPolicyWithMultipleRules(name string, uid types.UID, from, to, app
 }
 
 func prepareMockTables() {
-	openflow.InitMockTables(
-		map[*openflow.Table]uint8{
-			openflow.AntreaPolicyEgressRuleTable:  uint8(5),
-			openflow.EgressRuleTable:              uint8(6),
-			openflow.EgressDefaultTable:           uint8(7),
-			openflow.AntreaPolicyIngressRuleTable: uint8(12),
-			openflow.IngressRuleTable:             uint8(13),
-			openflow.IngressDefaultTable:          uint8(14),
-		})
+	openflow.InitMockTables(mockOFTables)
 }
 
 func TestAddSingleGroupRule(t *testing.T) {
@@ -505,6 +544,176 @@ func TestAddNetworkPolicyWithMultipleRules(t *testing.T) {
 	assert.Equal(t, 1, controller.GetAppliedToGroupNum())
 }
 
+func writeToFile(t *testing.T, fs afero.Fs, dir, file string, base64Str string) {
+	data, err := base64.StdEncoding.DecodeString(base64Str)
+	require.NoError(t, err)
+	f, err := fs.OpenFile(dir+"/"+file, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	defer f.Close()
+	_, err = f.Write(data)
+	require.NoError(t, err)
+}
+
+func TestFallbackToFileStore(t *testing.T) {
+	prepareMockTables()
+	tests := []struct {
+		name          string
+		initFileStore func(networkPolicyStore, appliedToGroupStore, addressGroupStore *fileStore)
+		expectedRule  *CompletedRule
+	}{
+		{
+			name: "same storage version",
+			initFileStore: func(networkPolicyStore, appliedToGroupStore, addressGroupStore *fileStore) {
+				networkPolicyStore.save(newNetworkPolicy("policy1", "uid1", []string{"addressGroup1"}, nil, []string{"appliedToGroup1"}, nil))
+				appliedToGroupStore.save(newAppliedToGroup("appliedToGroup1", []v1beta2.GroupMember{*newAppliedToGroupMemberPod("pod1", "namespace")}))
+				addressGroupStore.save(newAddressGroup("addressGroup1", []v1beta2.GroupMember{*newAddressGroupPodMember("pod2", "namespace", "192.168.0.1")}))
+			},
+			expectedRule: &CompletedRule{
+				rule: &rule{
+					Direction:       v1beta2.DirectionIn,
+					From:            v1beta2.NetworkPolicyPeer{AddressGroups: []string{"addressGroup1"}},
+					MaxPriority:     -1,
+					AppliedToGroups: []string{"appliedToGroup1"},
+					PolicyUID:       "uid1",
+					PolicyName:      "uid1",
+					SourceRef: &v1beta2.NetworkPolicyReference{
+						Type:      v1beta2.K8sNetworkPolicy,
+						Namespace: testNamespace,
+						Name:      "policy1",
+						UID:       "uid1",
+					},
+				},
+				FromAddresses: v1beta2.NewGroupMemberSet(newAddressGroupPodMember("pod2", "namespace", "192.168.0.1")),
+				TargetMembers: v1beta2.NewGroupMemberSet(newAppliedToGroupMemberPod("pod1", "namespace")),
+			},
+		},
+		{
+			// The test is to ensure compatibility with v1beta2 storage version if one day the used version is upgraded.
+			name: "compatible with v1beta2",
+			initFileStore: func(networkPolicyStore, appliedToGroupStore, addressGroupStore *fileStore) {
+				// The bytes of v1beta2 objects serialized in protobuf.
+				// They are not supposed to be updated when bumping up the used version.
+				base64EncodedPolicy := "azhzAAovCh5jb250cm9scGxhbmUuYW50cmVhLmlvL3YxYmV0YTISDU5ldHdvcmtQb2xpY3kSdAoYCgR1aWQxEgAaACIAKgR1aWQxMgA4AEIAEh8KAkluEg8KDWFkZHJlc3NHcm91cDEaACgAOABKAFoAGg9hcHBsaWVkVG9Hcm91cDEyJgoQSzhzTmV0d29ya1BvbGljeRIDbnMxGgdwb2xpY3kxIgR1aWQxGgAiAA=="
+				base64EncodedAppliedToGroup := "azhzAAowCh5jb250cm9scGxhbmUuYW50cmVhLmlvL3YxYmV0YTISDkFwcGxpZWRUb0dyb3VwEkUKLgoPYXBwbGllZFRvR3JvdXAxEgAaACIAKg9hcHBsaWVkVG9Hcm91cDEyADgAQgASEwoRCgRwb2QxEgluYW1lc3BhY2UaACIA"
+				base64EncodedAddressGroup := "azhzAAouCh5jb250cm9scGxhbmUuYW50cmVhLmlvL3YxYmV0YTISDEFkZHJlc3NHcm91cBJTCioKDWFkZHJlc3NHcm91cDESABoAIgAqDWFkZHJlc3NHcm91cDEyADgAQgASJQoRCgRwb2QyEgluYW1lc3BhY2UaEAAAAAAAAAAAAAD//8CoAAEaACIA"
+				writeToFile(t, networkPolicyStore.fs, networkPoliciesDir, "uid1", base64EncodedPolicy)
+				writeToFile(t, appliedToGroupStore.fs, appliedToGroupsDir, "appliedToGroup1", base64EncodedAppliedToGroup)
+				writeToFile(t, addressGroupStore.fs, addressGroupsDir, "addressGroup1", base64EncodedAddressGroup)
+			},
+			expectedRule: &CompletedRule{
+				rule: &rule{
+					Direction:       v1beta2.DirectionIn,
+					From:            v1beta2.NetworkPolicyPeer{AddressGroups: []string{"addressGroup1"}},
+					MaxPriority:     -1,
+					AppliedToGroups: []string{"appliedToGroup1"},
+					PolicyUID:       "uid1",
+					PolicyName:      "uid1",
+					SourceRef: &v1beta2.NetworkPolicyReference{
+						Type:      v1beta2.K8sNetworkPolicy,
+						Namespace: testNamespace,
+						Name:      "policy1",
+						UID:       "uid1",
+					},
+				},
+				FromAddresses: v1beta2.NewGroupMemberSet(
+					&v1beta2.GroupMember{
+						Pod: &v1beta2.PodReference{Name: "pod2", Namespace: "namespace"},
+						IPs: []v1beta2.IPAddress{v1beta2.IPAddress(net.ParseIP("192.168.0.1"))},
+					},
+				),
+				TargetMembers: v1beta2.NewGroupMemberSet(
+					&v1beta2.GroupMember{
+						Pod: &v1beta2.PodReference{Name: "pod1", Namespace: "namespace"},
+					},
+				),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, clientset, reconciler := newTestController()
+			addressGroupWatcher := watch.NewFake()
+			appliedToGroupWatcher := watch.NewFake()
+			networkPolicyWatcher := watch.NewFake()
+			clientset.AddWatchReactor("addressgroups", k8stesting.DefaultWatchReactor(addressGroupWatcher, fmt.Errorf("network unavailable")))
+			clientset.AddWatchReactor("appliedtogroups", k8stesting.DefaultWatchReactor(appliedToGroupWatcher, fmt.Errorf("network unavailable")))
+			clientset.AddWatchReactor("networkpolicies", k8stesting.DefaultWatchReactor(networkPolicyWatcher, fmt.Errorf("network unavailable")))
+
+			tt.initFileStore(controller.networkPolicyStore, controller.appliedToGroupStore, controller.addressGroupStore)
+
+			stopCh := make(chan struct{})
+			defer close(stopCh)
+			go controller.Run(stopCh)
+
+			select {
+			case ruleID := <-reconciler.updated:
+				actualRule, _ := reconciler.getLastRealized(ruleID)
+				// Rule ID is a hash value, we don't care about its exact value.
+				actualRule.ID = ""
+				assert.Equal(t, tt.expectedRule, actualRule)
+			case <-time.After(time.Second):
+				t.Fatal("Expected one rule update, got timeout")
+			}
+		})
+	}
+}
+
+func TestOverrideFileStore(t *testing.T) {
+	prepareMockTables()
+	controller, clientset, reconciler := newTestController()
+	addressGroupWatcher := watch.NewFake()
+	appliedToGroupWatcher := watch.NewFake()
+	networkPolicyWatcher := watch.NewFake()
+	clientset.AddWatchReactor("addressgroups", k8stesting.DefaultWatchReactor(addressGroupWatcher, nil))
+	clientset.AddWatchReactor("appliedtogroups", k8stesting.DefaultWatchReactor(appliedToGroupWatcher, nil))
+	clientset.AddWatchReactor("networkpolicies", k8stesting.DefaultWatchReactor(networkPolicyWatcher, nil))
+
+	policy1 := newNetworkPolicy("policy1", "uid1", []string{"addressGroup1"}, nil, []string{"appliedToGroup1"}, nil)
+	policy2 := newNetworkPolicy("policy2", "uid2", []string{"addressGroup2"}, nil, []string{"appliedToGroup2"}, nil)
+	atgMember1 := newAppliedToGroupMemberPod("pod1", "namespace")
+	atgMember2 := newAppliedToGroupMemberPod("pod2", "namespace")
+	agMember1 := newAddressGroupPodMember("pod3", "namespace", "192.168.0.1")
+	agMember2 := newAddressGroupPodMember("pod4", "namespace", "192.168.0.2")
+	atg1 := newAppliedToGroup("appliedToGroup1", []v1beta2.GroupMember{*atgMember1})
+	atg2 := newAppliedToGroup("appliedToGroup2", []v1beta2.GroupMember{*atgMember2})
+	ag1 := newAddressGroup("addressGroup1", []v1beta2.GroupMember{*agMember1})
+	ag2 := newAddressGroup("addressGroup2", []v1beta2.GroupMember{*agMember2})
+	controller.networkPolicyStore.save(policy1)
+	controller.appliedToGroupStore.save(atg1)
+	controller.addressGroupStore.save(ag1)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go controller.Run(stopCh)
+
+	networkPolicyWatcher.Add(policy2)
+	networkPolicyWatcher.Action(watch.Bookmark, nil)
+	addressGroupWatcher.Add(ag2)
+	addressGroupWatcher.Action(watch.Bookmark, nil)
+	appliedToGroupWatcher.Add(atg2)
+	appliedToGroupWatcher.Action(watch.Bookmark, nil)
+
+	select {
+	case ruleID := <-reconciler.updated:
+		actualRule, _ := reconciler.getLastRealized(ruleID)
+		assert.Equal(t, v1beta2.NewGroupMemberSet(atgMember2), actualRule.TargetMembers)
+		assert.Equal(t, v1beta2.NewGroupMemberSet(agMember2), actualRule.FromAddresses)
+		assert.Equal(t, policy2.SourceRef, actualRule.SourceRef)
+	case <-time.After(time.Second):
+		t.Fatal("Expected one rule update, got timeout")
+	}
+
+	objects, err := controller.appliedToGroupStore.loadAll()
+	require.NoError(t, err)
+	assert.Equal(t, []runtime.Object{atg2}, objects)
+	objects, err = controller.addressGroupStore.loadAll()
+	require.NoError(t, err)
+	assert.Equal(t, []runtime.Object{ag2}, objects)
+	objects, err = controller.networkPolicyStore.loadAll()
+	require.NoError(t, err)
+	assert.Equal(t, []runtime.Object{policy2}, objects)
+}
+
 func TestNetworkPolicyMetrics(t *testing.T) {
 	prepareMockTables()
 	// Initialize NetworkPolicy metrics (prometheus)
@@ -625,7 +834,7 @@ func TestNetworkPolicyMetrics(t *testing.T) {
 func TestValidate(t *testing.T) {
 	controller, _, _ := newTestController()
 	igmpType := int32(0x12)
-	actionAllow, actionDrop := v1alpha1.RuleActionAllow, v1alpha1.RuleActionDrop
+	actionAllow, actionDrop := v1beta1.RuleActionAllow, v1beta1.RuleActionDrop
 	appliedToGroup := v1beta2.NewGroupMemberSet()
 	appliedToGroup.Insert()
 	tierPriority01 := int32(100)
@@ -682,14 +891,14 @@ func TestValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to validate group %s %v", groupAddress1, err)
 	}
-	if item.RuleAction != v1alpha1.RuleActionAllow {
-		t.Fatalf("groupAddress %s expect %v, but got %v", groupAddress1, v1alpha1.RuleActionAllow, item.RuleAction)
+	if item.RuleAction != v1beta1.RuleActionAllow {
+		t.Fatalf("groupAddress %s expect %v, but got %v", groupAddress1, v1beta1.RuleActionAllow, item.RuleAction)
 	}
 	item, err = controller.GetIGMPNPRuleInfo("pod1", "ns1", net.ParseIP(groupAddress2), 0x12)
 	if err != nil {
 		t.Fatalf("failed to validate group %s %+v", groupAddress2, err)
 	}
-	if item.RuleAction != v1alpha1.RuleActionDrop {
-		t.Fatalf("groupAddress %s expect %v, but got %v", groupAddress2, v1alpha1.RuleActionDrop, item.RuleAction)
+	if item.RuleAction != v1beta1.RuleActionDrop {
+		t.Fatalf("groupAddress %s expect %v, but got %v", groupAddress2, v1beta1.RuleActionDrop, item.RuleAction)
 	}
 }

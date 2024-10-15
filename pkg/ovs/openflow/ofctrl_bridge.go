@@ -29,10 +29,6 @@ import (
 	"antrea.io/antrea/pkg/agent/metrics"
 )
 
-const (
-	ofTableExistsError = "Table already exists"
-)
-
 // ofTable implements openflow.Table.
 type ofTable struct {
 	// sync.RWMutex protects ofTable status from concurrent modification and reading.
@@ -89,6 +85,10 @@ func (t *ofTable) GetStageID() StageID {
 	return t.stageID
 }
 
+func (t *ofTable) SetTable() {
+	t.Table = &ofctrl.Table{TableId: t.id}
+}
+
 func (t *ofTable) GetPipelineID() PipelineID {
 	return t.pipelineID
 }
@@ -104,7 +104,7 @@ func (t *ofTable) UpdateStatus(flowCountDelta int) {
 	}
 
 	metrics.OVSTotalFlowCount.Add(float64(flowCountDelta))
-	metrics.OVSFlowCount.WithLabelValues(strconv.Itoa(int(t.id))).Add(float64(flowCountDelta))
+	metrics.OVSFlowCount.WithLabelValues(strconv.Itoa(int(t.id)), t.name).Add(float64(flowCountDelta))
 
 	t.updateTime = time.Now()
 }
@@ -115,7 +115,7 @@ func (t *ofTable) ResetStatus() {
 
 	t.flowCount = 0
 
-	metrics.OVSFlowCount.WithLabelValues(strconv.Itoa(int(t.id))).Set(0)
+	metrics.OVSFlowCount.WithLabelValues(strconv.Itoa(int(t.id)), t.name).Set(0)
 
 	t.updateTime = time.Now()
 }
@@ -185,6 +185,7 @@ type OFBridge struct {
 	// tableCache is used to cache ofTables.
 	tableCache map[uint8]*ofTable
 
+	ofSwitchMutex sync.RWMutex
 	// ofSwitch is the target OFSwitch.
 	ofSwitch *ofctrl.OFSwitch
 	// controller helps maintain connections to remote OFSwitch.
@@ -198,77 +199,77 @@ type OFBridge struct {
 	connCh chan struct{}
 	// connected is an internal channel to notify if connected to the OFSwitch or not. It is used only in Connect method.
 	connected chan bool
-	// pktConsumers is a map from PacketIn reason to the channel that is used to publish the PacketIn message.
-	pktConsumers      sync.Map
-	multipartReplyChs map[uint32]chan *openflow15.MultipartReply
+	// pktConsumers is a map from PacketIn category to the channel that is used to publish the PacketIn message.
+	pktConsumers sync.Map
+
+	mpReplyChsMutex sync.RWMutex
+	mpReplyChs      map[uint32]chan *openflow15.MultipartReply
 	// tunMetadataLengthMap is used to store the tlv-map settings on the OVS bridge. Key is the index of tunnel metedata,
 	// and value is the length configured in this tunnel metadata.
 	tunMetadataLengthMap map[uint16]uint8
 }
 
-func (b *OFBridge) CreateGroupTypeAll(id GroupIDType) Group {
-	return b.createGroupWithType(id, ofctrl.GroupAll)
+func (b *OFBridge) NewGroupTypeAll(id GroupIDType) Group {
+	return b.newGroupWithType(id, ofctrl.GroupAll)
 }
 
-func (b *OFBridge) CreateGroup(id GroupIDType) Group {
-	return b.createGroupWithType(id, ofctrl.GroupSelect)
+func (b *OFBridge) NewGroup(id GroupIDType) Group {
+	return b.newGroupWithType(id, ofctrl.GroupSelect)
 }
 
-func (b *OFBridge) createGroupWithType(id GroupIDType, groupType ofctrl.GroupType) Group {
-	ofctrlGroup, err := b.ofSwitch.NewGroup(uint32(id), groupType)
-	if err != nil { // group already exists
-		ofctrlGroup = b.ofSwitch.GetGroup(uint32(id))
-	}
+func (b *OFBridge) newGroupWithType(id GroupIDType, groupType ofctrl.GroupType) Group {
+	ofctrlGroup := ofctrl.NewGroup(uint32(id), groupType, b.ofSwitch)
 	g := &ofGroup{bridge: b, ofctrl: ofctrlGroup}
 	return g
 }
 
-func (b *OFBridge) DeleteGroup(id GroupIDType) bool {
-	g := b.ofSwitch.GetGroup(uint32(id))
-	if g == nil {
-		return true
-	}
-	if err := g.Delete(); err != nil {
-		return false
-	}
-	return true
-}
-
-func (b *OFBridge) CreateMeter(id MeterIDType, flags ofctrl.MeterFlag) Meter {
-	ofctrlMeter, err := b.ofSwitch.NewMeter(uint32(id), flags)
-
-	if err != nil {
-		ofctrlMeter = b.ofSwitch.GetMeter(uint32(id))
-	}
+func (b *OFBridge) NewMeter(id MeterIDType, flags ofctrl.MeterFlag) Meter {
+	ofctrlMeter := ofctrl.NewMeter(uint32(id), flags, b.ofSwitch)
 	m := &ofMeter{bridge: b, ofctrl: ofctrlMeter}
 	return m
 }
 
-func (b *OFBridge) DeleteMeter(id MeterIDType) bool {
-	m := b.ofSwitch.GetMeter(uint32(id))
-	if m == nil {
-		return true
-	}
-	if err := m.Delete(); err != nil {
-		return false
-	}
-	return true
-}
-
 func (b *OFBridge) DeleteMeterAll() error {
-	// Clear all existing meter entries
-	// TODO: this should be defined in libOpenflow
-	const OFPM_ALL = 0xffffffff // Represents all meters
 	meterMod := openflow15.NewMeterMod()
-	meterMod.MeterId = OFPM_ALL
+	meterMod.MeterId = openflow15.M_ALL
 	meterMod.Command = openflow15.MC_DELETE
-	if err := b.ofSwitch.Send(meterMod); err != nil {
-		return err
-	}
-	return nil
+	return b.ofSwitch.Send(meterMod)
 }
 
-func (b *OFBridge) CreateTable(table Table, next uint8, missAction MissActionType) Table {
+func (b *OFBridge) DeleteGroupAll() error {
+	groupMod := openflow15.NewGroupMod()
+	groupMod.GroupId = openflow15.OFPG_ALL
+	groupMod.Command = openflow15.OFPGC_DELETE
+	return b.ofSwitch.Send(groupMod)
+}
+
+func (b *OFBridge) GetMeterStats(handleMeterStatsReply func(meterID int, packetCount int64)) error {
+	const OFPM_ALL = 0xffffffff // Represents all meters
+	mpMeterStatsReq := openflow15.NewMpRequest(openflow15.MultipartType_MeterStats)
+	meterMPReq := openflow15.NewMeterMultipartRequest(OFPM_ALL)
+	mpMeterStatsReq.Body = append(mpMeterStatsReq.Body, meterMPReq)
+	ch := make(chan *openflow15.MultipartReply, 1)
+	b.registerMpReplyCh(mpMeterStatsReq.Xid, ch)
+	go func() {
+		defer b.unregisterMpReplyCh(mpMeterStatsReq.Xid)
+		select {
+		case reply := <-ch:
+			if reply.Type == openflow15.MultipartType_MeterStats {
+				for _, entry := range reply.Body {
+					stats := entry.(*openflow15.MeterStats)
+					if len(stats.BandStats) > 0 {
+						handleMeterStatsReply(int(stats.MeterId), int64(stats.BandStats[0].PacketBandCount))
+					}
+				}
+			}
+		case <-time.After(5 * time.Second):
+			klog.InfoS("Timeout waiting for OVS MeterStats reply")
+		}
+	}()
+	return b.ofSwitch.Send(mpMeterStatsReq)
+}
+
+func (b *OFBridge) NewTable(table Table, next uint8, missAction MissActionType) Table {
 	table.SetNext(next)
 	table.SetMissAction(missAction)
 	t, ok := table.(*ofTable)
@@ -281,18 +282,15 @@ func (b *OFBridge) CreateTable(table Table, next uint8, missAction MissActionTyp
 	return t
 }
 
-// DeleteTable removes the table from ofctrl.OFSwitch, and remove from local cache.
-func (b *OFBridge) DeleteTable(id uint8) bool {
-	err := b.ofSwitch.DeleteTable(id)
-	if err != nil {
-		return false
-	}
-
+// GetTableByID returns the existing table by the given id. If no table exists, an error is returned.
+func (b *OFBridge) GetTableByID(id uint8) (Table, error) {
 	b.Lock()
 	defer b.Unlock()
-
-	delete(b.tableCache, id)
-	return true
+	t, ok := b.tableCache[id]
+	if !ok {
+		return nil, fmt.Errorf("no table exists with ID %d", id)
+	}
+	return t, nil
 }
 
 // DumpTableStatus dumps table status from local cache.
@@ -310,9 +308,19 @@ func (b *OFBridge) DumpTableStatus() []TableStatus {
 
 // PacketRcvd is a callback when a packetIn is received on ofctrl.OFSwitch.
 func (b *OFBridge) PacketRcvd(sw *ofctrl.OFSwitch, packet *ofctrl.PacketIn) {
-	klog.V(2).Infof("Received packet: %+v", packet)
-	reason := packet.Reason
-	v, found := b.pktConsumers.Load(reason)
+	// Correspond to MessageStream.outbound log level.
+	if klog.V(7).Enabled() {
+		klog.InfoS("Received packetIn", "packet", packet)
+	} else {
+		klog.V(4).InfoS("Received packetIn")
+	}
+
+	if len(packet.UserData) == 0 {
+		klog.Info("Received packetIn without packetIn category in userdata")
+		return
+	}
+	category := packet.UserData[0]
+	v, found := b.pktConsumers.Load(category)
 	if found {
 		pktInQueue, _ := v.(*PacketInQueue)
 		pktInQueue.AddOrDrop(packet)
@@ -322,10 +330,12 @@ func (b *OFBridge) PacketRcvd(sw *ofctrl.OFSwitch, packet *ofctrl.PacketIn) {
 // SwitchConnected is a callback when the remote OFSwitch is connected.
 func (b *OFBridge) SwitchConnected(sw *ofctrl.OFSwitch) {
 	klog.Infof("OFSwitch is connected: %v", sw.DPID())
-	// initialize tables.
-	b.ofSwitch = sw
+	b.SetOFSwitch(sw)
+	b.setPacketInFormatTo2()
 	b.ofSwitch.EnableMonitor()
-	b.initialize()
+	// initialize tables.
+	b.Initialize()
+	b.queryTableFeatures()
 	go func() {
 		// b.connected is nil if it is an automatic reconnection but not triggered by OFSwitch.Connect.
 		if b.connected != nil {
@@ -335,10 +345,22 @@ func (b *OFBridge) SwitchConnected(sw *ofctrl.OFSwitch) {
 	}()
 }
 
+func (b *OFBridge) SetOFSwitch(sw *ofctrl.OFSwitch) {
+	b.ofSwitchMutex.Lock()
+	defer b.ofSwitchMutex.Unlock()
+	b.ofSwitch = sw
+}
+
 // MultipartReply is a callback when multipartReply message is received on ofctrl.OFSwitch is connected.
 // Client uses this method to handle the reply message if it has customized MultipartRequest message.
 func (b *OFBridge) MultipartReply(sw *ofctrl.OFSwitch, rep *openflow15.MultipartReply) {
-	if ch, ok := b.multipartReplyChs[rep.Xid]; ok {
+	ch, ok := func() (chan *openflow15.MultipartReply, bool) {
+		b.mpReplyChsMutex.RLock()
+		defer b.mpReplyChsMutex.RUnlock()
+		ch, ok := b.mpReplyChs[rep.Xid]
+		return ch, ok
+	}()
+	if ok {
 		ch <- rep
 	}
 }
@@ -347,26 +369,24 @@ func (b *OFBridge) SwitchDisconnected(sw *ofctrl.OFSwitch) {
 	klog.Infof("OFSwitch is disconnected: %v", sw.DPID())
 }
 
-// initialize creates ofctrl.Table for each table in the tableCache.
-func (b *OFBridge) initialize() {
+func (b *OFBridge) FlowGraphEnabledOnSwitch() bool {
+	return false
+}
+
+func (b *OFBridge) TLVMapEnabledOnSwitch() bool {
+	return false
+}
+
+// Initialize creates ofctrl.Table for each table in the tableCache.
+func (b *OFBridge) Initialize() {
 	b.Lock()
 	defer b.Unlock()
 
 	for id, table := range b.tableCache {
-		if id == 0 {
-			table.Table = b.ofSwitch.DefaultTable()
-		} else {
-			ofTable, err := b.ofSwitch.NewTable(id)
-			if err != nil && err.Error() == ofTableExistsError {
-				ofTable = b.ofSwitch.GetTable(id)
-			}
-			table.Table = ofTable
-		}
+		table.Table = ofctrl.NewTable(id, b.ofSwitch)
 		// reset flow counts, which is needed for reconnections
 		table.ResetStatus()
 	}
-
-	b.queryTableFeatures()
 
 	metrics.OVSTotalFlowCount.Set(0)
 }
@@ -429,10 +449,18 @@ func (b *OFBridge) DeleteFlowsByCookie(cookieID, cookieMask uint64) error {
 }
 
 func (b *OFBridge) IsConnected() bool {
-	return b.ofSwitch.IsReady()
+	sw := func() *ofctrl.OFSwitch {
+		b.ofSwitchMutex.RLock()
+		defer b.ofSwitchMutex.RUnlock()
+		return b.ofSwitch
+	}()
+	if sw == nil {
+		return false
+	}
+	return sw.IsReady()
 }
 
-func (b *OFBridge) AddFlowsInBundle(addflows []Flow, modFlows []Flow, delFlows []Flow) error {
+func (b *OFBridge) AddFlowsInBundle(addflows, modFlows, delFlows []*openflow15.FlowMod) error {
 	// If no Openflow entries are requested to be added or modified or deleted on the OVS bridge, return immediately.
 	if len(addflows) == 0 && len(modFlows) == 0 && len(delFlows) == 0 {
 		klog.V(2).Info("No Openflow entries need to be synced to the OVS bridge, returning")
@@ -445,18 +473,14 @@ func (b *OFBridge) AddFlowsInBundle(addflows []Flow, modFlows []Flow, delFlows [
 		return err
 	}
 
-	syncFlows := func(flows []Flow, operation int) error {
-		for _, flow := range flows {
-			ofFlow := flow.(*ofFlow)
+	syncFlows := func(flows []*openflow15.FlowMod, operation int) error {
+		for _, flowMod := range flows {
+			flowMod.Command = uint8(operation)
 			// "AddFlow" operation is async, the function only returns error which occur when constructing and sending
 			// the BundleAdd message. An absence of error does not mean that all Openflow entries are added into the
 			// bundle by the switch. The number of entries successfully added to the bundle by the switch will be
 			// returned by function "Complete".
-			flowMod, err := ofFlow.Flow.GetBundleMessage(operation)
-			if err != nil {
-				return err
-			}
-			if err := tx.AddMessage(flowMod); err != nil {
+			if err := tx.AddFlow(flowMod); err != nil {
 				// Close the bundle and cancel it if there is error when adding the FlowMod message.
 				_, err := tx.Complete()
 				if err == nil {
@@ -498,13 +522,13 @@ func (b *OFBridge) AddFlowsInBundle(addflows []Flow, modFlows []Flow, delFlows [
 	}
 
 	// Update TableStatus after the transaction is committed successfully.
-	for _, flow := range addflows {
-		ofFlow := flow.(*ofFlow)
-		ofFlow.table.UpdateStatus(1)
+	for _, message := range addflows {
+		table := b.tableCache[message.TableId]
+		table.UpdateStatus(1)
 	}
-	for _, flow := range delFlows {
-		ofFlow := flow.(*ofFlow)
-		ofFlow.table.UpdateStatus(-1)
+	for _, message := range delFlows {
+		table := b.tableCache[message.TableId]
+		table.UpdateStatus(-1)
 	}
 	return nil
 }
@@ -552,26 +576,30 @@ func (b *OFBridge) AddOFEntriesInBundle(addEntries []OFEntry, modEntries []OFEnt
 		return err
 	}
 
+	var sentMessages int
 	addMessage := func(entrySet []entryOperation) error {
 		if entrySet == nil {
 			return nil
 		}
 		for _, e := range entrySet {
-			msg, err := e.entry.GetBundleMessage(e.operation)
+			messages, err := e.entry.GetBundleMessages(e.operation)
 			if err != nil {
 				return err
 			}
+			sentMessages += len(messages)
 			// "AddMessage" operation is async, the function only returns error which occur when constructing and sending
 			// the BundleAdd message. An absence of error does not mean that all OpenFlow entries are added into the
 			// bundle by the switch. The number of entries successfully added to the bundle by the switch will be
 			// returned by function "Complete".
-			if err := tx.AddMessage(msg); err != nil {
-				// Close the bundle and cancel it if there is error when adding the FlowMod message.
-				_, err := tx.Complete()
-				if err == nil {
-					tx.Abort()
+			for _, message := range messages {
+				if err := tx.AddMessage(message); err != nil {
+					// Close the bundle and cancel it if there is error when adding the FlowMod message.
+					_, err := tx.Complete()
+					if err == nil {
+						tx.Abort()
+					}
+					return err
 				}
-				return err
 			}
 		}
 		return nil
@@ -592,7 +620,7 @@ func (b *OFBridge) AddOFEntriesInBundle(addEntries []OFEntry, modEntries []OFEnt
 	count, err := tx.Complete()
 	if err != nil {
 		return err
-	} else if count != len(addEntries)+len(modEntries)+len(delEntries) {
+	} else if count != sentMessages {
 		// This case should not be possible if all the calls to "tx.AddMessage" returned nil. This is just a sanity check.
 		tx.Abort()
 		return errors.New("failed to add all Openflow entries in one transaction, cancelling it")
@@ -624,7 +652,7 @@ type PacketInQueue struct {
 }
 
 func NewPacketInQueue(size int, r rate.Limit) *PacketInQueue {
-	return &PacketInQueue{rateLimiter: rate.NewLimiter(r, 1), packetsCh: make(chan *ofctrl.PacketIn, size)}
+	return &PacketInQueue{rateLimiter: rate.NewLimiter(r, size), packetsCh: make(chan *ofctrl.PacketIn, size)}
 }
 
 func (q *PacketInQueue) AddOrDrop(packet *ofctrl.PacketIn) bool {
@@ -656,25 +684,21 @@ func (q *PacketInQueue) GetRateLimited(stopCh <-chan struct{}) *ofctrl.PacketIn 
 	}
 }
 
-func (b *OFBridge) SubscribePacketIn(reason uint8, pktInQueue *PacketInQueue) error {
-	_, exist := b.pktConsumers.Load(reason)
+func (b *OFBridge) SubscribePacketIn(category uint8, pktInQueue *PacketInQueue) error {
+	_, exist := b.pktConsumers.Load(category)
 	if exist {
-		return fmt.Errorf("packetIn reason %d already exists", reason)
+		return fmt.Errorf("packetIn category %d already exists", category)
 	}
-	b.pktConsumers.Store(reason, pktInQueue)
-	return nil
-}
-
-func (b *OFBridge) AddTLVMap(optClass uint16, optType uint8, optLength uint8, tunMetadataIndex uint16) error {
-	if err := b.ofSwitch.AddTunnelTLVMap(optClass, optType, optLength, tunMetadataIndex); err != nil {
-		return err
-	}
-	b.tunMetadataLengthMap[tunMetadataIndex] = optLength
+	b.pktConsumers.Store(category, pktInQueue)
 	return nil
 }
 
 func (b *OFBridge) SendPacketOut(packetOut *ofctrl.PacketOut) error {
 	return b.ofSwitch.Send(packetOut.GetMessage())
+}
+
+func (b *OFBridge) ResumePacket(packetIn *ofctrl.PacketIn) error {
+	return b.ofSwitch.ResumePacket(packetIn)
 }
 
 func (b *OFBridge) BuildPacketOut() PacketOutBuilder {
@@ -694,6 +718,10 @@ func (b *OFBridge) RetryInterval() time.Duration {
 	return b.retryInterval
 }
 
+func (b *OFBridge) setPacketInFormatTo2() {
+	b.ofSwitch.SetPacketInFormat(openflow15.OFPUTIL_PACKET_IN_NXT2)
+}
+
 func (b *OFBridge) queryTableFeatures() {
 	mpartRequest := &openflow15.MultipartRequest{
 		Header: openflow15.NewOfp15Header(),
@@ -706,12 +734,10 @@ func (b *OFBridge) queryTableFeatures() {
 	// sending the Multipart Request messages to modify the tables' names. The buffer size "20" is the observed number
 	// of the Multipart Reply messages sent from OVS.
 	tableFeatureCh := make(chan *openflow15.MultipartReply, 20)
-	b.multipartReplyChs[mpartRequest.Xid] = tableFeatureCh
+	b.registerMpReplyCh(mpartRequest.Xid, tableFeatureCh)
 	go func() {
 		// Delete the channel which is used to receive the MultipartReply message after all tables' features are received.
-		defer func() {
-			delete(b.multipartReplyChs, mpartRequest.Xid)
-		}()
+		defer b.unregisterMpReplyCh(mpartRequest.Xid)
 		b.processTableFeatures(tableFeatureCh)
 	}()
 	b.ofSwitch.Send(mpartRequest)
@@ -755,14 +781,27 @@ func (b *OFBridge) processTableFeatures(ch chan *openflow15.MultipartReply) {
 	}
 }
 
-func NewOFBridge(br string, mgmtAddr string) Bridge {
+func (b *OFBridge) registerMpReplyCh(xid uint32, ch chan *openflow15.MultipartReply) {
+	b.mpReplyChsMutex.Lock()
+	defer b.mpReplyChsMutex.Unlock()
+	b.mpReplyChs[xid] = ch
+
+}
+
+func (b *OFBridge) unregisterMpReplyCh(xid uint32) {
+	b.mpReplyChsMutex.Lock()
+	defer b.mpReplyChsMutex.Unlock()
+	delete(b.mpReplyChs, xid)
+}
+
+func NewOFBridge(br string, mgmtAddr string) *OFBridge {
 	s := &OFBridge{
 		bridgeName:           br,
 		mgmtAddr:             mgmtAddr,
 		tableCache:           make(map[uint8]*ofTable),
 		retryInterval:        1 * time.Second,
 		pktConsumers:         sync.Map{},
-		multipartReplyChs:    make(map[uint32]chan *openflow15.MultipartReply),
+		mpReplyChs:           make(map[uint32]chan *openflow15.MultipartReply),
 		tunMetadataLengthMap: make(map[uint16]uint8),
 	}
 	s.controller = ofctrl.NewController(s)

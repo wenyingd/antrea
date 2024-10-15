@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 	v1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	testing "k8s.io/client-go/testing"
@@ -34,28 +33,30 @@ type FakeExternalNodes struct {
 	ns   string
 }
 
-var externalnodesResource = schema.GroupVersionResource{Group: "crd.antrea.io", Version: "v1alpha1", Resource: "externalnodes"}
+var externalnodesResource = v1alpha1.SchemeGroupVersion.WithResource("externalnodes")
 
-var externalnodesKind = schema.GroupVersionKind{Group: "crd.antrea.io", Version: "v1alpha1", Kind: "ExternalNode"}
+var externalnodesKind = v1alpha1.SchemeGroupVersion.WithKind("ExternalNode")
 
 // Get takes name of the externalNode, and returns the corresponding externalNode object, and an error if there is any.
 func (c *FakeExternalNodes) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.ExternalNode, err error) {
+	emptyResult := &v1alpha1.ExternalNode{}
 	obj, err := c.Fake.
-		Invokes(testing.NewGetAction(externalnodesResource, c.ns, name), &v1alpha1.ExternalNode{})
+		Invokes(testing.NewGetActionWithOptions(externalnodesResource, c.ns, name, options), emptyResult)
 
 	if obj == nil {
-		return nil, err
+		return emptyResult, err
 	}
 	return obj.(*v1alpha1.ExternalNode), err
 }
 
 // List takes label and field selectors, and returns the list of ExternalNodes that match those selectors.
 func (c *FakeExternalNodes) List(ctx context.Context, opts v1.ListOptions) (result *v1alpha1.ExternalNodeList, err error) {
+	emptyResult := &v1alpha1.ExternalNodeList{}
 	obj, err := c.Fake.
-		Invokes(testing.NewListAction(externalnodesResource, externalnodesKind, c.ns, opts), &v1alpha1.ExternalNodeList{})
+		Invokes(testing.NewListActionWithOptions(externalnodesResource, externalnodesKind, c.ns, opts), emptyResult)
 
 	if obj == nil {
-		return nil, err
+		return emptyResult, err
 	}
 
 	label, _, _ := testing.ExtractFromListOptions(opts)
@@ -74,28 +75,30 @@ func (c *FakeExternalNodes) List(ctx context.Context, opts v1.ListOptions) (resu
 // Watch returns a watch.Interface that watches the requested externalNodes.
 func (c *FakeExternalNodes) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 	return c.Fake.
-		InvokesWatch(testing.NewWatchAction(externalnodesResource, c.ns, opts))
+		InvokesWatch(testing.NewWatchActionWithOptions(externalnodesResource, c.ns, opts))
 
 }
 
 // Create takes the representation of a externalNode and creates it.  Returns the server's representation of the externalNode, and an error, if there is any.
 func (c *FakeExternalNodes) Create(ctx context.Context, externalNode *v1alpha1.ExternalNode, opts v1.CreateOptions) (result *v1alpha1.ExternalNode, err error) {
+	emptyResult := &v1alpha1.ExternalNode{}
 	obj, err := c.Fake.
-		Invokes(testing.NewCreateAction(externalnodesResource, c.ns, externalNode), &v1alpha1.ExternalNode{})
+		Invokes(testing.NewCreateActionWithOptions(externalnodesResource, c.ns, externalNode, opts), emptyResult)
 
 	if obj == nil {
-		return nil, err
+		return emptyResult, err
 	}
 	return obj.(*v1alpha1.ExternalNode), err
 }
 
 // Update takes the representation of a externalNode and updates it. Returns the server's representation of the externalNode, and an error, if there is any.
 func (c *FakeExternalNodes) Update(ctx context.Context, externalNode *v1alpha1.ExternalNode, opts v1.UpdateOptions) (result *v1alpha1.ExternalNode, err error) {
+	emptyResult := &v1alpha1.ExternalNode{}
 	obj, err := c.Fake.
-		Invokes(testing.NewUpdateAction(externalnodesResource, c.ns, externalNode), &v1alpha1.ExternalNode{})
+		Invokes(testing.NewUpdateActionWithOptions(externalnodesResource, c.ns, externalNode, opts), emptyResult)
 
 	if obj == nil {
-		return nil, err
+		return emptyResult, err
 	}
 	return obj.(*v1alpha1.ExternalNode), err
 }
@@ -110,7 +113,7 @@ func (c *FakeExternalNodes) Delete(ctx context.Context, name string, opts v1.Del
 
 // DeleteCollection deletes a collection of objects.
 func (c *FakeExternalNodes) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
-	action := testing.NewDeleteCollectionAction(externalnodesResource, c.ns, listOpts)
+	action := testing.NewDeleteCollectionActionWithOptions(externalnodesResource, c.ns, opts, listOpts)
 
 	_, err := c.Fake.Invokes(action, &v1alpha1.ExternalNodeList{})
 	return err
@@ -118,11 +121,12 @@ func (c *FakeExternalNodes) DeleteCollection(ctx context.Context, opts v1.Delete
 
 // Patch applies the patch and returns the patched externalNode.
 func (c *FakeExternalNodes) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *v1alpha1.ExternalNode, err error) {
+	emptyResult := &v1alpha1.ExternalNode{}
 	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(externalnodesResource, c.ns, name, pt, data, subresources...), &v1alpha1.ExternalNode{})
+		Invokes(testing.NewPatchSubresourceActionWithOptions(externalnodesResource, c.ns, name, pt, data, opts, subresources...), emptyResult)
 
 	if obj == nil {
-		return nil, err
+		return emptyResult, err
 	}
 	return obj.(*v1alpha1.ExternalNode), err
 }

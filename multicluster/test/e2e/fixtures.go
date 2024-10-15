@@ -63,6 +63,9 @@ func teardownTest(tb testing.TB, data *MCTestData) {
 	if empty, _ := IsDirEmpty(data.logsDirForTestCase); empty {
 		_ = os.Remove(data.logsDirForTestCase)
 	}
+	if err := data.deleteTestNamespaces(); err != nil {
+		tb.Fatalf("Failed to delete test Namespace %s", multiClusterTestNamespace)
+	}
 }
 
 func createPodWrapper(tb testing.TB, data *MCTestData, cluster string, namespace string, name string, nodeName string, image string, ctr string, command []string,
@@ -82,6 +85,13 @@ func createPodWrapper(tb testing.TB, data *MCTestData, cluster string, namespace
 func deletePodWrapper(tb testing.TB, data *MCTestData, clusterName string, namespace string, name string) {
 	tb.Logf("Deleting Pod '%s' in Namespace %s of cluster %s", name, namespace, clusterName)
 	if err := data.deletePod(clusterName, namespace, name); err != nil {
+		tb.Logf("Error when deleting Pod: %v", err)
+	}
+}
+
+func deletePodAndWaitWrapper(tb testing.TB, data *MCTestData, clusterName string, namespace string, name string) {
+	tb.Logf("Deleting Pod '%s' in Namespace %s of cluster %s", name, namespace, clusterName)
+	if err := data.deletePodAndWait(clusterName, namespace, name); err != nil {
 		tb.Logf("Error when deleting Pod: %v", err)
 	}
 }

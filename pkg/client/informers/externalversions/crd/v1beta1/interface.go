@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,24 @@ type Interface interface {
 	AntreaAgentInfos() AntreaAgentInfoInformer
 	// AntreaControllerInfos returns a AntreaControllerInfoInformer.
 	AntreaControllerInfos() AntreaControllerInfoInformer
+	// ClusterGroups returns a ClusterGroupInformer.
+	ClusterGroups() ClusterGroupInformer
+	// ClusterNetworkPolicies returns a ClusterNetworkPolicyInformer.
+	ClusterNetworkPolicies() ClusterNetworkPolicyInformer
+	// Egresses returns a EgressInformer.
+	Egresses() EgressInformer
+	// ExternalIPPools returns a ExternalIPPoolInformer.
+	ExternalIPPools() ExternalIPPoolInformer
+	// Groups returns a GroupInformer.
+	Groups() GroupInformer
+	// IPPools returns a IPPoolInformer.
+	IPPools() IPPoolInformer
+	// NetworkPolicies returns a NetworkPolicyInformer.
+	NetworkPolicies() NetworkPolicyInformer
+	// Tiers returns a TierInformer.
+	Tiers() TierInformer
+	// Traceflows returns a TraceflowInformer.
+	Traceflows() TraceflowInformer
 }
 
 type version struct {
@@ -47,4 +65,49 @@ func (v *version) AntreaAgentInfos() AntreaAgentInfoInformer {
 // AntreaControllerInfos returns a AntreaControllerInfoInformer.
 func (v *version) AntreaControllerInfos() AntreaControllerInfoInformer {
 	return &antreaControllerInfoInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// ClusterGroups returns a ClusterGroupInformer.
+func (v *version) ClusterGroups() ClusterGroupInformer {
+	return &clusterGroupInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// ClusterNetworkPolicies returns a ClusterNetworkPolicyInformer.
+func (v *version) ClusterNetworkPolicies() ClusterNetworkPolicyInformer {
+	return &clusterNetworkPolicyInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// Egresses returns a EgressInformer.
+func (v *version) Egresses() EgressInformer {
+	return &egressInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// ExternalIPPools returns a ExternalIPPoolInformer.
+func (v *version) ExternalIPPools() ExternalIPPoolInformer {
+	return &externalIPPoolInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// Groups returns a GroupInformer.
+func (v *version) Groups() GroupInformer {
+	return &groupInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// IPPools returns a IPPoolInformer.
+func (v *version) IPPools() IPPoolInformer {
+	return &iPPoolInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// NetworkPolicies returns a NetworkPolicyInformer.
+func (v *version) NetworkPolicies() NetworkPolicyInformer {
+	return &networkPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Tiers returns a TierInformer.
+func (v *version) Tiers() TierInformer {
+	return &tierInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// Traceflows returns a TraceflowInformer.
+func (v *version) Traceflows() TraceflowInformer {
+	return &traceflowInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

@@ -15,6 +15,7 @@
 package multicast
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -24,7 +25,6 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -38,7 +38,6 @@ import (
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
-	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	"antrea.io/antrea/pkg/util/channel"
 	"antrea.io/antrea/pkg/util/k8s"
 )
@@ -63,11 +62,7 @@ const (
 	nodeUpdateKey = "nodeUpdate"
 )
 
-var (
-	workerCount uint8 = 2
-	// Use IGMP v1, v2, and v3 query messages to snoop the multicast groups in which local Pods have joined.
-	queryVersions = []uint8{1, 2, 3}
-)
+var workerCount uint8 = 2
 
 type mcastGroupEvent struct {
 	group net.IP
@@ -85,7 +80,7 @@ type GroupMemberStatus struct {
 	localMembers map[string]time.Time
 	// remoteMembers is a set for Nodes which have joined the multicast group in the cluster. The Node's IP is
 	// added in the set.
-	remoteMembers  sets.String
+	remoteMembers  sets.Set[string]
 	lastIGMPReport time.Time
 	ofGroupID      binding.GroupIDType
 }
@@ -111,14 +106,13 @@ func (c *Controller) addGroupMemberStatus(e *mcastGroupEvent) {
 	status := &GroupMemberStatus{
 		group:         e.group,
 		ofGroupID:     c.v4GroupAllocator.Allocate(),
-		remoteMembers: sets.NewString(),
+		remoteMembers: sets.New[string](),
 		localMembers:  make(map[string]time.Time),
 	}
 	status = addGroupMember(status, e)
 	c.groupCache.Add(status)
 	c.queue.Add(e.group.String())
 	klog.InfoS("Added new multicast group to cache", "group", e.group, "interface", e.iface.InterfaceName)
-	return
 }
 
 // updateGroupMemberStatus updates the group status in groupCache. If a "join" message is sent from an existing member,
@@ -131,7 +125,7 @@ func (c *Controller) updateGroupMemberStatus(obj interface{}, e *mcastGroupEvent
 	newStatus := &GroupMemberStatus{
 		group:          status.group,
 		localMembers:   make(map[string]time.Time),
-		remoteMembers:  status.remoteMembers,
+		remoteMembers:  status.remoteMembers.Union(nil),
 		lastIGMPReport: status.lastIGMPReport,
 		ofGroupID:      status.ofGroupID,
 	}
@@ -167,13 +161,12 @@ func (c *Controller) updateGroupMemberStatus(obj interface{}, e *mcastGroupEvent
 			}
 		}
 	}
-	return
 }
 
 // checkLastMember sends out a query message on the group to check if there are still members in the group. If no new
 // membership report is received in the max response time, the group is removed from groupCache.
 func (c *Controller) checkLastMember(group net.IP) {
-	err := c.igmpSnooper.queryIGMP(group, queryVersions)
+	err := c.igmpSnooper.queryIGMP(group)
 	if err != nil {
 		klog.ErrorS(err, "Failed to send IGMP query message", "group", group.String())
 		return
@@ -245,21 +238,20 @@ type Controller struct {
 	igmpSnooper      *IGMPSnooper
 	groupEventCh     chan *mcastGroupEvent
 	groupCache       cache.Indexer
-	queue            workqueue.RateLimitingInterface
+	queue            workqueue.TypedRateLimitingInterface[string]
 	nodeInformer     coreinformers.NodeInformer
 	nodeLister       corelisters.NodeLister
 	nodeListerSynced cache.InformerSynced
-	nodeUpdateQueue  workqueue.RateLimitingInterface
+	nodeUpdateQueue  workqueue.TypedRateLimitingInterface[string]
 	// installedGroups saves the groups which are configured on OVS.
 	// With encap mode, the entries in installedGroups include all multicast groups identified in the cluster.
-	installedGroups      sets.String
+	installedGroups      sets.Set[string]
 	installedGroupsMutex sync.RWMutex
 	// installedLocalGroups saves the groups which are configured on OVS and host. The entries in installedLocalGroups
 	// include the multicast groups that local Pod members join.
-	installedLocalGroups      sets.String
+	installedLocalGroups      sets.Set[string]
 	installedLocalGroupsMutex sync.RWMutex
 	mRouteClient              *MRouteClient
-	ovsBridgeClient           ovsconfig.OVSBridgeClient
 	// queryInterval is the interval to send IGMP query messages.
 	queryInterval time.Duration
 	// mcastGroupTimeout is the timeout to detect a group as stale if no IGMP report is received within the time.
@@ -269,8 +261,16 @@ type Controller struct {
 	// nodeGroupID is the OpenFlow group ID in OVS which is used to send IGMP report messages to other Nodes.
 	nodeGroupID binding.GroupIDType
 	// installedNodes is the installed Node set that the IGMP report message is sent to.
-	installedNodes sets.String
-	encapEnabled   bool
+	installedNodes      sets.Set[string]
+	encapEnabled        bool
+	flexibleIPAMEnabled bool
+	// ipv4Enabled is the flag that if it is running on IPv4 cluster. An error is returned if IPv4Enabled is false
+	// in Initialize as Multicast does not support IPv6 for now.
+	// TODO: remove this flag after IPv6 is supported in Multicast.
+	ipv4Enabled bool
+	// ipv6Enabled is the flag that if it is running on IPv6 cluster.
+	// TODO: remove this flag after IPv6 is supported in Multicast.
+	ipv6Enabled bool
 }
 
 func NewMulticastController(ofClient openflow.Client,
@@ -278,19 +278,22 @@ func NewMulticastController(ofClient openflow.Client,
 	nodeConfig *config.NodeConfig,
 	ifaceStore interfacestore.InterfaceStore,
 	multicastSocket RouteInterface,
-	multicastInterfaces sets.String,
-	ovsBridgeClient ovsconfig.OVSBridgeClient,
+	multicastInterfaces sets.Set[string],
 	podUpdateSubscriber channel.Subscriber,
 	igmpQueryInterval time.Duration,
+	igmpQueryVersions []uint8,
 	validator types.McastNetworkPolicyController,
 	isEncap bool,
-	informerFactory informers.SharedInformerFactory) *Controller {
+	nodeInformer coreinformers.NodeInformer,
+	enableFlexibleIPAM bool,
+	ipv4Enabled bool,
+	ipv6Enabled bool) *Controller {
 	eventCh := make(chan *mcastGroupEvent, workerCount)
-	groupSnooper := newSnooper(ofClient, ifaceStore, eventCh, igmpQueryInterval, validator, isEncap)
+	groupSnooper := newSnooper(ofClient, ifaceStore, eventCh, igmpQueryInterval, igmpQueryVersions, validator, isEncap)
 	groupCache := cache.NewIndexer(getGroupEventKey, cache.Indexers{
 		podInterfaceIndex: podInterfaceIndexFunc,
 	})
-	multicastRouteClient := newRouteClient(nodeConfig, groupCache, multicastSocket, multicastInterfaces, isEncap)
+	multicastRouteClient := newRouteClient(nodeConfig, groupCache, multicastSocket, multicastInterfaces, enableFlexibleIPAM)
 	c := &Controller{
 		ofClient:             ofClient,
 		ifaceStore:           ifaceStore,
@@ -299,23 +302,35 @@ func NewMulticastController(ofClient openflow.Client,
 		igmpSnooper:          groupSnooper,
 		groupEventCh:         eventCh,
 		groupCache:           groupCache,
-		installedGroups:      sets.NewString(),
-		installedLocalGroups: sets.NewString(),
-		queue:                workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "multicastgroup"),
-		mRouteClient:         multicastRouteClient,
-		ovsBridgeClient:      ovsBridgeClient,
-		queryInterval:        igmpQueryInterval,
-		mcastGroupTimeout:    igmpQueryInterval * 3,
-		queryGroupId:         v4GroupAllocator.Allocate(),
-		encapEnabled:         isEncap,
+		installedGroups:      sets.New[string](),
+		installedLocalGroups: sets.New[string](),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "multicastgroup",
+			},
+		),
+		mRouteClient:        multicastRouteClient,
+		queryInterval:       igmpQueryInterval,
+		mcastGroupTimeout:   igmpQueryInterval * 3,
+		queryGroupId:        v4GroupAllocator.Allocate(),
+		encapEnabled:        isEncap,
+		flexibleIPAMEnabled: enableFlexibleIPAM,
+		ipv4Enabled:         ipv4Enabled,
+		ipv6Enabled:         ipv6Enabled,
 	}
 	if isEncap {
 		c.nodeGroupID = v4GroupAllocator.Allocate()
-		c.installedNodes = sets.NewString()
-		c.nodeInformer = informerFactory.Core().V1().Nodes()
+		c.installedNodes = sets.New[string]()
+		c.nodeInformer = nodeInformer
 		c.nodeLister = c.nodeInformer.Lister()
 		c.nodeListerSynced = c.nodeInformer.Informer().HasSynced
-		c.nodeUpdateQueue = workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "nodeUpdate")
+		c.nodeUpdateQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "nodeUpdate",
+			},
+		)
 		c.nodeInformer.Informer().AddEventHandlerWithResyncPeriod(
 			cache.ResourceEventHandlerFuncs{
 				AddFunc: func(cur interface{}) {
@@ -336,28 +351,30 @@ func NewMulticastController(ofClient openflow.Client,
 }
 
 func (c *Controller) Initialize() error {
+	if !c.ipv4Enabled {
+		return fmt.Errorf("Multicast is not supported on an IPv6-only cluster")
+	} else if c.ipv6Enabled {
+		klog.InfoS("Multicast only works with IPv4 traffic on a dual-stack cluster")
+	}
 	err := c.mRouteClient.Initialize()
 	if err != nil {
-		return err
-	}
-	// Install flows on OVS for IGMP packets and multicast traffic forwarding:
-	// 1) send the IGMP report messages to Antrea Agent,
-	// 2) forward the IGMP query messages to all local Pods,
-	// 3) forward the multicast traffic to antrea-gw0 if no local Pods have joined in the group, and this is to ensure
-	//    local Pods can access the external multicast receivers.
-	err = c.ofClient.InstallMulticastInitialFlows(uint8(openflow.PacketInReasonMC))
-	if err != nil {
-		klog.ErrorS(err, "Failed to install multicast initial flows")
 		return err
 	}
 	err = c.initQueryGroup()
 	if err != nil {
 		return err
 	}
+	if c.flexibleIPAMEnabled {
+		if err := c.ofClient.InstallMulticastFlexibleIPAMFlows(); err != nil {
+			klog.ErrorS(err, "Failed to install OpenFlow flows to handle multicast traffic when flexibleIPAM is enabled")
+			return err
+		}
+	}
 	if c.encapEnabled {
 		// Install OpenFlow group to send the multicast groups that local Pods joined to all other Nodes in the cluster.
 		if err := c.ofClient.InstallMulticastGroup(c.nodeGroupID, nil, nil); err != nil {
 			klog.ErrorS(err, "Failed to update OpenFlow group for remote Nodes")
+			return err
 		}
 		if err := c.ofClient.InstallMulticastRemoteReportFlows(c.nodeGroupID); err != nil {
 			klog.ErrorS(err, "Failed to install OpenFlow group and flow to send IGMP report to other Nodes")
@@ -370,7 +387,7 @@ func (c *Controller) Initialize() error {
 func (c *Controller) Run(stopCh <-chan struct{}) {
 	// Periodically query Multicast Groups on OVS.
 	go wait.NonSlidingUntil(func() {
-		if err := c.igmpSnooper.queryIGMP(net.IPv4zero, queryVersions); err != nil {
+		if err := c.igmpSnooper.queryIGMP(net.IPv4zero); err != nil {
 			klog.ErrorS(err, "Failed to send IGMP query")
 		}
 	}, c.queryInterval, stopCh)
@@ -407,21 +424,13 @@ func (c *Controller) getGroupMemberStatusesByPod(podInterface string) []*GroupMe
 }
 
 func (c *Controller) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
-	defer c.queue.Done(obj)
+	defer c.queue.Done(key)
 
-	// We expect string (multicast group) to come off the workqueue.
-	if key, ok := obj.(string); !ok {
-		// As the item in the workqueue is actually invalid, we call Forget here else we'd
-		// go into a loop of attempting to process a work item that is invalid.
-		// This should not happen.
-		c.queue.Forget(obj)
-		klog.Errorf("Expected string in work queue but got %#v", obj)
-		return true
-	} else if err := c.syncGroup(key); err == nil {
+	if err := c.syncGroup(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.queue.Forget(key)
@@ -450,7 +459,11 @@ func (c *Controller) syncGroup(groupKey string) error {
 	}
 	status := obj.(*GroupMemberStatus)
 	memberPorts := make([]uint32, 0, len(status.localMembers)+1)
-	memberPorts = append(memberPorts, config.HostGatewayOFPort)
+	if c.flexibleIPAMEnabled {
+		memberPorts = append(memberPorts, c.nodeConfig.UplinkNetConfig.OFPort, c.nodeConfig.HostInterfaceOFPort)
+	} else {
+		memberPorts = append(memberPorts, c.nodeConfig.GatewayConfig.OFPort)
+	}
 	for memberInterfaceName := range status.localMembers {
 		obj, found := c.ifaceStore.GetInterfaceByName(memberInterfaceName)
 		if !found {
@@ -484,7 +497,7 @@ func (c *Controller) syncGroup(groupKey string) error {
 	deleteLocalMulticastGroup := func() error {
 		err := c.mRouteClient.deleteInboundMrouteEntryByGroup(status.group)
 		if err != nil {
-			klog.ErrorS(err, "Cannot delete multicast group", "group", groupKey)
+			klog.ErrorS(err, "Failed to delete multicast group", "group", groupKey)
 			return err
 		}
 		klog.InfoS("Removed multicast route entry", "group", status.group)
@@ -520,7 +533,7 @@ func (c *Controller) syncGroup(groupKey string) error {
 					return err
 				}
 				// Remove the multicast flow entry if no local Pod is in the group.
-				if err := c.ofClient.UninstallGroup(status.ofGroupID); err != nil {
+				if err := c.ofClient.UninstallMulticastGroup(status.ofGroupID); err != nil {
 					klog.ErrorS(err, "Failed to uninstall multicast group", "group", groupKey)
 					return err
 				}
@@ -569,10 +582,7 @@ func (c *Controller) syncGroup(groupKey string) error {
 func (c *Controller) groupIsStale(status *GroupMemberStatus) bool {
 	membersCount := len(status.localMembers)
 	diff := time.Now().Sub(status.lastIGMPReport)
-	if membersCount == 0 || diff > c.mcastGroupTimeout {
-		return true
-	}
-	return false
+	return membersCount == 0 || diff > c.mcastGroupTimeout
 }
 
 func (c *Controller) groupHasInstalled(groupKey string) bool {
@@ -696,7 +706,7 @@ func (c *Controller) syncNodes() error {
 		return err
 	}
 	var updatedNodeIPs []net.IP
-	updatedNodeIPSet := sets.NewString()
+	updatedNodeIPSet := sets.New[string]()
 	for _, n := range nodes {
 		if n.Name == c.nodeConfig.Name {
 			continue
@@ -739,7 +749,7 @@ func getGroupEventKey(obj interface{}) (string, error) {
 	return groupState.group.String(), nil
 }
 
-func (c *Controller) CollectIGMPReportNPStats() (igmpANPStats, igmpACNPStats map[apitypes.UID]map[string]*types.RuleMetric) {
+func (c *Controller) CollectIGMPReportNPStats() (igmpANNPStats, igmpACNPStats map[apitypes.UID]map[string]*types.RuleMetric) {
 	return c.igmpSnooper.collectStats()
 }
 
@@ -833,7 +843,7 @@ func (c *Controller) nodeWorker() {
 }
 
 func (c *Controller) processNextNodeItem() bool {
-	obj, quit := c.nodeUpdateQueue.Get()
+	key, quit := c.nodeUpdateQueue.Get()
 	if quit {
 		return false
 	}
@@ -841,17 +851,9 @@ func (c *Controller) processNextNodeItem() bool {
 	// must remember to call Forget if we do not want this work item being re-queued. For
 	// example, we do not call Forget if a transient error occurs, instead the item is put back
 	// on the workqueue and attempted again after a back-off period.
-	defer c.nodeUpdateQueue.Done(obj)
+	defer c.nodeUpdateQueue.Done(key)
 
-	// We expect strings (Node name) to come off the workqueue.
-	if key, ok := obj.(string); !ok {
-		// As the item in the workqueue is actually invalid, we call Forget here else we'd
-		// go into a loop of attempting to process a work item that is invalid.
-		// This should not happen: only a constant string enqueues nodeUpdateQueue.
-		c.nodeUpdateQueue.Forget(obj)
-		klog.Errorf("Expected string in work queue but got %#v", obj)
-		return true
-	} else if err := c.syncNodes(); err == nil {
+	if err := c.syncNodes(); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.nodeUpdateQueue.Forget(key)

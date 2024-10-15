@@ -99,7 +99,7 @@ type endpointInfo struct {
 	Addresses []string
 	NodeName  *string
 	Zone      *string
-	ZoneHints sets.String
+	ZoneHints sets.Set[string]
 
 	Ready       bool
 	Serving     bool
@@ -154,7 +154,7 @@ func newEndpointSliceInfo(endpointSlice *discovery.EndpointSlice, remove bool) *
 
 			if features.DefaultFeatureGate.Enabled(features.TopologyAwareHints) {
 				if endpoint.Hints != nil && len(endpoint.Hints.ForZones) > 0 {
-					epInfo.ZoneHints = sets.String{}
+					epInfo.ZoneHints = sets.Set[string]{}
 					for _, zone := range endpoint.Hints.ForZones {
 						epInfo.ZoneHints.Insert(zone.Name)
 					}
@@ -280,7 +280,7 @@ func (cache *EndpointSliceCache) addEndpoints(serviceNN apimachinerytypes.Namesp
 
 		// Filter out the incorrect IP version case. Any endpoint port that
 		// contains incorrect IP version will be ignored.
-		if cache.isIPv6Mode && utilnet.IsIPv6String(endpoint.Addresses[0]) != cache.isIPv6Mode {
+		if utilnet.IsIPv6String(endpoint.Addresses[0]) != cache.isIPv6Mode {
 			continue
 		}
 		isLocal := false

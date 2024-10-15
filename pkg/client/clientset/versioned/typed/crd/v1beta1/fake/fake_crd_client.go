@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -32,6 +32,42 @@ func (c *FakeCrdV1beta1) AntreaAgentInfos() v1beta1.AntreaAgentInfoInterface {
 
 func (c *FakeCrdV1beta1) AntreaControllerInfos() v1beta1.AntreaControllerInfoInterface {
 	return &FakeAntreaControllerInfos{c}
+}
+
+func (c *FakeCrdV1beta1) ClusterGroups() v1beta1.ClusterGroupInterface {
+	return &FakeClusterGroups{c}
+}
+
+func (c *FakeCrdV1beta1) ClusterNetworkPolicies() v1beta1.ClusterNetworkPolicyInterface {
+	return &FakeClusterNetworkPolicies{c}
+}
+
+func (c *FakeCrdV1beta1) Egresses() v1beta1.EgressInterface {
+	return &FakeEgresses{c}
+}
+
+func (c *FakeCrdV1beta1) ExternalIPPools() v1beta1.ExternalIPPoolInterface {
+	return &FakeExternalIPPools{c}
+}
+
+func (c *FakeCrdV1beta1) Groups(namespace string) v1beta1.GroupInterface {
+	return &FakeGroups{c, namespace}
+}
+
+func (c *FakeCrdV1beta1) IPPools() v1beta1.IPPoolInterface {
+	return &FakeIPPools{c}
+}
+
+func (c *FakeCrdV1beta1) NetworkPolicies(namespace string) v1beta1.NetworkPolicyInterface {
+	return &FakeNetworkPolicies{c, namespace}
+}
+
+func (c *FakeCrdV1beta1) Tiers() v1beta1.TierInterface {
+	return &FakeTiers{c}
+}
+
+func (c *FakeCrdV1beta1) Traceflows() v1beta1.TraceflowInterface {
+	return &FakeTraceflows{c}
 }
 
 // RESTClient returns a RESTClient that is used to communicate

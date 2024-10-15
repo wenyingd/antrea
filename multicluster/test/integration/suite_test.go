@@ -21,23 +21,24 @@ import (
 	"testing"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/envtest/printer"
 	mcsscheme "sigs.k8s.io/mcs-api/pkg/client/clientset/versioned/scheme"
 
-	mcsv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
-	mcsv1alpha2 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha2"
-	multiclustercontrollers "antrea.io/antrea/multicluster/controllers/multicluster"
+	mcv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
+	mcv1alpha2 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha2"
+	"antrea.io/antrea/multicluster/controllers/multicluster/leader"
+	"antrea.io/antrea/multicluster/controllers/multicluster/member"
 	antreamcscheme "antrea.io/antrea/multicluster/pkg/client/clientset/versioned/scheme"
 	antreascheme "antrea.io/antrea/pkg/client/clientset/versioned/scheme"
 	"antrea.io/antrea/pkg/signals"
@@ -85,9 +86,7 @@ var (
 func TestAPIs(t *testing.T) {
 	RegisterFailHandler(Fail)
 
-	RunSpecsWithDefaultAndCustomReporters(t,
-		"Controller Suite",
-		[]Reporter{printer.NewlineReporter{}})
+	RunSpecs(t, "Controller Suite")
 }
 
 var _ = BeforeSuite(func() {
@@ -103,7 +102,13 @@ var _ = BeforeSuite(func() {
 	}
 
 	var err error
-	cfg, err = testEnv.Start()
+	done := make(chan interface{})
+	go func() {
+		defer GinkgoRecover()
+		cfg, err = testEnv.Start()
+		close(done)
+	}()
+	Eventually(done).WithTimeout(1 * time.Minute).Should(BeClosed())
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
@@ -126,26 +131,35 @@ var _ = BeforeSuite(func() {
 		Scheme: scheme,
 	})
 	Expect(err).ToNot(HaveOccurred())
+
 	k8sServerURL = testEnv.Config.Host
-	ctx := context.Background()
+	stopCh := signals.RegisterSignalHandlers()
+	ctx := wait.ContextForChannel(stopCh)
 
 	By("Creating MemberClusterSetReconciler")
 	k8sClient.Create(ctx, leaderNS)
 	k8sClient.Create(ctx, testNS)
 	k8sClient.Create(ctx, testNSStale)
-	clusterSetReconciler := multiclustercontrollers.NewMemberClusterSetReconciler(
+	commonAreaCreationCh := make(chan struct{})
+	clusterSetReconciler := member.NewMemberClusterSetReconciler(
 		k8sManager.GetClient(),
 		k8sManager.GetScheme(),
 		LeaderNamespace,
+		false,
+		false,
+		commonAreaCreationCh,
 	)
 	err = clusterSetReconciler.SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
 	By("Creating ServiceExportReconciler")
-	svcExportReconciler := multiclustercontrollers.NewServiceExportReconciler(
+	svcExportReconciler := member.NewServiceExportReconciler(
 		k8sManager.GetClient(),
 		k8sManager.GetScheme(),
-		clusterSetReconciler)
+		clusterSetReconciler,
+		"ClusterIP",
+		false,
+		testNamespace)
 	err = svcExportReconciler.SetupWithManager(k8sManager)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -153,27 +167,23 @@ var _ = BeforeSuite(func() {
 	// configureClusterSet finishes
 
 	By("Creating StaleController")
-	stopCh := signals.RegisterSignalHandlers()
-	staleController := multiclustercontrollers.NewStaleResCleanupController(
+	staleController := member.NewStaleResCleanupController(
 		k8sManager.GetClient(),
 		k8sManager.GetScheme(),
+		commonAreaCreationCh,
 		"default",
 		clusterSetReconciler,
-		multiclustercontrollers.MemberCluster,
 	)
 
 	go staleController.Run(stopCh)
-	// Make sure to trigger clean up process every 5 seconds
-	// otherwise staleResCleanupController will only run once before test case is ready to run.
-	go func() {
-		for {
-			staleController.Enqueue()
-			time.Sleep(5 * time.Second)
-		}
-	}()
+	// Fake the commonAreaCreation event since the ClusterSet creation is only triggered one time
+	// when the ClusterSet is created, but the stale controller test is not running yet.
+	go wait.UntilWithContext(ctx, func(ctx context.Context) {
+		commonAreaCreationCh <- struct{}{}
+	}, 5*time.Second)
 
 	By("Creating ResourceExportReconciler")
-	resExportReconciler := multiclustercontrollers.NewResourceExportReconciler(
+	resExportReconciler := leader.NewResourceExportReconciler(
 		k8sManager.GetClient(),
 		k8sManager.GetScheme())
 	err = resExportReconciler.SetupWithManager(k8sManager)
@@ -184,54 +194,56 @@ var _ = BeforeSuite(func() {
 		err = k8sManager.Start(ctrl.SetupSignalHandler())
 		Expect(err).ToNot(HaveOccurred())
 	}()
-	configureClusterSet()
-}, 60)
+	configureMemberClusterSet()
+	configureLeaderClusterSet()
+})
 
-func configureClusterSet() {
-	clusterIDClaim := &mcsv1alpha2.ClusterClaim{
+func configureMemberClusterSet() {
+	clusterSet := &mcv1alpha2.ClusterSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace: LeaderNamespace,
-			Name:      mcsv1alpha2.WellKnownClusterClaimID,
-		},
-		Value: LocalClusterID,
-	}
-	clusterSetIDClaim := &mcsv1alpha2.ClusterClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: LeaderNamespace,
-			Name:      mcsv1alpha2.WellKnownClusterClaimClusterSet,
-		},
-		Value: clusterSetID,
-	}
-	clusterSet := &mcsv1alpha1.ClusterSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: LeaderNamespace,
+			Namespace: "default",
 			Name:      clusterSetID,
 		},
-		Spec: mcsv1alpha1.ClusterSetSpec{
-			Leaders: []mcsv1alpha1.MemberCluster{
+		Spec: mcv1alpha2.ClusterSetSpec{
+			ClusterID: LocalClusterID,
+			Leaders: []mcv1alpha2.LeaderClusterInfo{
 				{
 					ClusterID: LocalClusterID,
 					Secret:    "access-token",
 					Server:    k8sServerURL,
 				},
 			},
-			Members: []mcsv1alpha1.MemberCluster{
+			Namespace: LeaderNamespace,
+		},
+	}
+	ctx := context.Background()
+	err := k8sClient.Create(ctx, clusterSet, &client.CreateOptions{})
+	Expect(err == nil).Should(BeTrue())
+}
+
+func configureLeaderClusterSet() {
+	clusterSet := &mcv1alpha2.ClusterSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: LeaderNamespace,
+			Name:      clusterSetID,
+		},
+		Spec: mcv1alpha2.ClusterSetSpec{
+			ClusterID: LocalClusterID,
+			Leaders: []mcv1alpha2.LeaderClusterInfo{
 				{
 					ClusterID: LocalClusterID,
+					Secret:    "access-token",
+					Server:    k8sServerURL,
 				},
 			},
 			Namespace: LeaderNamespace,
 		},
 	}
 	ctx := context.Background()
-	err := k8sClient.Create(ctx, clusterIDClaim, &client.CreateOptions{})
-	Expect(err == nil).Should(BeTrue())
-	err = k8sClient.Create(ctx, clusterSetIDClaim, &client.CreateOptions{})
-	Expect(err == nil).Should(BeTrue())
-	err = k8sClient.Create(ctx, clusterSet, &client.CreateOptions{})
+	err := k8sClient.Create(ctx, clusterSet, &client.CreateOptions{})
 	Expect(err == nil).Should(BeTrue())
 	Eventually(func() bool {
-		memberAnnounce := &mcsv1alpha1.MemberClusterAnnounce{}
+		memberAnnounce := &mcv1alpha1.MemberClusterAnnounce{}
 		err = k8sClient.Get(ctx, types.NamespacedName{Namespace: LeaderNamespace, Name: "member-announce-from-cluster-a"}, memberAnnounce)
 		return err == nil
 	}, timeout, interval).Should(BeTrue())

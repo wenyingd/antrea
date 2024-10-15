@@ -43,6 +43,14 @@ const (
 	bridgedUplinkSuffix = "~"
 )
 
+var (
+	// Declared variables which are meant to be overridden for testing.
+	netInterfaceByName  = net.InterfaceByName
+	netInterfaceByIndex = net.InterfaceByIndex
+	netInterfaces       = net.Interfaces
+	netInterfaceAddrs   = (*net.Interface).Addrs
+)
+
 func generateInterfaceName(key string, name string, useHead bool) string {
 	hash := sha1.New() // #nosec G401: not used for security purposes
 	io.WriteString(hash, key)
@@ -64,15 +72,15 @@ func generateInterfaceName(key string, name string, useHead bool) string {
 }
 
 // GenerateContainerInterfaceKey generates a unique string for a Pod's
-// interface as: container/<Container-ID>.
+// interface as: "c/<Container-ID>/<IFDev-Name>".
 // We must use ContainerID instead of PodNamespace + PodName because there could
 // be more than one container associated with the same Pod at some point.
 // For example, when deleting a StatefulSet Pod with 0 second grace period, the
 // Pod will be removed from the Kubernetes API very quickly and a new Pod will
 // be created immediately, and kubelet may process the deletion of the previous
 // Pod and the addition of the new Pod simultaneously.
-func GenerateContainerInterfaceKey(containerID string) string {
-	return fmt.Sprintf("container/%s", containerID)
+func GenerateContainerInterfaceKey(containerID, ifDev string) string {
+	return fmt.Sprintf("c/%s/%s", containerID, ifDev)
 }
 
 // GenerateNodeTunnelInterfaceKey generates a unique string for a Node's
@@ -82,14 +90,29 @@ func GenerateNodeTunnelInterfaceKey(nodeName string) string {
 }
 
 // GenerateContainerInterfaceName generates a unique interface name using the
-// Pod's namespace, name and containerID. The output should be deterministic (so that
-// multiple calls to GenerateContainerInterfaceName with the same parameters
-// return the same value). The output has the length of interfaceNameLength(15).
+// Pod's Namespace, name and container ID. The output should be deterministic
+// (so that multiple calls to GenerateContainerInterfaceName with the same
+// parameters return the same value). The output has the length of
+// interfaceNameLength(15).
 // The probability of collision should be neglectable.
 func GenerateContainerInterfaceName(podName, podNamespace, containerID string) string {
 	// Use the podName as the prefix and the containerID as the hashing key.
 	// podNamespace is not used currently.
 	return generateInterfaceName(containerID, podName, true)
+}
+
+// GenerateContainerHostVethName generates a unique interface name using the
+// Pod's Name, container ID, and the container veth interface name. The output
+// should be deterministic.
+func GenerateContainerHostVethName(podName, podNamespace, containerID, containerVeth string) string {
+	var key string
+	if containerVeth == "eth0" {
+		key = containerID
+	} else {
+		// Secondary interface.
+		key = containerID + containerVeth
+	}
+	return generateInterfaceName(key, podName, true)
 }
 
 // GenerateNodeTunnelInterfaceName generates a unique interface name for the
@@ -112,14 +135,10 @@ func listenUnix(address string) (net.Listener, error) {
 	return net.Listen("unix", address)
 }
 
-func dialUnix(address string) (net.Conn, error) {
-	return net.Dial("unix", address)
-}
-
 // GetIPNetDeviceFromIP returns local IPs/masks and associated device from IP, and ignores the interfaces which have
 // names in the ignoredInterfaces.
-func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs, ignoredInterfaces sets.String) (v4IPNet *net.IPNet, v6IPNet *net.IPNet, iface *net.Interface, err error) {
-	linkList, err := net.Interfaces()
+func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs, ignoredInterfaces sets.Set[string]) (v4IPNet *net.IPNet, v6IPNet *net.IPNet, iface *net.Interface, err error) {
+	linkList, err := netInterfaces()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -139,7 +158,7 @@ func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs, ignoredInterfaces sets.Stri
 		if ignoredInterfaces.Has(link.Name) {
 			continue
 		}
-		addrList, err := link.Addrs()
+		addrList, err := netInterfaceAddrs(&link)
 		if err != nil {
 			continue
 		}
@@ -166,11 +185,11 @@ func GetIPNetDeviceFromIP(localIPs *ip.DualStackIPs, ignoredInterfaces sets.Stri
 }
 
 func GetIPNetDeviceByName(ifaceName string) (v4IPNet *net.IPNet, v6IPNet *net.IPNet, link *net.Interface, err error) {
-	link, err = net.InterfaceByName(ifaceName)
+	link, err = netInterfaceByName(ifaceName)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	addrList, err := link.Addrs()
+	addrList, err := netInterfaceAddrs(link)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -212,12 +231,12 @@ func GetIPNetDeviceByCIDRs(cidrsList []string) (v4IPNet, v6IPNet *net.IPNet, lin
 		return nil, nil, nil, fmt.Errorf("length of cidrs is %v more than max allowed of 2", len(cidrs))
 	}
 
-	ifaces, err := net.Interfaces()
+	ifaces, err := netInterfaces()
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	for _, i := range ifaces {
-		addresses, err := i.Addrs()
+	for i := range ifaces {
+		addresses, err := netInterfaceAddrs(&ifaces[i])
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -238,29 +257,10 @@ func GetIPNetDeviceByCIDRs(cidrsList []string) (v4IPNet, v6IPNet *net.IPNet, lin
 			}
 		}
 		if v4IPNet != nil || v6IPNet != nil {
-			return v4IPNet, v6IPNet, &i, nil
+			return v4IPNet, v6IPNet, &ifaces[i], nil
 		}
 	}
 	return nil, nil, nil, fmt.Errorf("unable to find local IP and device")
-}
-
-func GetAllIPNetsByName(ifaceName string) ([]*net.IPNet, error) {
-	ips := []*net.IPNet{}
-	adapter, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return nil, err
-	}
-	addrs, _ := adapter.Addrs()
-	for _, addr := range addrs {
-		if ip, ipNet, err := net.ParseCIDR(addr.String()); err != nil {
-			klog.Warningf("Unable to parse addr %+v, err=%+v", addr, err)
-		} else if !ip.IsLinkLocalUnicast() {
-			ipNet.IP = ip
-			ips = append(ips, ipNet)
-		}
-	}
-	klog.InfoS("Found IPs on interface", "IPs", ips, "interface", ifaceName)
-	return ips, nil
 }
 
 func GetIPv4Addr(ips []net.IP) net.IP {
@@ -291,7 +291,10 @@ func GetIPWithFamily(ips []net.IP, addrFamily uint8) (net.IP, error) {
 
 // ExtendCIDRWithIP is used for extending an IPNet with an IP.
 func ExtendCIDRWithIP(ipNet *net.IPNet, ip net.IP) (*net.IPNet, error) {
-	cpl := commonPrefixLen(ipNet.IP, ip)
+	if ipNet == nil {
+		return NewIPNet(ip), nil
+	}
+	cpl := longestCommonPrefixLen(ipNet.IP, ip)
 	if cpl == 0 {
 		return nil, fmt.Errorf("invalid common prefix length")
 	}
@@ -302,10 +305,10 @@ func ExtendCIDRWithIP(ipNet *net.IPNet, ip net.IP) (*net.IPNet, error) {
 	return newIPNet, nil
 }
 
-// This is copied from net/addrselect.go as this function cannot be used outside of standard lib net.
-// Modifies:
+// This is copied from func commonPrefixLen in net/addrselect.go and modified:
 // - Replace argument type IP with argument type net.IP.
-func commonPrefixLen(a, b net.IP) (cpl int) {
+// - Remove the prefix limit (64 bits) for IPv6.
+func longestCommonPrefixLen(a, b net.IP) (cpl int) {
 	if a4 := a.To4(); a4 != nil {
 		a = a4
 	}
@@ -314,11 +317,6 @@ func commonPrefixLen(a, b net.IP) (cpl int) {
 	}
 	if len(a) != len(b) {
 		return 0
-	}
-	// If IPv6, only up to the prefix (first 64 bits)
-	if len(a) > 8 {
-		a = a[:8]
-		b = b[:8]
 	}
 	for len(a) > 0 {
 		if a[0] == b[0] {
@@ -348,22 +346,22 @@ func GetAllNodeAddresses(excludeDevices []string) ([]net.IP, []net.IP, error) {
 	_, ipv6LinkLocalNet, _ := net.ParseCIDR("fe80::/64")
 
 	// Get all interfaces.
-	interfaces, err := net.Interfaces()
+	interfaces, err := netInterfaces()
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Transform excludeDevices to a set
-	excludeDevicesSet := sets.NewString(excludeDevices...)
+	excludeDevicesSet := sets.New[string](excludeDevices...)
 
-	for _, itf := range interfaces {
+	for i := range interfaces {
 		// If the device is in excludeDevicesSet, skip it.
-		if excludeDevicesSet.Has(itf.Name) {
+		if excludeDevicesSet.Has(interfaces[i].Name) {
 			continue
 		}
 
 		// Get all IPs of every interface
-		addrs, err := itf.Addrs()
+		addrs, err := netInterfaceAddrs(&interfaces[i])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -388,14 +386,14 @@ func GetAllNodeAddresses(excludeDevices []string) ([]net.IP, []net.IP, error) {
 // NewIPNet generates an IPNet from an ip address using a netmask of 32 or 128.
 func NewIPNet(ip net.IP) *net.IPNet {
 	if ip.To4() != nil {
-		return &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}
+		return &net.IPNet{IP: ip.To4(), Mask: net.CIDRMask(32, 32)}
 	}
 	return &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}
 }
 
 func PortToUint16(port int) uint16 {
 	if port > 0 && port <= math.MaxUint16 {
-		return uint16(port) // lgtm[go/incorrect-integer-conversion]
+		return uint16(port)
 	}
 	klog.Errorf("Port value %d out-of-bounds", port)
 	return 0
@@ -411,21 +409,32 @@ func GenerateRandomMAC() net.HardwareAddr {
 	if _, err := rand.Read(buf); err != nil {
 		klog.ErrorS(err, "Failed to generate a random MAC")
 	}
-	// Set the local bit
-	buf[0] |= 2
+	// Unset the multicast bit.
+	buf[0] &= 0xfe
+	buf[0] |= 0x02
 	return buf
 }
 
-func GetIPNetsByLink(link *net.Interface) ([]*net.IPNet, error) {
-	addrList, err := link.Addrs()
+func getIPNetsByLink(link *net.Interface) ([]*net.IPNet, error) {
+	addrList, err := netInterfaceAddrs(link)
 	if err != nil {
 		return nil, err
 	}
 	var addrs []*net.IPNet
 	for _, a := range addrList {
-		if ipNet, ok := a.(*net.IPNet); ok {
+		if ipNet, ok := a.(*net.IPNet); ok && !ipNet.IP.IsLinkLocalUnicast() {
 			addrs = append(addrs, ipNet)
 		}
 	}
 	return addrs, nil
+}
+
+// GenerateOVSDatapathID generates an OVS datapath ID string.
+func GenerateOVSDatapathID(macString string) string {
+	// The length of datapathID is 64 bits, the lower 48-bits are for a MAC address, while the
+	// upper 16-bits are implementer-defined. Antrea uses "0x0000" for the upper 16-bits.
+	if macString == "" {
+		macString = GenerateRandomMAC().String()
+	}
+	return "0000" + strings.Replace(macString, ":", "", -1)
 }

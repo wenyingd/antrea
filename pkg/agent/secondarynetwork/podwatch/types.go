@@ -14,28 +14,22 @@
 
 package podwatch
 
-type RouteInfo struct {
-	Dst string `json:"dst,omitempty"`
-}
+import (
+	"antrea.io/antrea/pkg/agent/cniserver/types"
+)
 
-type IPAMConfig struct {
-	Type       string    `json:"type,omitempty"`
-	Subnet     string    `json:"subnet,omitempty"`
-	RangeStart string    `json:"rangeStart,omitempty"`
-	RangeEnd   string    `json:"rangeEnd,omitempty"`
-	Routes     RouteInfo `json:"routes,omitempty"`
-	Gateway    string    `json:"gateway,omitempty"`
-}
+type networkType string
+
+const (
+	sriovNetworkType networkType = "sriov"
+	vlanNetworkType  networkType = "vlan"
+)
 
 type SecondaryNetworkConfig struct {
-	CNIVersion string     `json:"cniVersion,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	Type       string     `json:"type,omitempty"`
-	IPAM       IPAMConfig `json:"ipam,omitempty"`
-}
-
-type SecondaryNetworkObject struct {
-	NetworkName   string `json:"name,omitempty"`
-	InterfaceName string `json:"interface,omitempty"`
-	InterfaceType string `json:"type"`
+	types.NetworkConfig
+	NetworkType networkType `json:"networkType,omitempty"`
+	// VLAN ID of the OVS port. Applicable only to the VLAN network type. If a
+	// non-zero VLAN is specified, it will override the VLAN in the Antrea
+	// IPAM IPPool subnet.
+	VLAN int32 `json:"vlan,omitempty"`
 }

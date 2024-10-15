@@ -2,7 +2,6 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  creationTimestamp: null
   name: mutating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
@@ -30,7 +29,6 @@ webhooks:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  creationTimestamp: null
   name: validating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
@@ -40,9 +38,9 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-multicluster-crd-antrea-io-v1alpha2-clusterclaim
+      path: /validate-multicluster-crd-antrea-io-v1alpha2-clusterset
   failurePolicy: Fail
-  name: vclusterclaim.kb.io
+  name: vclusterset.kb.io
   rules:
   - apiGroups:
     - multicluster.crd.antrea.io
@@ -53,7 +51,7 @@ webhooks:
     - UPDATE
     - DELETE
     resources:
-    - clusterclaims
+    - clustersets
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -62,9 +60,9 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
-      path: /validate-multicluster-crd-antrea-io-v1alpha1-clusterset
+      path: /validate-multicluster-crd-antrea-io-v1alpha1-gateway
   failurePolicy: Fail
-  name: vclusterset.kb.io
+  name: vgateway.kb.io
   rules:
   - apiGroups:
     - multicluster.crd.antrea.io
@@ -74,7 +72,7 @@ webhooks:
     - CREATE
     - UPDATE
     resources:
-    - clustersets
+    - gateways
   sideEffects: None
 - admissionReviewVersions:
   - v1

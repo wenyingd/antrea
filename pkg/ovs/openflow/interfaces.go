@@ -18,6 +18,8 @@ import (
 	"net"
 	"time"
 
+	"antrea.io/libOpenflow/openflow15"
+	"antrea.io/libOpenflow/protocol"
 	"antrea.io/libOpenflow/util"
 	"antrea.io/ofnet/ofctrl"
 )
@@ -76,8 +78,18 @@ const (
 	NxmFieldDstIPv4     = "NXM_OF_IP_DST"
 	NxmFieldSrcIPv6     = "NXM_NX_IPV6_SRC"
 	NxmFieldDstIPv6     = "NXM_NX_IPV6_DST"
+	NxmFieldTunIPv4Src  = "NXM_NX_TUN_IPV4_SRC"
+	NxmFieldEthType     = "NXM_OF_ETH_TYPE"
+	NxmFieldIPProto     = "NXM_OF_IP_PROTO"
 
 	OxmFieldVLANVID = "OXM_OF_VLAN_VID"
+	OxmFieldInPort  = "OXM_OF_IN_PORT"
+	OxmFieldTCPDst  = "OXM_OF_TCP_DST"
+	OxmFieldUDPDst  = "OXM_OF_UDP_DST"
+	OxmFieldSCTPDst = "OXM_OF_SCTP_DST"
+	OxmFieldTCPSrc  = "OXM_OF_TCP_SRC"
+	OxmFieldUDPSrc  = "OXM_OF_UDP_SRC"
+	OxmFieldSCTPSrc = "OXM_OF_SCTP_SRC"
 )
 
 const (
@@ -89,17 +101,21 @@ const (
 // IPDSCPToSRange stores the DSCP bits in ToS field of IP header.
 var IPDSCPToSRange = &Range{2, 7}
 
+// VLANVIDRange stores the VLAN VID range
+var VLANVIDRange = &Range{0, 11}
+
 // Bridge defines operations on an openflow bridge.
 type Bridge interface {
-	CreateTable(table Table, next uint8, missAction MissActionType) Table
-	// AddTable adds table on the Bridge. Return true if the operation succeeds, otherwise return false.
-	DeleteTable(id uint8) bool
-	CreateGroupTypeAll(id GroupIDType) Group
-	CreateGroup(id GroupIDType) Group
-	DeleteGroup(id GroupIDType) bool
-	CreateMeter(id MeterIDType, flags ofctrl.MeterFlag) Meter
-	DeleteMeter(id MeterIDType) bool
+	NewTable(table Table, next uint8, missAction MissActionType) Table
+	GetTableByID(id uint8) (Table, error)
+	NewGroupTypeAll(id GroupIDType) Group
+	NewGroup(id GroupIDType) Group
+	// DeleteGroupAll deletes all group entries from the switch.
+	DeleteGroupAll() error
+	NewMeter(id MeterIDType, flags ofctrl.MeterFlag) Meter
+	// DeleteMeterAll deletes all meter entries from the switch.
 	DeleteMeterAll() error
+	GetMeterStats(handleMeterStatsReply func(meterID int, packetCount int64)) error
 	DumpTableStatus() []TableStatus
 	// DumpFlows queries the Openflow entries from OFSwitch. The filter of the query is Openflow cookieID; the result is
 	// a map from flow cookieID to FlowStates.
@@ -108,7 +124,7 @@ type Bridge interface {
 	DeleteFlowsByCookie(cookieID, cookieMask uint64) error
 	// AddFlowsInBundle syncs multiple Openflow entries in a single transaction. This operation could add new flows in
 	// "addFlows", modify flows in "modFlows", and remove flows in "delFlows" in the same bundle.
-	AddFlowsInBundle(addflows []Flow, modFlows []Flow, delFlows []Flow) error
+	AddFlowsInBundle(addflows, modFlows, delFlows []*openflow15.FlowMod) error
 	// AddOFEntriesInBundle syncs multiple Openflow entries(including Flow and Group) in a single transaction. This
 	// operation could add new entries in "addEntries", modify entries in "modEntries", and remove entries in
 	// "delEntries" in the same bundle.
@@ -123,13 +139,11 @@ type Bridge interface {
 	// SubscribePacketIn registers a consumer to listen to PacketIn messages matching the provided reason. When the
 	// Bridge receives a PacketIn message with the specified reason, it sends the message to the consumer using the
 	// provided channel.
-	SubscribePacketIn(reason uint8, pktInQueue *PacketInQueue) error
-	// AddTLVMap adds a TLV mapping with OVS field tun_metadataX. The value loaded in tun_metadataX is transported by
-	// Geneve header with the specified <optClass, optType, optLength>. The value of OptLength must be a multiple of 4.
-	// The value loaded into field tun_metadataX must fit within optLength bytes.
-	AddTLVMap(optClass uint16, optType uint8, optLength uint8, tunMetadataIndex uint16) error
+	SubscribePacketIn(category uint8, pktInQueue *PacketInQueue) error
 	// SendPacketOut sends a packetOut message to the OVS Bridge.
 	SendPacketOut(packetOut *ofctrl.PacketOut) error
+	// ResumePacket resumes a paused packetIn.
+	ResumePacket(packetIn *ofctrl.PacketIn) error
 	// BuildPacketOut returns a new PacketOutBuilder.
 	BuildPacketOut() PacketOutBuilder
 }
@@ -152,6 +166,8 @@ type Table interface {
 	SetNext(next uint8)
 	SetMissAction(action MissActionType)
 	GetStageID() StageID
+	// SetTable is used only for testing.
+	SetTable()
 }
 
 type PipelineID uint8
@@ -178,14 +194,13 @@ type OFEntry interface {
 	Modify() error
 	Delete() error
 	Type() EntryType
-	KeyString() string
 	// Reset ensures that the entry is "correct" and that the Add /
 	// Modify / Delete methods can be called on this object. This method
 	// should be called if a reconnection event happened.
 	Reset()
-	// GetBundleMessage returns ofctrl.OpenFlowModMessage which can be used in Bundle messages. operation specifies what
-	// operation is expected to be taken on the OFEntry.
-	GetBundleMessage(operation OFOperation) (ofctrl.OpenFlowModMessage, error)
+	// GetBundleMessages returns a slice of ofctrl.OpenFlowModMessage which can be used in Bundle messages. operation
+	// specifies what operation is expected to be taken on the OFEntry.
+	GetBundleMessages(operation OFOperation) ([]ofctrl.OpenFlowModMessage, error)
 }
 
 type Flow interface {
@@ -198,7 +213,6 @@ type Flow interface {
 	// It copies the original actions of the Flow only if copyActions is set to true, and
 	// resets the priority in the new FlowBuilder if the provided priority is not 0.
 	CopyToBuilder(priority uint16, copyActions bool) FlowBuilder
-	IsDropFlow() bool
 }
 
 type Action interface {
@@ -207,11 +221,8 @@ type Action interface {
 	LoadRegMark(marks ...*RegMark) FlowBuilder
 	LoadPktMarkRange(value uint32, to *Range) FlowBuilder
 	LoadIPDSCP(value uint8) FlowBuilder
-	LoadRange(name string, addr uint64, to *Range) FlowBuilder
 	Move(from, to string) FlowBuilder
 	MoveRange(fromName, toName string, from, to Range) FlowBuilder
-	MoveFromTunMetadata(fromTunMetadataID int, toField string, fromRange, toRange Range, tlvLength uint8) FlowBuilder
-	Resubmit(port uint16, table uint8) FlowBuilder
 	ResubmitToTables(tables ...uint8) FlowBuilder
 	CT(commit bool, tableID uint8, zone int, zoneSrcField *RegField) CTAction
 	Drop() FlowBuilder
@@ -228,6 +239,7 @@ type Action interface {
 	SetSrcIP(addr net.IP) FlowBuilder
 	SetDstIP(addr net.IP) FlowBuilder
 	SetTunnelDst(addr net.IP) FlowBuilder
+	SetTunnelID(tunnelID uint64) FlowBuilder
 	PopVLAN() FlowBuilder
 	PushVLAN(etherType uint16) FlowBuilder
 	SetVLAN(vlanID uint16) FlowBuilder
@@ -235,11 +247,11 @@ type Action interface {
 	Normal() FlowBuilder
 	Conjunction(conjID uint32, clauseID uint8, nClause uint8) FlowBuilder
 	Group(id GroupIDType) FlowBuilder
-	Learn(id uint8, priority uint16, idleTimeout, hardTimeout uint16, cookieID uint64) LearnAction
+	Learn(id uint8, priority uint16, idleTimeout, hardTimeout, finIdleTimeout, finHardTimeout uint16, cookieID uint64) LearnAction
 	GotoTable(table uint8) FlowBuilder
 	NextTable() FlowBuilder
 	GotoStage(stage StageID) FlowBuilder
-	SendToController(reason uint8) FlowBuilder
+	SendToController(userdata []byte, pause bool) FlowBuilder
 	Note(notes string) FlowBuilder
 	Meter(meterID uint32) FlowBuilder
 }
@@ -264,6 +276,7 @@ type FlowBuilder interface {
 	MatchARPTpa(ip net.IP) FlowBuilder
 	MatchARPOp(op uint16) FlowBuilder
 	MatchIPDSCP(dscp uint8) FlowBuilder
+	MatchCTState(ctStates *openflow15.CTStates) FlowBuilder
 	MatchCTStateNew(isSet bool) FlowBuilder
 	MatchCTStateRel(isSet bool) FlowBuilder
 	MatchCTStateRpl(isSet bool) FlowBuilder
@@ -278,12 +291,13 @@ type FlowBuilder interface {
 	MatchConjID(value uint32) FlowBuilder
 	MatchDstPort(port uint16, portMask *uint16) FlowBuilder
 	MatchSrcPort(port uint16, portMask *uint16) FlowBuilder
+	MatchTCPFlags(flag, mask uint16) FlowBuilder
 	MatchICMPType(icmpType byte) FlowBuilder
 	MatchICMPCode(icmpCode byte) FlowBuilder
 	MatchICMPv6Type(icmp6Type byte) FlowBuilder
 	MatchICMPv6Code(icmp6Code byte) FlowBuilder
 	MatchTunnelDst(dstIP net.IP) FlowBuilder
-	MatchTunMetadata(index int, data uint32) FlowBuilder
+	MatchTunnelID(tunnelID uint64) FlowBuilder
 	MatchVLAN(nonVLAN bool, vlanId uint16, vlanMask *uint16) FlowBuilder
 	// MatchCTSrcIP matches the source IPv4 address of the connection tracker original direction tuple.
 	MatchCTSrcIP(ip net.IP) FlowBuilder
@@ -308,23 +322,16 @@ type FlowBuilder interface {
 
 type LearnAction interface {
 	DeleteLearned() LearnAction
-	MatchEthernetProtocolIP(isIPv6 bool) LearnAction
-	MatchTransportDst(protocol Protocol) LearnAction
-	MatchLearnedTCPDstPort() LearnAction
-	MatchLearnedUDPDstPort() LearnAction
-	MatchLearnedSCTPDstPort() LearnAction
-	MatchLearnedTCPv6DstPort() LearnAction
-	MatchLearnedUDPv6DstPort() LearnAction
-	MatchLearnedSCTPv6DstPort() LearnAction
-	MatchLearnedSrcIP() LearnAction
-	MatchLearnedDstIP() LearnAction
-	MatchLearnedSrcIPv6() LearnAction
-	MatchLearnedDstIPv6() LearnAction
-	MatchRegMark(mark *RegMark) LearnAction
-	LoadRegMark(mark *RegMark) LearnAction
+	MatchEthernetProtocol(isIPv6 bool) LearnAction
+	MatchIPProtocol(protocol Protocol) LearnAction
+	MatchLearnedDstPort(protocol Protocol) LearnAction
+	MatchLearnedSrcPort(protocol Protocol) LearnAction
+	MatchLearnedSrcIP(isIPv6 bool) LearnAction
+	MatchLearnedDstIP(isIPv6 bool) LearnAction
+	MatchRegMark(marks ...*RegMark) LearnAction
+	LoadRegMark(marks ...*RegMark) LearnAction
 	LoadFieldToField(fromField, toField *RegField) LearnAction
 	LoadXXRegToXXReg(fromXXField, toXXField *XXRegField) LearnAction
-	SetDstMAC(mac net.HardwareAddr) LearnAction
 	Done() FlowBuilder
 }
 
@@ -332,16 +339,14 @@ type Group interface {
 	OFEntry
 	ResetBuckets() Group
 	Bucket() BucketBuilder
+	GetID() GroupIDType
 }
 
 type BucketBuilder interface {
 	Weight(val uint16) BucketBuilder
-	// Deprecated.
-	LoadReg(regID int, data uint32) BucketBuilder
 	LoadXXReg(regID int, data []byte) BucketBuilder
-	// Deprecated.
-	LoadRegRange(regID int, data uint32, rng *Range) BucketBuilder
 	LoadToRegField(field *RegField, data uint32) BucketBuilder
+	LoadRegMark(mark *RegMark) BucketBuilder
 	ResubmitToTable(tableID uint8) BucketBuilder
 	SetTunnelDst(addr net.IP) BucketBuilder
 	Done() Group
@@ -363,7 +368,6 @@ type MeterBandBuilder interface {
 }
 
 type CTAction interface {
-	LoadToMark(value uint32) CTAction
 	LoadToCtMark(marks ...*CtMark) CTAction
 	// LoadToLabelField loads a data into ct_label field. If the expected label is larger than the max value of uint64
 	// (0xffffffffffffffff), call this function twice: one is to set the low 64 bits, and the other is to set the high
@@ -400,6 +404,9 @@ type PacketOutBuilder interface {
 	SetTCPFlags(flags uint8) PacketOutBuilder
 	SetTCPSeqNum(seqNum uint32) PacketOutBuilder
 	SetTCPAckNum(ackNum uint32) PacketOutBuilder
+	SetTCPHdrLen(hdrLen uint8) PacketOutBuilder
+	SetTCPWinSize(winSize uint16) PacketOutBuilder
+	SetTCPData(data []byte) PacketOutBuilder
 	SetUDPSrcPort(port uint16) PacketOutBuilder
 	SetUDPDstPort(port uint16) PacketOutBuilder
 	SetUDPData(data []byte) PacketOutBuilder
@@ -416,6 +423,7 @@ type PacketOutBuilder interface {
 	AddLoadRegMark(mark *RegMark) PacketOutBuilder
 	AddResubmitAction(inPort *uint16, table *uint8) PacketOutBuilder
 	SetL4Packet(packet util.Message) PacketOutBuilder
+	SetEthPacket(packet *protocol.Ethernet) PacketOutBuilder
 	Done() *ofctrl.PacketOut
 }
 
@@ -461,7 +469,6 @@ type Packet struct {
 type RegField struct {
 	regID int
 	rng   *Range
-	name  string
 }
 
 // RegMark is a value saved in a RegField. A RegMark is used to indicate the traffic
@@ -487,6 +494,5 @@ type CtMark struct {
 }
 
 type CtLabel struct {
-	rng  *Range
-	name string
+	rng *Range
 }

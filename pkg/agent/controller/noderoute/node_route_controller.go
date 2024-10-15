@@ -15,6 +15,7 @@
 package noderoute
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -23,11 +24,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/informers"
 	coreinformers "k8s.io/client-go/informers/core/v1"
-	clientset "k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/cache/synctrack"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
@@ -40,9 +40,10 @@ import (
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/agent/wireguard"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
+	"antrea.io/antrea/pkg/ovs/ovsctl"
 	utilip "antrea.io/antrea/pkg/util/ip"
 	"antrea.io/antrea/pkg/util/k8s"
-	"antrea.io/antrea/pkg/util/runtime"
+	utilwait "antrea.io/antrea/pkg/util/wait"
 )
 
 const (
@@ -62,9 +63,9 @@ const (
 
 // Controller is responsible for setting up necessary IP routes and Openflow entries for inter-node traffic.
 type Controller struct {
-	kubeClient       clientset.Interface
 	ovsBridgeClient  ovsconfig.OVSBridgeClient
 	ofClient         openflow.Client
+	ovsCtlClient     ovsctl.OVSCtlClient
 	routeClient      route.Interface
 	interfaceStore   interfacestore.InterfaceStore
 	networkConfig    *config.NetworkConfig
@@ -72,69 +73,78 @@ type Controller struct {
 	nodeInformer     coreinformers.NodeInformer
 	nodeLister       corelisters.NodeLister
 	nodeListerSynced cache.InformerSynced
-	svcLister        corelisters.ServiceLister
-	queue            workqueue.RateLimitingInterface
+	queue            workqueue.TypedRateLimitingInterface[string]
 	// installedNodes records routes and flows installation states of Nodes.
 	// The key is the host name of the Node, the value is the nodeRouteInfo of the Node.
 	// A node will be in the map after its flows and routes are installed successfully.
 	installedNodes  cache.Indexer
 	wireGuardClient wireguard.Interface
-	proxyAll        bool
 	// ipsecCertificateManager is useful for determining whether the ipsec certificate has been configured
 	// or not when IPsec is enabled with "cert" mode. The NodeRouteController must wait for the certificate
 	// to be configured before installing routes/flows to peer Nodes to prevent unencrypted traffic across Nodes.
 	ipsecCertificateManager ipseccertificate.Manager
+	// flowRestoreCompleteWait is to be decremented after installing flows for initial Nodes.
+	flowRestoreCompleteWait *utilwait.Group
+	// hasProcessedInitialList keeps track of whether the initial informer list has been
+	// processed by workers.
+	// See https://github.com/kubernetes/apiserver/blob/v0.30.1/pkg/admission/plugin/policy/internal/generic/controller.go
+	hasProcessedInitialList synctrack.AsyncTracker[string]
 }
 
 // NewNodeRouteController instantiates a new Controller object which will process Node events
 // and ensure connectivity between different Nodes.
 func NewNodeRouteController(
-	kubeClient clientset.Interface,
-	informerFactory informers.SharedInformerFactory,
+	nodeInformer coreinformers.NodeInformer,
 	client openflow.Client,
+	ovsCtlClient ovsctl.OVSCtlClient,
 	ovsBridgeClient ovsconfig.OVSBridgeClient,
 	routeClient route.Interface,
 	interfaceStore interfacestore.InterfaceStore,
 	networkConfig *config.NetworkConfig,
 	nodeConfig *config.NodeConfig,
 	wireguardClient wireguard.Interface,
-	proxyAll bool,
 	ipsecCertificateManager ipseccertificate.Manager,
+	flowRestoreCompleteWait *utilwait.Group,
 ) *Controller {
-	nodeInformer := informerFactory.Core().V1().Nodes()
-	svcLister := informerFactory.Core().V1().Services()
 	controller := &Controller{
-		kubeClient:              kubeClient,
-		ovsBridgeClient:         ovsBridgeClient,
-		ofClient:                client,
-		routeClient:             routeClient,
-		interfaceStore:          interfaceStore,
-		networkConfig:           networkConfig,
-		nodeConfig:              nodeConfig,
-		nodeInformer:            nodeInformer,
-		nodeLister:              nodeInformer.Lister(),
-		nodeListerSynced:        nodeInformer.Informer().HasSynced,
-		svcLister:               svcLister.Lister(),
-		queue:                   workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "noderoute"),
+		ovsBridgeClient:  ovsBridgeClient,
+		ofClient:         client,
+		ovsCtlClient:     ovsCtlClient,
+		routeClient:      routeClient,
+		interfaceStore:   interfaceStore,
+		networkConfig:    networkConfig,
+		nodeConfig:       nodeConfig,
+		nodeInformer:     nodeInformer,
+		nodeLister:       nodeInformer.Lister(),
+		nodeListerSynced: nodeInformer.Informer().HasSynced,
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "noderoute",
+			},
+		),
 		installedNodes:          cache.NewIndexer(nodeRouteInfoKeyFunc, cache.Indexers{nodeRouteInfoPodCIDRIndexName: nodeRouteInfoPodCIDRIndexFunc}),
 		wireGuardClient:         wireguardClient,
-		proxyAll:                proxyAll,
 		ipsecCertificateManager: ipsecCertificateManager,
+		flowRestoreCompleteWait: flowRestoreCompleteWait.Increment(),
 	}
-	nodeInformer.Informer().AddEventHandlerWithResyncPeriod(
-		cache.ResourceEventHandlerFuncs{
-			AddFunc: func(cur interface{}) {
-				controller.enqueueNode(cur)
+	registration, _ := nodeInformer.Informer().AddEventHandlerWithResyncPeriod(
+		cache.ResourceEventHandlerDetailedFuncs{
+			AddFunc: func(cur interface{}, isInInitialList bool) {
+				controller.enqueueNode(cur, isInInitialList)
 			},
 			UpdateFunc: func(old, cur interface{}) {
-				controller.enqueueNode(cur)
+				controller.enqueueNode(cur, false)
 			},
 			DeleteFunc: func(old interface{}) {
-				controller.enqueueNode(old)
+				controller.enqueueNode(old, false)
 			},
 		},
 		nodeResyncPeriod,
 	)
+	// UpstreamHasSynced is used by hasProcessedInitialList to determine whether even handlers
+	// have been called for the initial list.
+	controller.hasProcessedInitialList.UpstreamHasSynced = registration.HasSynced
 	return controller
 }
 
@@ -162,7 +172,7 @@ type nodeRouteInfo struct {
 
 // enqueueNode adds an object to the controller work queue
 // obj could be a *corev1.Node, or a DeletionFinalStateUnknown item.
-func (c *Controller) enqueueNode(obj interface{}) {
+func (c *Controller) enqueueNode(obj interface{}, isInInitialList bool) {
 	node, isNode := obj.(*corev1.Node)
 	if !isNode {
 		deletedState, ok := obj.(cache.DeletedFinalStateUnknown)
@@ -179,6 +189,9 @@ func (c *Controller) enqueueNode(obj interface{}) {
 
 	// Ignore notifications for this Node, no need to establish connectivity to itself.
 	if node.Name != c.nodeConfig.Name {
+		if isInInitialList {
+			c.hasProcessedInitialList.Start(node.Name)
+		}
 		c.queue.Add(node.Name)
 	}
 }
@@ -203,27 +216,8 @@ func (c *Controller) removeStaleGatewayRoutes() error {
 		desiredPodCIDRs = append(desiredPodCIDRs, podCIDRs...)
 	}
 
-	// TODO: This is not the best place to keep the ClusterIP Service routes.
-	desiredClusterIPSvcIPs := map[string]bool{}
-	if c.proxyAll && runtime.IsWindowsPlatform() {
-		// The route for virtual IP -> antrea-gw0 should be always kept.
-		desiredClusterIPSvcIPs[config.VirtualServiceIPv4.String()] = true
-
-		svcs, err := c.svcLister.List(labels.Everything())
-		for _, svc := range svcs {
-			for _, ip := range svc.Spec.ClusterIPs {
-				desiredClusterIPSvcIPs[ip] = true
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("error when listing ClusterIP Service IPs: %v", err)
-		}
-	}
-
 	// routeClient will remove orphaned routes whose destinations are not in desiredPodCIDRs.
-	// If proxyAll enabled, it will also remove routes that are for Windows ClusterIP Services
-	// which no longer exist.
-	if err := c.routeClient.Reconcile(desiredPodCIDRs, desiredClusterIPSvcIPs); err != nil {
+	if err := c.routeClient.Reconcile(desiredPodCIDRs); err != nil {
 		return err
 	}
 	return nil
@@ -244,7 +238,7 @@ func (c *Controller) removeStaleTunnelPorts() error {
 	// will not include it in the set.
 	desiredInterfaces := make(map[string]bool)
 	// knownInterfaces is the list of interfaces currently in the local cache.
-	knownInterfaces := c.interfaceStore.GetInterfaceKeysByType(interfacestore.TunnelInterface)
+	knownInterfaces := c.interfaceStore.GetInterfaceKeysByType(interfacestore.IPSecTunnelInterface)
 
 	if c.networkConfig.TrafficEncryptionMode == config.TrafficEncryptionModeIPSec {
 		for _, node := range nodes {
@@ -355,6 +349,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	// underlying network. Therefore it needs not know the routes to
 	// peer Pod CIDRs.
 	if c.networkConfig.TrafficEncapMode.IsNetworkPolicyOnly() {
+		c.flowRestoreCompleteWait.Done()
 		<-stopCh
 		return
 	}
@@ -380,6 +375,23 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	for i := 0; i < defaultWorkers; i++ {
 		go wait.Until(c.worker, time.Second, stopCh)
 	}
+
+	go func() {
+		// When the initial list of Nodes has been processed, we decrement flowRestoreCompleteWait.
+		err := wait.PollUntilContextCancel(wait.ContextForChannel(stopCh), 100*time.Millisecond, true, func(ctx context.Context) (done bool, err error) {
+			return c.hasProcessedInitialList.HasSynced(), nil
+		})
+		// An error here means the context has been cancelled, which means that the stopCh
+		// has been closed. While it is still possible for c.hasProcessedInitialList.HasSynced
+		// to become true, as workers may not have returned yet, we should not decrement
+		// flowRestoreCompleteWait or log the message below.
+		if err != nil {
+			return
+		}
+		c.flowRestoreCompleteWait.Done()
+		klog.V(2).InfoS("Initial list of Nodes has been processed")
+	}()
+
 	<-stopCh
 }
 
@@ -397,7 +409,7 @@ func (c *Controller) worker() {
 // function returns false if and only if the work queue was shutdown (no more items will be
 // processed).
 func (c *Controller) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
@@ -405,17 +417,13 @@ func (c *Controller) processNextWorkItem() bool {
 	// must remember to call Forget if we do not want this work item being re-queued. For
 	// example, we do not call Forget if a transient error occurs, instead the item is put back
 	// on the workqueue and attempted again after a back-off period.
-	defer c.queue.Done(obj)
+	defer c.queue.Done(key)
 
-	// We expect strings (Node name) to come off the workqueue.
-	if key, ok := obj.(string); !ok {
-		// As the item in the workqueue is actually invalid, we call Forget here else we'd
-		// go into a loop of attempting to process a work item that is invalid.
-		// This should not happen: enqueueNode only enqueues strings.
-		c.queue.Forget(obj)
-		klog.Errorf("Expected string in work queue but got %#v", obj)
-		return true
-	} else if err := c.syncNodeRoute(key); err == nil {
+	// We call Finished unconditionally even if this only matters for the initial list of
+	// Nodes. There is no harm in calling Finished without a corresponding call to Start.
+	defer c.hasProcessedInitialList.Finished(key)
+
+	if err := c.syncNodeRoute(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.queue.Forget(key)
@@ -429,11 +437,13 @@ func (c *Controller) processNextWorkItem() bool {
 
 // syncNode manages connectivity to "peer" Node with name nodeName
 // If we have not established connectivity to the Node yet:
-//   * we install the appropriate Linux route:
+//   - we install the appropriate Linux route:
+//
 // Destination     Gateway         Use Iface
 // peerPodCIDR     peerGatewayIP   localGatewayIface (e.g antrea-gw0)
-//   * we install the appropriate OpenFlow flows to ensure that all the traffic destined to
-//   peerPodCIDR goes through the correct L3 tunnel.
+//   - we install the appropriate OpenFlow flows to ensure that all the traffic destined to
+//     peerPodCIDR goes through the correct L3 tunnel.
+//
 // If the Node no longer exists (cannot be retrieved by name from nodeLister) we delete the route
 // and OpenFlow flows associated with it.
 func (c *Controller) syncNodeRoute(nodeName string) error {
@@ -669,15 +679,14 @@ func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int3
 			}
 			c.interfaceStore.DeleteInterface(interfaceConfig)
 			exists = false
-		} else {
-			if interfaceConfig.OFPort != 0 {
-				klog.V(2).InfoS("Found cached IPsec tunnel interface", "node", nodeName, "interface", interfaceConfig.InterfaceName, "port", interfaceConfig.OFPort)
-				return interfaceConfig.OFPort, nil
-			}
 		}
 	}
+
 	if !exists {
-		ovsExternalIDs := map[string]interface{}{ovsExternalIDNodeName: nodeName}
+		ovsExternalIDs := map[string]interface{}{
+			ovsExternalIDNodeName:                 nodeName,
+			interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaIPsecTunnel,
+		}
 		portUUID, err := c.ovsBridgeClient.CreateTunnelPortExt(
 			portName,
 			c.networkConfig.TunnelType,
@@ -702,8 +711,8 @@ func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int3
 			nodeIP,
 			psk,
 			remoteName,
+			ovsPortConfig,
 		)
-		interfaceConfig.OVSPortConfig = ovsPortConfig
 		c.interfaceStore.AddInterface(interfaceConfig)
 	}
 	// GetOFPort will wait for up to 1 second for OVSDB to report the OFPort number.
@@ -713,6 +722,12 @@ func (c *Controller) createIPSecTunnelPort(nodeName string, nodeIP net.IP) (int3
 		// Let NodeRouteController retry at errors.
 		return 0, fmt.Errorf("failed to get of_port of IPsec tunnel port for Node %s", nodeName)
 	}
+
+	// Set the port with no-flood to reject ARP flood packets.
+	if err := c.ovsCtlClient.SetPortNoFlood(int(ofPort)); err != nil {
+		return 0, fmt.Errorf("failed to set port %s with no-flood config: %w", portName, err)
+	}
+
 	interfaceConfig.OFPort = ofPort
 	return ofPort, nil
 }
@@ -744,6 +759,7 @@ func ParseTunnelInterfaceConfig(
 			remoteIP,
 			psk,
 			remoteName,
+			portConfig,
 		)
 	} else {
 		interfaceConfig = interfacestore.NewTunnelInterface(
@@ -751,9 +767,9 @@ func ParseTunnelInterfaceConfig(
 			ovsconfig.TunnelType(portData.IFType),
 			tunnelPort,
 			localIP,
-			csum)
+			csum,
+			portConfig)
 	}
-	interfaceConfig.OVSPortConfig = portConfig
 	return interfaceConfig
 }
 

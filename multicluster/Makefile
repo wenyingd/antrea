@@ -26,7 +26,7 @@ DOCKER_BUILD_ARGS = --build-arg GO_VERSION=$(GO_VERSION)
 
 YEAR :=$(shell date "+%Y")
 .PHONY: all
-all: build
+all: bin
 
 ##@ General
 
@@ -49,8 +49,10 @@ help: ## Display this help.
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) $(CRD_OPTIONS) rbac:roleName=controller-role webhook paths="./..." output:crd:artifacts:config=config/crd/bases
 	$(CURDIR)/hack/generate-manifest.sh -g > build/yamls/antrea-multicluster-leader-global.yml
-	$(CURDIR)/hack/generate-manifest.sh -l antrea-multicluster > build/yamls/antrea-multicluster-leader-namespaced.yml
+	$(CURDIR)/hack/generate-manifest.sh -n antrea-multicluster > build/yamls/antrea-multicluster-leader-namespaced.yml
+	$(CURDIR)/hack/generate-manifest.sh -l antrea-multicluster > build/yamls/antrea-multicluster-leader.yml
 	$(CURDIR)/hack/generate-manifest.sh -m > build/yamls/antrea-multicluster-member.yml
+	$(CURDIR)/hack/update-checksum.sh
 
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..."
@@ -75,12 +77,12 @@ test-integration: .coverage
 	$(CURDIR)/hack/mc-integration-test.sh
 ##@ Build
 
-build: fmt vet ## Build manager binary.
+bin: fmt vet ## Build manager binary.
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/antrea-mc-controller antrea.io/antrea/multicluster/cmd/...
 
 .PHONY: antrea-mc-instr-binary
 antrea-mc-instr-binary:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -tags testbincover -covermode count -coverpkg=antrea.io/antrea/multicluster/... -c -o bin/antrea-mc-controller-coverage antrea.io/antrea/multicluster/cmd/...
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -cover -coverpkg=antrea.io/antrea/multicluster/...,antrea.io/antrea/multicluster/cmd/... -o bin/antrea-mc-controller-coverage antrea.io/antrea/multicluster/cmd/...
 
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./main.go
@@ -89,10 +91,15 @@ run: manifests generate fmt vet ## Run a controller from your host.
 
 CONTROLLER_GEN = $(shell pwd)/bin/controller-gen
 controller-gen: ## Download controller-gen locally if necessary.
-	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.9.0)
+	$(call go-get-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.3)
 
 codegen:
 	./hack/update-codegen.sh
+
+.PHONY: mockgen
+mockgen:
+	@echo "===> Updating generated mock code <==="
+	$(CURDIR)/hack/update-codegen.sh mockgen
 
 # go-get-tool will 'go get' any package $2 and install it to $1.
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))

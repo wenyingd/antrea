@@ -10,11 +10,14 @@ script from the sig-windows-tools repo release page: https://github.com/kubernet
 - Registers wins as a service in order to run kube-proxy and antrea-agent as DaemonSets.
 - Registers kubelet as an nssm service. More info on nssm: https://nssm.cc/
 - Adds node ip in kubelet startup params.
-- Create virtual netadapter for kube-proxy.
+- (Optional) Create virtual netadapter for kube-proxy.
 - (Optional) Installs OVS kerner driver, userspace binaries. Registers ovsdb-server and ovs-vswitchd services.
 
 .PARAMETER KubernetesVersion
 Kubernetes version to download and use
+
+.PARAMETER InstallKubeProxy
+[DEPRECATED] Install kube-proxy
 
 .PARAMETER InstallOVS
 Install OVS
@@ -22,16 +25,27 @@ Install OVS
 .PARAMETER NodeIP
 The node ip used by kubelet
 
+.PARAMETER ContainerRuntime
+[DEPRECATED] Container runtime that Kubernetes will use (docker or containerd).
+Starting with Antrea v2.0, only containerd is supported.
+
+.PARAMETER InstallOVSUserspace
+Specifies whether OVS userspace processes are included in the installation. If false, these
+processes will not be installed as a Windows service on the host.
+
 .EXAMPLE
-PS> .\Prepare-Node.ps1 -KubernetesVersion v1.18.0 -InstallOVS -NodeIP 192.168.1.10
+PS> .\Prepare-Node.ps1 -KubernetesVersion v1.30.0 -NodeIP 192.168.1.10 -ContainerRuntime containerd 
 
 #>
 
 Param(
     [parameter(Mandatory = $false, HelpMessage="Kubernetes version to use")] [string] $KubernetesVersion="v1.18.0",
     [parameter(Mandatory = $true, HelpMessage="Node IP")] [string] $NodeIP,
+    [parameter(Mandatory = $false)] [switch] $InstallKubeProxy = $false,
     [parameter(Mandatory = $false)] [switch] $InstallOVS = $false,
-    [parameter(Mandatory = $false, HelpMessage="Kubernetes download")] [string] $KubernetesURL="dl.k8s.io"
+    [parameter(Mandatory = $false, HelpMessage="Kubernetes download")] [string] $KubernetesURL="dl.k8s.io",
+    [parameter(Mandatory = $false)] [ValidateSet("containerd", "docker")] [string] $ContainerRuntime = "containerd",
+    [parameter(Mandatory = $false)] [bool] $InstallOVSUserspace = $true
 )
 $ErrorActionPreference = 'Stop'
 
@@ -50,6 +64,16 @@ If (Get-Service kubelet -ErrorAction SilentlyContinue) {
     exit 0
 }
 
+if ($ContainerRuntime -eq "docker") {
+    Write-Error "Docker container runtime is no longer supported"
+    exit 1
+}
+
+if (-not(Test-Path "//./pipe/containerd-containerd")) {
+    Write-Error "Containerd service was not detected - please install and start containerd before calling Prepare-Node.ps1"
+    exit 1
+}
+
 if (!$KubernetesVersion.StartsWith("v")) {
     $KubernetesVersion = "v" + $KubernetesVersion
 }
@@ -66,37 +90,35 @@ $env:Path += ";$global:KubernetesPath"
 [Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Machine)
 [Environment]::SetEnvironmentVariable("NODE_IP", $NodeIP, [System.EnvironmentVariableTarget]::Machine)
 
-DownloadFile $kubeletBinPath "https://$KubernetesURL/$KubernetesVersion/bin/windows/amd64/kubelet.exe"
-DownloadFile "$global:KubernetesPath\kubeadm.exe" "https://$KubernetesURL/$KubernetesVersion/bin/windows/amd64/kubeadm.exe"
-DownloadFile "$global:KubernetesPath\wins.exe" https://github.com/rancher/wins/releases/download/v0.0.4/wins.exe
+DownloadFile $kubeletBinPath "https:/$KubernetesURL/$KubernetesVersion/bin/windows/amd64/kubelet.exe"
+DownloadFile "$global:KubernetesPath\kubeadm.exe" "https:/$KubernetesURL/$KubernetesVersion/bin/windows/amd64/kubeadm.exe"
 
-# Create host network to allow kubelet to schedule hostNetwork pods
-Write-Host "Creating Docker host network"
-docker network create -d nat host
-
-Write-Host "Registering wins service"
-wins.exe srv app run --register
-start-service rancher-wins
 
 mkdir -force C:\var\log\kubelet
 mkdir -force C:\var\lib\kubelet\etc\kubernetes
 mkdir -force C:\etc\kubernetes\pki
 New-Item -path C:\var\lib\kubelet\etc\kubernetes\pki -type SymbolicLink -value C:\etc\kubernetes\pki\
 
+
 $StartKubeletFileContent = '$FileContent = Get-Content -Path "/var/lib/kubelet/kubeadm-flags.env"
-$global:KubeletArgs = $FileContent.Trim("KUBELET_KUBEADM_ARGS=`"")
+$global:KubeletArgs = $FileContent.Trim("KUBELET_KUBEADM_ARGS=`"")'+ [Environment]::NewLine
 
-$netId = docker network ls -f name=host --format "{{ .ID }}"
-
-if ($netId.Length -lt 1) {
-    docker network create -d nat host
+if ($InstallKubeProxy) {
+    Write-Host "Running Antrea with kube-proxy is no longer supported, this parameter will be removed soon"
+    $StartKubeletFileContent += [Environment]::NewLine + '& C:\k\Prepare-ServiceInterface.ps1 -InterfaceAlias "HNS Internal NIC"' + [Environment]::NewLine
 }
 
-& C:\k\Prepare-ServiceInterface.ps1 -InterfaceAlias "HNS Internal NIC"
+$StartKubeletFileContent += [Environment]::NewLine + '$global:KubeletArgs += " --cert-dir=$env:SYSTEMDRIVE\var\lib\kubelet\pki --config=/var/lib/kubelet/config.yaml --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf --hostname-override=$(hostname) --pod-infra-container-image=`"mcr.microsoft.com/oss/kubernetes/pause:1.4.1`" --enable-debugging-handlers --cgroups-per-qos=false --enforce-node-allocatable=`"`" --resolv-conf=`"`" --node-ip=$env:NODE_IP"'
 
-$cmd = "C:\k\kubelet.exe $global:KubeletArgs --cert-dir=$env:SYSTEMDRIVE\var\lib\kubelet\pki --config=/var/lib/kubelet/config.yaml --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf --hostname-override=$(hostname) --pod-infra-container-image=`"mcr.microsoft.com/oss/kubernetes/pause:1.3.0`" --enable-debugging-handlers --cgroups-per-qos=false --enforce-node-allocatable=`"`" --network-plugin=cni --resolv-conf=`"`" --log-dir=/var/log/kubelet --logtostderr=false --image-pull-progress-deadline=20m --node-ip=$env:NODE_IP"
+$targetVersion = [version]"1.28.0"
 
+if ($ContainerRuntime -eq "containerd" -and [version]($KubernetesVersion -replace '^v') -lt $targetVersion) {
+    $StartKubeletFileContent += [Environment]::NewLine + '$global:KubeletArgs += " --feature-gates=WindowsHostProcessContainers=true"'
+}
+
+$StartKubeletFileContent += [Environment]::NewLine + '$cmd = "C:\k\kubelet.exe $global:KubeletArgs"
 Invoke-Expression $cmd'
+
 Set-Content -Path $global:StartKubeletScript -Value $StartKubeletFileContent
 
 Write-Host "Installing nssm"
@@ -112,20 +134,29 @@ Remove-Item -Force .\nssm.zip
 
 $env:path += ";$global:NssmInstallDirectory"
 $newPath = "$global:NssmInstallDirectory;" +
-        [Environment]::GetEnvironmentVariable("PATH", [EnvironmentVariableTarget]::Machine)
+[Environment]::GetEnvironmentVariable("PATH", [EnvironmentVariableTarget]::Machine)
 
 [Environment]::SetEnvironmentVariable("PATH", $newPath, [EnvironmentVariableTarget]::Machine)
 
 Write-Host "Registering kubelet service"
 nssm install kubelet $global:Powershell $global:PowershellArgs $global:StartKubeletScript
-nssm set kubelet DependOnService docker
+
+nssm set kubelet DependOnService $ContainerRuntime
+nssm set kubelet AppStdout C:\var\log\kubelet\kubelet.log
+# Replace kubelet.log on every service restart
+nssm set kubelet AppStdoutCreationDisposition 2
+nssm set kubelet AppStderr C:\var\log\kubelet\kubelet.err.log
+# Replace kubelet.err.log on every service restart
+nssm set kubelet AppStderrCreationDisposition 2
 
 New-NetFirewallRule -Name kubelet -DisplayName 'kubelet' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 10250
 
-# Create netadapter for kube-proxy, the default full name of the adapter is "vEthernet (HNS Internal NIC)"
-& ./Prepare-ServiceInterface.ps1
+if ($InstallKubeProxy) {
+    # Create netadapter for kube-proxy, the default full name of the adapter is "vEthernet (HNS Internal NIC)"
+    & ./Prepare-ServiceInterface.ps1
+}
 
 if ($InstallOVS) {
     Write-Host "Installing OVS"
-    & .\Install-OVS.ps1
+    & .\Install-OVS.ps1 -InstallUserspace $InstallOVSUserspace
 }

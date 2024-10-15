@@ -18,7 +18,7 @@ import (
 	"context"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,8 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	k8smcsv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 
+	"antrea.io/antrea/multicluster/apis/multicluster/constants"
 	mcsv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
-	"antrea.io/antrea/multicluster/controllers/multicluster/common"
 )
 
 // This file contains test cases for below basic scenarios:
@@ -97,7 +97,7 @@ var _ = Describe("ServiceExport controller", func() {
 			ClusterID: LocalClusterID,
 			Name:      svc.Name,
 			Namespace: svc.Namespace,
-			Kind:      common.EndpointsKind,
+			Kind:      constants.EndpointsKind,
 		},
 	}
 
@@ -118,7 +118,6 @@ var _ = Describe("ServiceExport controller", func() {
 			return err == nil
 		}, timeout, interval).Should(BeTrue())
 		Expect(svcResExport.ObjectMeta.Labels["sourceKind"]).Should(Equal("Service"))
-		Expect(svcResExport.Spec.Service.ServiceSpec.ClusterIP).Should(Equal(latestSvc.Spec.ClusterIP))
 		Expect(len(svcResExport.Spec.Service.ServiceSpec.Ports)).Should(Equal(len(svcPorts)))
 		expectedEpResExport.Spec.Endpoints = &mcsv1alpha1.EndpointsExport{
 			Subsets: []corev1.EndpointSubset{
@@ -162,7 +161,6 @@ var _ = Describe("ServiceExport controller", func() {
 			return err == nil
 		}, timeout, interval).Should(BeTrue())
 		Expect(svcResExport.ObjectMeta.Labels["sourceKind"]).Should(Equal("Service"))
-		Expect(svcResExport.Spec.Service.ServiceSpec.ClusterIP).Should(Equal(latestSvc.Spec.ClusterIP))
 		Expect(len(svcResExport.Spec.Service.ServiceSpec.Ports)).Should(Equal(len(newPorts)))
 	})
 
@@ -178,7 +176,7 @@ var _ = Describe("ServiceExport controller", func() {
 		Expect(err).ToNot(HaveOccurred())
 		conditions := latestSvcExportNoService.Status.Conditions
 		Expect(len(conditions)).Should(Equal(1))
-		Expect(*conditions[0].Message).Should(Equal("the Service does not exist"))
+		Expect(*conditions[0].Message).Should(Equal("Service does not exist"))
 	})
 
 	It("Should delete existing ResourceExport when existing ServiceExport is deleted", func() {
@@ -248,7 +246,7 @@ var _ = Describe("ServiceExport controller", func() {
 		Expect(err).ToNot(HaveOccurred())
 		conditions := latestsvcExportDeletedService.Status.Conditions
 		Expect(len(conditions)).Should(Equal(1))
-		Expect(*conditions[0].Message).Should(Equal("the Service does not exist"))
+		Expect(*conditions[0].Message).Should(Equal("Service does not exist"))
 
 		resExp := &mcsv1alpha1.ResourceExport{}
 		Eventually(func() bool {

@@ -15,22 +15,19 @@
 package antctl
 
 import (
-	"fmt"
 	"reflect"
 
-	"antrea.io/antrea/pkg/agent/apiserver/handlers/agentinfo"
-	"antrea.io/antrea/pkg/agent/apiserver/handlers/multicast"
-	"antrea.io/antrea/pkg/agent/apiserver/handlers/ovsflows"
-	"antrea.io/antrea/pkg/agent/apiserver/handlers/podinterface"
-	"antrea.io/antrea/pkg/agent/apiserver/handlers/serviceexternalip"
-	"antrea.io/antrea/pkg/agent/openflow"
+	agentapis "antrea.io/antrea/pkg/agent/apis"
 	fallbackversion "antrea.io/antrea/pkg/antctl/fallback/version"
+	checkcluster "antrea.io/antrea/pkg/antctl/raw/check/cluster"
+	checkinstallation "antrea.io/antrea/pkg/antctl/raw/check/installation"
 	"antrea.io/antrea/pkg/antctl/raw/featuregates"
 	"antrea.io/antrea/pkg/antctl/raw/multicluster"
 	"antrea.io/antrea/pkg/antctl/raw/proxy"
 	"antrea.io/antrea/pkg/antctl/raw/set"
 	"antrea.io/antrea/pkg/antctl/raw/supportbundle"
 	"antrea.io/antrea/pkg/antctl/raw/traceflow"
+	"antrea.io/antrea/pkg/antctl/raw/upgrade/apistorage"
 	"antrea.io/antrea/pkg/antctl/transform/addressgroup"
 	"antrea.io/antrea/pkg/antctl/transform/appliedtogroup"
 	"antrea.io/antrea/pkg/antctl/transform/controllerinfo"
@@ -38,12 +35,11 @@ import (
 	"antrea.io/antrea/pkg/antctl/transform/ovstracing"
 	"antrea.io/antrea/pkg/antctl/transform/version"
 	cpv1beta "antrea.io/antrea/pkg/apis/controlplane/v1beta2"
+	crdv1b1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	systemv1beta1 "antrea.io/antrea/pkg/apis/system/v1beta1"
-	controllerinforest "antrea.io/antrea/pkg/apiserver/registry/system/controllerinfo"
+	controllerapis "antrea.io/antrea/pkg/apiserver/apis"
 	"antrea.io/antrea/pkg/client/clientset/versioned/scheme"
-	controllernetworkpolicy "antrea.io/antrea/pkg/controller/networkpolicy"
-	"antrea.io/antrea/pkg/flowaggregator/apiserver/handlers/flowrecords"
-	"antrea.io/antrea/pkg/flowaggregator/apiserver/handlers/recordmetrics"
+	aggregatorapis "antrea.io/antrea/pkg/flowaggregator/apis"
 )
 
 // CommandList defines all commands that could be used in the antctl for agents，
@@ -58,7 +54,7 @@ var CommandList = &commandList{
 			commandGroup: flat,
 			controllerEndpoint: &endpoint{
 				resourceEndpoint: &resourceEndpoint{
-					resourceName:         controllerinforest.ControllerInfoResourceName,
+					resourceName:         crdv1b1.AntreaControllerInfoResourceName,
 					groupVersionResource: &systemv1beta1.ControllerInfoVersionResource,
 				},
 				addonTransform: version.ControllerTransform,
@@ -111,7 +107,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 				},
 			},
 
-			transformedResponse: reflect.TypeOf(multicast.Response{}),
+			transformedResponse: reflect.TypeOf(agentapis.MulticastResponse{}),
 		},
 		{
 			use:   "log-level",
@@ -174,6 +170,10 @@ $ antctl get podmulticaststats pod -n namespace`,
   $ antctl get networkpolicy
   Get the list of all control plane NetworkPolicies, sorted by the order in which the policies are evaluated.
   $ antctl get networkpolicy --sort-by=effectivePriority
+  Get the list of all control plane NetworkPolicies, sorted using the provided field specification.
+  The list will be sorted by name if no value is provided.
+  Any valid json path can be passed as an argument to the sort-by flag. E.g.: '.sourceRef.name'.
+  $ antctl get networkpolicy --sort-by=''
   Get the control plane NetworkPolicy with a specific source (supported by agent only)
   $ antctl get networkpolicy -S allow-http -n ns1
   Get the list of control plane NetworkPolicies whose source NetworkPolicies are in a Namespace (supported by agent only)
@@ -186,6 +186,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 			controllerEndpoint: &endpoint{
 				resourceEndpoint: &resourceEndpoint{
 					groupVersionResource: &cpv1beta.NetworkPolicyVersionResource,
+					supportSorting:       true,
 				},
 				addonTransform: networkpolicy.Transform,
 			},
@@ -214,9 +215,10 @@ $ antctl get podmulticaststats pod -n namespace`,
 							shorthand: "p",
 						},
 						{
-							name:      "type",
-							usage:     "Get NetworkPolicies with specific type. Type means the type of its source network policy: K8sNP, ACNP, ANP",
-							shorthand: "T",
+							name:            "type",
+							usage:           "Get NetworkPolicies with specific type. Type refers to the type of its source NetworkPolicy: K8sNP, ACNP, ANNP, BANP or ANP",
+							shorthand:       "T",
+							supportedValues: []string{"K8sNP", "ACNP", "ANNP", "BANP", "ANP"},
 						},
 					}, getSortByFlag()),
 					outputType: multiple,
@@ -226,54 +228,68 @@ $ antctl get podmulticaststats pod -n namespace`,
 			transformedResponse: reflect.TypeOf(networkpolicy.Response{}),
 		},
 		{
-			use:          "appliedtogroup",
-			aliases:      []string{"appliedtogroups", "atg"},
-			short:        "Print appliedto groups",
-			long:         "Print appliedto groups in ${component}",
+			use:     "appliedtogroup",
+			aliases: []string{"appliedtogroups", "atg"},
+			short:   "Print appliedto groups",
+			long:    "Print appliedto groups in ${component}",
+			example: `  Get the list of all AppliedToGroups
+  $ antctl get appliedtogroup
+  Get the list of all control plane AppliedToGroups, sorted using the provided field specification.
+  The list will be sorted by name if no value is provided.
+  Any valid json path can be passed as an argument to the sort-by flag. E.g.: '.metadata.name'.
+  $ antctl get appliedtogroup --sort-by=''`,
 			commandGroup: get,
 			controllerEndpoint: &endpoint{
 				resourceEndpoint: &resourceEndpoint{
 					groupVersionResource: &cpv1beta.AppliedToGroupVersionResource,
+					supportSorting:       true,
 				},
 				addonTransform: appliedtogroup.Transform,
 			},
 			agentEndpoint: &endpoint{
 				nonResourceEndpoint: &nonResourceEndpoint{
 					path: "/appliedtogroups",
-					params: []flagInfo{
+					params: append([]flagInfo{
 						{
 							usage: "Retrieve resource by name",
 							name:  "name",
 							arg:   true,
 						},
-					},
+					}, getSortByFlag()),
 				},
 				addonTransform: appliedtogroup.Transform,
 			},
 			transformedResponse: reflect.TypeOf(appliedtogroup.Response{}),
 		},
 		{
-			use:          "addressgroup",
-			aliases:      []string{"addressgroups", "ag"},
-			short:        "Print address groups",
-			long:         "Print address groups in ${component}",
+			use:     "addressgroup",
+			aliases: []string{"addressgroups", "ag"},
+			short:   "Print address groups",
+			long:    "Print address groups in ${component}",
+			example: `  Get the list of all AddressGroups
+  $ antctl get addressgroup
+  Get the list of all control plane AddressGroups, sorted using the provided field specification.
+  The list will be sorted by name if no value is provided.
+  Any valid json path can be passed as an argument to the sort-by flag. E.g.: '.metadata.name'.
+  $ antctl get addressgroup --sort-by=''`,
 			commandGroup: get,
 			controllerEndpoint: &endpoint{
 				resourceEndpoint: &resourceEndpoint{
 					groupVersionResource: &cpv1beta.AddressGroupVersionResource,
+					supportSorting:       true,
 				},
 				addonTransform: addressgroup.Transform,
 			},
 			agentEndpoint: &endpoint{
 				nonResourceEndpoint: &nonResourceEndpoint{
 					path: "/addressgroups",
-					params: []flagInfo{
+					params: append([]flagInfo{
 						{
 							usage: "Retrieve resource by name",
 							name:  "name",
 							arg:   true,
 						},
-					},
+					}, getSortByFlag()),
 				},
 				addonTransform: addressgroup.Transform,
 			},
@@ -286,7 +302,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 			long:    "Print Antrea controller's basic information including version, deployment, NetworkPolicy controller, ControllerConditions, etc.",
 			controllerEndpoint: &endpoint{
 				resourceEndpoint: &resourceEndpoint{
-					resourceName:         controllerinforest.ControllerInfoResourceName,
+					resourceName:         crdv1b1.AntreaControllerInfoResourceName,
 					groupVersionResource: &systemv1beta1.ControllerInfoVersionResource,
 				},
 				addonTransform: controllerinfo.Transform,
@@ -306,7 +322,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 				},
 			},
 			commandGroup:        get,
-			transformedResponse: reflect.TypeOf(agentinfo.AntreaAgentInfoResponse{}),
+			transformedResponse: reflect.TypeOf(agentapis.AntreaAgentInfoResponse{}),
 		},
 		{
 			use:     "podinterface",
@@ -340,7 +356,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 				},
 			},
 			commandGroup:        get,
-			transformedResponse: reflect.TypeOf(podinterface.Response{}),
+			transformedResponse: reflect.TypeOf(agentapis.PodInterfaceResponse{}),
 		},
 		{
 			use:     "ovsflows",
@@ -349,20 +365,20 @@ $ antctl get podmulticaststats pod -n namespace`,
 			long:    "Dump all the OVS flows or the flows installed for the specified entity.",
 			example: `  Dump all OVS flows
   $ antctl get ovsflows
+  Dump OVS table names only
+  $ antctl get ovsflows --table-names-only
   Dump OVS flows of a local Pod
   $ antctl get ovsflows -p pod1 -n ns1
   Dump OVS flows of a Service
   $ antctl get ovsflows -S svc1 -n ns1
   Dump OVS flows of a NetworkPolicy
-  $ antctl get ovsflows -N np1 -n ns1
+  $ antctl get ovsflows -N np1 -n ns1 --type K8sNP
   Dump OVS flows of a flow Table
   $ antctl get ovsflows -T IngressRule
   Dump OVS groups
   $ antctl get ovsflows -G 10,20
   Dump all OVS groups
-  $ antctl get ovsflows -G all
-
-  Antrea OVS Flow Tables:` + generateFlowTableHelpMsg(),
+  $ antctl get ovsflows -G all`,
 			agentEndpoint: &endpoint{
 				nonResourceEndpoint: &nonResourceEndpoint{
 					path: "/ovsflows",
@@ -384,13 +400,23 @@ $ antctl get podmulticaststats pod -n namespace`,
 						},
 						{
 							name:      "networkpolicy",
-							usage:     "NetworkPolicy name. If present, Namespace must be provided.",
+							usage:     "NetworkPolicy name. Namespace must be provided for non-cluster-scoped policy types if a type is specified.",
 							shorthand: "N",
+						},
+						{
+							name:            "type",
+							usage:           "NetworkPolicy type. Valid types are K8sNP, ACNP, ANNP, BANP or ANP.",
+							supportedValues: []string{"K8sNP", "ACNP", "ANNP", "BANP", "ANP"},
 						},
 						{
 							name:      "table",
 							usage:     "Comma separated Antrea OVS flow table names or numbers",
 							shorthand: "T",
+						},
+						{
+							name:   "table-names-only",
+							usage:  "Print all Antrea OVS flow table names only, and nothing else",
+							isBool: true,
 						},
 						{
 							name:      "groups",
@@ -402,7 +428,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 				},
 			},
 			commandGroup:        get,
-			transformedResponse: reflect.TypeOf(ovsflows.Response{}),
+			transformedResponse: reflect.TypeOf(agentapis.OVSFlowResponse{}),
 		},
 		{
 			use:   "trace-packet",
@@ -486,7 +512,38 @@ $ antctl get podmulticaststats pod -n namespace`,
 					outputType: single,
 				},
 			},
-			transformedResponse: reflect.TypeOf(controllernetworkpolicy.EndpointQueryResponse{}),
+			transformedResponse: reflect.TypeOf(controllerapis.EndpointQueryResponse{}),
+		},
+		{
+			use:     "networkpolicyevaluation",
+			aliases: []string{"networkpoliciesevaluation", "networkpolicyeval", "networkpolicieseval", "netpoleval"},
+			short:   "Analyze effective NetworkPolicy rules.",
+			long:    "Analyze network policies in the cluster and return the rule expected to be effective on the source and destination endpoints provided.",
+			example: `  Query effective NetworkPolicy rule between two Pods
+  $ antctl query networkpolicyevaluation -S ns1/pod1 -D ns2/pod2
+`,
+			commandGroup: query,
+			controllerEndpoint: &endpoint{
+				resourceEndpoint: &resourceEndpoint{
+					groupVersionResource: &cpv1beta.NetworkPolicyEvaluationVersionResource,
+					params: []flagInfo{
+						{
+							name:      "source",
+							usage:     "Source endpoint, specified by <Namespace>/<name>.",
+							shorthand: "S",
+						},
+						{
+							name:      "destination",
+							usage:     "Destination endpoint, specified by <Namespace>/<name>.",
+							shorthand: "D",
+						},
+					},
+					parameterTransform: networkpolicy.NewNetworkPolicyEvaluation,
+					restMethod:         restPost,
+				},
+				addonTransform: networkpolicy.EvaluationTransform,
+			},
+			transformedResponse: reflect.TypeOf(networkpolicy.EvaluationResponse{}),
 		},
 		{
 			use:   "flowrecords",
@@ -527,7 +584,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 					outputType: multiple,
 				},
 			},
-			transformedResponse: reflect.TypeOf(flowrecords.Response{}),
+			transformedResponse: reflect.TypeOf(aggregatorapis.FlowRecordsResponse{}),
 		},
 		{
 			use:          "recordmetrics",
@@ -540,7 +597,7 @@ $ antctl get podmulticaststats pod -n namespace`,
 					outputType: single,
 				},
 			},
-			transformedResponse: reflect.TypeOf(recordmetrics.Response{}),
+			transformedResponse: reflect.TypeOf(aggregatorapis.RecordMetricsResponse{}),
 		},
 		{
 			use:          "serviceexternalip",
@@ -566,10 +623,66 @@ $ antctl get podmulticaststats pod -n namespace`,
 					outputType: multiple,
 				},
 			},
-			transformedResponse: reflect.TypeOf(serviceexternalip.Response{}),
+			transformedResponse: reflect.TypeOf(agentapis.ServiceExternalIPInfo{}),
+		},
+		{
+			use:          "memberlist",
+			aliases:      []string{"ml"},
+			short:        "Print state of memberlist cluster",
+			long:         "Print state of memberlist cluster of Antrea agent",
+			commandGroup: get,
+			agentEndpoint: &endpoint{
+				nonResourceEndpoint: &nonResourceEndpoint{
+					path:       "/memberlist",
+					outputType: multiple,
+				},
+			},
+			transformedResponse: reflect.TypeOf(agentapis.MemberlistResponse{}),
+		},
+		{
+			use:   "bgppolicy",
+			short: "Print effective bgppolicy information",
+			long:  "Print effective bgppolicy information including name, local ASN, router ID and listen port",
+			agentEndpoint: &endpoint{
+				nonResourceEndpoint: &nonResourceEndpoint{
+					path:       "/bgppolicy",
+					outputType: single,
+				},
+			},
+			commandGroup:        get,
+			transformedResponse: reflect.TypeOf(agentapis.BGPPolicyResponse{}),
+		},
+		{
+			use:     "bgppeers",
+			aliases: []string{"bgppeer"},
+			short:   "Print the current status of all bgp peers of effective bgppolicy",
+			long:    "Print the current status of all bgp peers of effective bgppolicy which includes peer IP address with port, asn and state",
+			example: `  Get the list of bgppeers with their current status
+  $ antctl get bgppeers
+`,
+			agentEndpoint: &endpoint{
+				nonResourceEndpoint: &nonResourceEndpoint{
+					path:       "/bgppeers",
+					outputType: multiple,
+				},
+			},
+			commandGroup:        get,
+			transformedResponse: reflect.TypeOf(agentapis.BGPPeerResponse{}),
 		},
 	},
 	rawCommands: []rawCommand{
+		{
+			cobraCommand:      checkinstallation.Command(),
+			supportAgent:      false,
+			supportController: false,
+			commandGroup:      check,
+		},
+		{
+			cobraCommand:      checkcluster.Command(),
+			supportAgent:      false,
+			supportController: false,
+			commandGroup:      check,
+		},
 		{
 			cobraCommand:      supportbundle.Command,
 			supportAgent:      true,
@@ -634,19 +747,23 @@ $ antctl get podmulticaststats pod -n namespace`,
 			commandGroup:      mc,
 		},
 		{
+			cobraCommand:      multicluster.DeleteCmd,
+			supportAgent:      false,
+			supportController: false,
+			commandGroup:      mc,
+		},
+		{
 			cobraCommand:          set.SetCmd,
 			supportAgent:          false,
 			supportController:     false,
 			supportFlowAggregator: true,
 		},
+		{
+			cobraCommand:      apistorage.NewCommand(),
+			supportAgent:      false,
+			supportController: false,
+			commandGroup:      upgrade,
+		},
 	},
 	codec: scheme.Codecs,
-}
-
-func generateFlowTableHelpMsg() string {
-	msg := ""
-	for _, t := range openflow.GetTableList() {
-		msg += fmt.Sprintf("\n  %d\t%s", uint32(t.GetID()), t.GetName())
-	}
-	return msg
 }

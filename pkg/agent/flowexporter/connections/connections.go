@@ -15,7 +15,6 @@
 package connections
 
 import (
-	"container/heap"
 	"fmt"
 	"sync"
 	"time"
@@ -25,8 +24,8 @@ import (
 
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/flowexporter/priorityqueue"
-	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/proxy"
+	"antrea.io/antrea/pkg/util/podstore"
 )
 
 const (
@@ -35,7 +34,7 @@ const (
 
 type connectionStore struct {
 	connections            map[flowexporter.ConnectionKey]*flowexporter.Connection
-	ifaceStore             interfacestore.InterfaceStore
+	podStore               podstore.Interface
 	antreaProxier          proxy.Proxier
 	expirePriorityQueue    *priorityqueue.ExpirePriorityQueue
 	staleConnectionTimeout time.Duration
@@ -43,12 +42,12 @@ type connectionStore struct {
 }
 
 func NewConnectionStore(
-	ifaceStore interfacestore.InterfaceStore,
+	podStore podstore.Interface,
 	proxier proxy.Proxier,
 	o *flowexporter.FlowExporterOptions) connectionStore {
 	return connectionStore{
 		connections:            make(map[flowexporter.ConnectionKey]*flowexporter.Connection),
-		ifaceStore:             ifaceStore,
+		podStore:               podStore,
 		antreaProxier:          proxier,
 		expirePriorityQueue:    priorityqueue.NewExpirePriorityQueue(o.ActiveFlowTimeout, o.IdleFlowTimeout),
 		staleConnectionTimeout: o.StaleConnectionTimeout,
@@ -99,26 +98,23 @@ func (cs *connectionStore) AddConnToMap(connKey *flowexporter.ConnectionKey, con
 }
 
 func (cs *connectionStore) fillPodInfo(conn *flowexporter.Connection) {
-	if cs.ifaceStore == nil {
-		klog.V(4).Info("Interface store is not available to retrieve local Pods information.")
+	if cs.podStore == nil {
+		klog.V(4).Info("Pod store is not available to retrieve local Pods information.")
 		return
 	}
 	// sourceIP/destinationIP are mapped only to local pods and not remote pods.
 	srcIP := conn.FlowKey.SourceAddress.String()
 	dstIP := conn.FlowKey.DestinationAddress.String()
 
-	sIface, srcFound := cs.ifaceStore.GetInterfaceByIP(srcIP)
-	dIface, dstFound := cs.ifaceStore.GetInterfaceByIP(dstIP)
-	if !srcFound && !dstFound {
-		klog.Warningf("Cannot map any of the IP %s or %s to a local Pod", srcIP, dstIP)
+	srcPod, srcFound := cs.podStore.GetPodByIPAndTime(srcIP, conn.StartTime)
+	dstPod, dstFound := cs.podStore.GetPodByIPAndTime(dstIP, conn.StartTime)
+	if srcFound {
+		conn.SourcePodName = srcPod.Name
+		conn.SourcePodNamespace = srcPod.Namespace
 	}
-	if srcFound && sIface.Type == interfacestore.ContainerInterface {
-		conn.SourcePodName = sIface.ContainerInterfaceConfig.PodName
-		conn.SourcePodNamespace = sIface.ContainerInterfaceConfig.PodNamespace
-	}
-	if dstFound && dIface.Type == interfacestore.ContainerInterface {
-		conn.DestinationPodName = dIface.ContainerInterfaceConfig.PodName
-		conn.DestinationPodNamespace = dIface.ContainerInterfaceConfig.PodNamespace
+	if dstFound {
+		conn.DestinationPodName = dstPod.Name
+		conn.DestinationPodNamespace = dstPod.Namespace
 	}
 }
 
@@ -126,10 +122,10 @@ func (cs *connectionStore) fillServiceInfo(conn *flowexporter.Connection, servic
 	// resolve destination Service information
 	if cs.antreaProxier != nil {
 		servicePortName, exists := cs.antreaProxier.GetServiceByIP(serviceStr)
-		if !exists {
-			klog.Warningf("Could not retrieve the Service info from antrea-agent-proxier for the serviceStr: %s", serviceStr)
-		} else {
+		if exists {
 			conn.DestinationServicePortName = servicePortName.String()
+		} else {
+			klog.InfoS("Could not retrieve the Service info from antrea-agent-proxier", "serviceStr", serviceStr)
 		}
 	}
 }
@@ -143,17 +139,6 @@ func lookupServiceProtocol(protoID uint8) (corev1.Protocol, error) {
 	return serviceProto, nil
 }
 
-func (cs *connectionStore) addItemToQueue(connKey flowexporter.ConnectionKey, conn *flowexporter.Connection) {
-	currTime := time.Now()
-	pqItem := &flowexporter.ItemToExpire{
-		Conn:             conn,
-		ActiveExpireTime: currTime.Add(cs.expirePriorityQueue.ActiveFlowTimeout),
-		IdleExpireTime:   currTime.Add(cs.expirePriorityQueue.IdleFlowTimeout),
-	}
-	heap.Push(cs.expirePriorityQueue, pqItem)
-	cs.expirePriorityQueue.KeyToItem[connKey] = pqItem
-}
-
 func (cs *connectionStore) AcquireConnStoreLock() {
 	cs.mutex.Lock()
 }
@@ -165,10 +150,13 @@ func (cs *connectionStore) ReleaseConnStoreLock() {
 // UpdateConnAndQueue deletes the inactive connection from keyToItem map,
 // without adding it back to the PQ. In this way, we can avoid to reset the
 // item's expire time every time we encounter it in the PQ. The method also
-// updates active connection's stats fields and adds it back to the PQ.
+// updates active connection's stats fields and adds it back to the PQ. Layer 7
+// fields should be set to default to prevent from re-exporting same values.
 func (cs *connectionStore) UpdateConnAndQueue(pqItem *flowexporter.ItemToExpire, currTime time.Time) {
 	conn := pqItem.Conn
 	conn.LastExportTime = currTime
+	conn.AppProtocolName = ""
+	conn.HttpVals = ""
 	if conn.ReadyToDelete || !conn.IsActive {
 		cs.expirePriorityQueue.RemoveItemFromMap(conn)
 	} else {

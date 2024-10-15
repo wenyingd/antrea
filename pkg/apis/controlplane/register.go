@@ -54,13 +54,19 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&NetworkPolicy{},
 		&NetworkPolicyList{},
 		&NetworkPolicyStatus{},
+		&NetworkPolicyEvaluation{},
 		&NodeStatsSummary{},
 		&ClusterGroupMembers{},
+		&GroupMembers{},
 		&PaginationGetOptions{},
 		&GroupAssociation{},
+		&IPGroupAssociation{},
 		&EgressGroup{},
 		&EgressGroupPatch{},
 		&EgressGroupList{},
+		&SupportBundleCollection{},
+		&SupportBundleCollectionList{},
+		&SupportBundleCollectionStatus{},
 	)
 	return nil
 }

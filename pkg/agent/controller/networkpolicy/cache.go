@@ -32,14 +32,14 @@ import (
 	"antrea.io/antrea/pkg/agent/metrics"
 	agenttypes "antrea.io/antrea/pkg/agent/types"
 	v1beta "antrea.io/antrea/pkg/apis/controlplane/v1beta2"
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/pkg/querier"
 	"antrea.io/antrea/pkg/util/channel"
 	"antrea.io/antrea/pkg/util/k8s"
 )
 
 const (
-	RuleIDLength                  = 16
+	ruleIDLength                  = 16
 	appliedToGroupIndex           = "appliedToGroup"
 	addressGroupIndex             = "addressGroup"
 	policyIndex                   = "policy"
@@ -51,11 +51,11 @@ const (
 // to construct a complete rule that can be used by reconciler to enforce.
 // The K8s NetworkPolicy object doesn't provide ID for its rule, here we
 // calculate an ID based on the rule's fields. That means:
-// 1. If a rule's selector/services/direction changes, it becomes "another" rule.
-// 2. If inserting rules before a rule or shuffling rules in a NetworkPolicy, we
-//    can know the existing rules don't change and skip processing them. Note that
-//    if a CNP/ANP rule's position (from top down) within a networkpolicy changes, it
-//    affects the Priority of the rule.
+//  1. If a rule's selector/services/direction changes, it becomes "another" rule.
+//  2. If inserting rules before a rule or shuffling rules in a NetworkPolicy, we
+//     can know the existing rules don't change and skip processing them. Note that
+//     if an ACNP/ANNP rule's position (from top down) within a networkpolicy changes,
+//     it affects the Priority of the rule.
 type rule struct {
 	// ID is calculated from the hash value of all other fields.
 	ID string
@@ -67,10 +67,12 @@ type rule struct {
 	To v1beta.NetworkPolicyPeer
 	// Protocols and Ports of this rule.
 	Services []v1beta.Service
+	// Layer 7 protocols of this rule.
+	L7Protocols []v1beta.L7Protocol
 	// Name of this rule. Empty for k8s NetworkPolicy.
 	Name string
 	// Action of this rule. nil for k8s NetworkPolicy.
-	Action *crdv1alpha1.RuleAction
+	Action *crdv1beta1.RuleAction
 	// Priority of this rule within the NetworkPolicy. Defaults to -1 for K8s NetworkPolicy.
 	Priority int32
 	// The highest rule Priority within the NetworkPolicy. Defaults to -1 for K8s NetworkPolicy.
@@ -96,6 +98,8 @@ type rule struct {
 	SourceRef *v1beta.NetworkPolicyReference
 	// EnableLogging is a boolean indicating whether logging is required for Antrea Policies. Always false for K8s NetworkPolicy.
 	EnableLogging bool
+	// LogLabel is a string associated to the NetworkPolicy rule. Used for logging.
+	LogLabel string
 }
 
 func (r *rule) Less(r2 *rule) bool {
@@ -133,7 +137,7 @@ func hashRule(r *rule) string {
 	b, _ := json.Marshal(r)
 	hash.Write(b)
 	hashValue := hex.EncodeToString(hash.Sum(nil))
-	return hashValue[:RuleIDLength]
+	return hashValue[:ruleIDLength]
 }
 
 // CompletedRule contains IPAddresses and Pods flattened from AddressGroups and AppliedToGroups.
@@ -146,6 +150,8 @@ type CompletedRule struct {
 	ToAddresses v1beta.GroupMemberSet
 	// Target GroupMembers of this rule.
 	TargetMembers v1beta.GroupMemberSet
+	// Vlan ID allocated for this rule if this rule is for L7 NetworkPolicy.
+	L7RuleVlanID *uint32
 }
 
 // String returns the string representation of the CompletedRule.
@@ -171,6 +177,17 @@ func (r *CompletedRule) isIGMPEgressPolicyRule() bool {
 			if svc.Protocol != nil && *svc.Protocol == v1beta.ProtocolIGMP {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func (r *CompletedRule) isNodeNetworkPolicyRule() bool {
+	for _, m := range r.TargetMembers {
+		if m.Node != nil {
+			return true
+		} else {
+			return false
 		}
 	}
 	return false
@@ -249,7 +266,7 @@ func (c *ruleCache) getAppliedNetworkPolicies(pod, namespace string, npFilter *q
 	c.appliedToSetLock.RUnlock()
 
 	var policies []v1beta.NetworkPolicy
-	policyKeys := sets.NewString()
+	policyKeys := sets.New[string]()
 	for _, group := range groups {
 		rules, _ := c.rules.ByIndex(appliedToGroupIndex, group)
 		for _, ruleObj := range rules {
@@ -371,7 +388,7 @@ func policyIndexFunc(obj interface{}) ([]string, error) {
 // NetworkPolicy.
 func toServicesIndexFunc(obj interface{}) ([]string, error) {
 	rule := obj.(*rule)
-	toSvcNamespacedName := sets.String{}
+	toSvcNamespacedName := sets.Set[string]{}
 	for _, svc := range rule.To.ToServices {
 		toSvcNamespacedName.Insert(k8s.NamespacedName(svc.Namespace, svc.Name))
 	}
@@ -382,11 +399,11 @@ func toServicesIndexFunc(obj interface{}) ([]string, error) {
 // It's provided to cache.Indexer to build an index of NetworkPolicy.
 func toIGMPReportGroupAddressIndexFunc(obj interface{}) ([]string, error) {
 	rule := obj.(*rule)
-	mcastGroupAddresses := sets.String{}
+	mcastGroupAddresses := sets.Set[string]{}
 	if rule.Direction == v1beta.DirectionOut {
 		for _, svc := range rule.Services {
 			if svc.Protocol != nil && *svc.Protocol == v1beta.ProtocolIGMP && svc.IGMPType == nil ||
-				svc.IGMPType != nil && (*svc.IGMPType == crdv1alpha1.IGMPReportV1 || *svc.IGMPType == crdv1alpha1.IGMPReportV2 || *svc.IGMPType == crdv1alpha1.IGMPReportV3) {
+				svc.IGMPType != nil && (*svc.IGMPType == crdv1beta1.IGMPReportV1 || *svc.IGMPType == crdv1beta1.IGMPReportV2 || *svc.IGMPType == crdv1beta1.IGMPReportV3) {
 				mcastGroupAddresses.Insert(svc.GroupAddress)
 			}
 		}
@@ -497,7 +514,7 @@ func (c *ruleCache) ReplaceAddressGroups(groups []*v1beta.AddressGroup) {
 	c.addressSetLock.Lock()
 	defer c.addressSetLock.Unlock()
 
-	oldGroupKeys := make(sets.String, len(c.addressSetByGroup))
+	oldGroupKeys := make(sets.Set[string], len(c.addressSetByGroup))
 	for key := range c.addressSetByGroup {
 		oldGroupKeys.Insert(key)
 	}
@@ -545,13 +562,14 @@ func (c *ruleCache) addAddressGroupLocked(group *v1beta.AddressGroup) error {
 
 // PatchAddressGroup updates a cached *v1beta.AddressGroup.
 // The rules referencing it will be regarded as dirty.
-func (c *ruleCache) PatchAddressGroup(patch *v1beta.AddressGroupPatch) error {
+// It returns a copy of the patched AddressGroup, or an error if the AddressGroup doesn't exist.
+func (c *ruleCache) PatchAddressGroup(patch *v1beta.AddressGroupPatch) (*v1beta.AddressGroup, error) {
 	c.addressSetLock.Lock()
 	defer c.addressSetLock.Unlock()
 
 	groupMemberSet, exists := c.addressSetByGroup[patch.Name]
 	if !exists {
-		return fmt.Errorf("AddressGroup %v doesn't exist in cache, can't be patched", patch.Name)
+		return nil, fmt.Errorf("AddressGroup %v doesn't exist in cache, can't be patched", patch.Name)
 	}
 	for i := range patch.AddedGroupMembers {
 		groupMemberSet.Insert(&patch.AddedGroupMembers[i])
@@ -561,7 +579,16 @@ func (c *ruleCache) PatchAddressGroup(patch *v1beta.AddressGroupPatch) error {
 	}
 
 	c.onAddressGroupUpdate(patch.Name)
-	return nil
+
+	members := make([]v1beta.GroupMember, 0, len(groupMemberSet))
+	for _, member := range groupMemberSet {
+		members = append(members, *member)
+	}
+	group := &v1beta.AddressGroup{
+		ObjectMeta:   patch.ObjectMeta,
+		GroupMembers: members,
+	}
+	return group, nil
 }
 
 // DeleteAddressGroup deletes a cached *v1beta.AddressGroup.
@@ -590,7 +617,7 @@ func (c *ruleCache) ReplaceAppliedToGroups(groups []*v1beta.AppliedToGroup) {
 	c.appliedToSetLock.Lock()
 	defer c.appliedToSetLock.Unlock()
 
-	oldGroupKeys := make(sets.String, len(c.appliedToSetByGroup))
+	oldGroupKeys := make(sets.Set[string], len(c.appliedToSetByGroup))
 	for key := range c.appliedToSetByGroup {
 		oldGroupKeys.Insert(key)
 	}
@@ -633,13 +660,14 @@ func (c *ruleCache) addAppliedToGroupLocked(group *v1beta.AppliedToGroup) error 
 
 // PatchAppliedToGroup updates a cached *v1beta.AppliedToGroupPatch.
 // The rules referencing it will be regarded as dirty.
-func (c *ruleCache) PatchAppliedToGroup(patch *v1beta.AppliedToGroupPatch) error {
+// It returns a copy of the patched AppliedToGroup, or an error if the AppliedToGroup doesn't exist.
+func (c *ruleCache) PatchAppliedToGroup(patch *v1beta.AppliedToGroupPatch) (*v1beta.AppliedToGroup, error) {
 	c.appliedToSetLock.Lock()
 	defer c.appliedToSetLock.Unlock()
 
 	memberSet, exists := c.appliedToSetByGroup[patch.Name]
 	if !exists {
-		return fmt.Errorf("AppliedToGroup %v doesn't exist in cache, can't be patched", patch.Name)
+		return nil, fmt.Errorf("AppliedToGroup %v doesn't exist in cache, can't be patched", patch.Name)
 	}
 	for i := range patch.AddedGroupMembers {
 		memberSet.Insert(&patch.AddedGroupMembers[i])
@@ -648,7 +676,16 @@ func (c *ruleCache) PatchAppliedToGroup(patch *v1beta.AppliedToGroupPatch) error
 		memberSet.Delete(&patch.RemovedGroupMembers[i])
 	}
 	c.onAppliedToGroupUpdate(patch.Name)
-	return nil
+
+	members := make([]v1beta.GroupMember, 0, len(memberSet))
+	for _, member := range memberSet {
+		members = append(members, *member)
+	}
+	group := &v1beta.AppliedToGroup{
+		ObjectMeta:   patch.ObjectMeta,
+		GroupMembers: members,
+	}
+	return group, nil
 }
 
 // DeleteAppliedToGroup deletes a cached *v1beta.AppliedToGroup.
@@ -673,6 +710,7 @@ func toRule(r *v1beta.NetworkPolicyRule, policy *v1beta.NetworkPolicy, maxPriori
 		From:            r.From,
 		To:              r.To,
 		Services:        r.Services,
+		L7Protocols:     r.L7Protocols,
 		Action:          r.Action,
 		Priority:        r.Priority,
 		PolicyPriority:  policy.Priority,
@@ -682,6 +720,7 @@ func toRule(r *v1beta.NetworkPolicyRule, policy *v1beta.NetworkPolicy, maxPriori
 		PolicyUID:       policy.UID,
 		SourceRef:       policy.SourceRef,
 		EnableLogging:   r.EnableLogging,
+		LogLabel:        r.LogLabel,
 	}
 	rule.ID = hashRule(rule)
 	rule.PolicyName = policy.Name
@@ -719,7 +758,7 @@ func (c *ruleCache) ReplaceNetworkPolicies(policies []*v1beta.NetworkPolicy) {
 	c.policyMapLock.Lock()
 	defer c.policyMapLock.Unlock()
 
-	oldKeys := make(sets.String, len(c.policyMap))
+	oldKeys := make(sets.Set[string], len(c.policyMap))
 	for key := range c.policyMap {
 		oldKeys.Insert(key)
 	}
@@ -750,7 +789,7 @@ func (c *ruleCache) AddNetworkPolicy(policy *v1beta.NetworkPolicy) {
 	c.updateNetworkPolicyLocked(policy)
 }
 
-// UpdateNetworkPolicy updates a cached *v1beta.NetworkPolicy and returns whether there is any rule change.
+// UpdateNetworkPolicy updates a cached *v1beta.NetworkPolicy and returns whether any rule or the generation changes.
 // The added rules and removed rules will be regarded as dirty.
 func (c *ruleCache) UpdateNetworkPolicy(policy *v1beta.NetworkPolicy) bool {
 	c.policyMapLock.Lock()
@@ -758,8 +797,10 @@ func (c *ruleCache) UpdateNetworkPolicy(policy *v1beta.NetworkPolicy) bool {
 	return c.updateNetworkPolicyLocked(policy)
 }
 
-// updateNetworkPolicyLocked returns whether there is any rule change.
+// updateNetworkPolicyLocked returns whether any rule or the generation changes.
 func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) bool {
+	oldPolicy, exists := c.policyMap[string(policy.UID)]
+	generationUpdated := !exists || oldPolicy.Generation != policy.Generation
 	c.policyMap[string(policy.UID)] = policy
 	existingRules, _ := c.rules.ByIndex(policyIndex, string(policy.UID))
 	ruleByID := map[string]interface{}{}
@@ -772,11 +813,12 @@ func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) bool
 	for i := range policy.Rules {
 		r := toRule(&policy.Rules[i], policy, maxPriority)
 		if _, exists := ruleByID[r.ID]; exists {
-			// If rule already exists, remove it from the map so the ones left finally are orphaned.
-			klog.V(2).Infof("Rule %v was not changed", r.ID)
+			// If rule already exists, remove it from the map so the ones left are orphaned,
+			// which means those rules need to be handled by dirtyRuleHandler.
+			klog.V(2).InfoS("Rule was not changed", "id", r.ID)
 			delete(ruleByID, r.ID)
 		} else {
-			// If rule doesn't exist, add it to cache, mark it as dirty.
+			// If rule doesn't exist, add it to cache and mark it as dirty.
 			c.rules.Add(r)
 			// Count up antrea_agent_ingress_networkpolicy_rule_count or antrea_agent_egress_networkpolicy_rule_count
 			if r.Direction == v1beta.DirectionIn {
@@ -801,7 +843,7 @@ func (c *ruleCache) updateNetworkPolicyLocked(policy *v1beta.NetworkPolicy) bool
 		c.dirtyRuleHandler(ruleID)
 		anyRuleUpdate = true
 	}
-	return anyRuleUpdate
+	return anyRuleUpdate || generationUpdated
 }
 
 // DeleteNetworkPolicy deletes a cached *v1beta.NetworkPolicy.
@@ -841,6 +883,7 @@ func (c *ruleCache) deleteNetworkPolicyLocked(uid string) {
 //   - The original policy has multiple AppliedToGroups and some AppliedToGroups' span does not include this Node.
 //   - The original policy is appliedTo-per-rule, and some of the rule's AppliedToGroups do not include this Node.
 //   - The original policy is appliedTo-per-rule, none of the rule's AppliedToGroups includes this Node, but some other rules' (in the same policy) AppliedToGroups include this Node.
+//
 // In these cases, it is not guaranteed that all AppliedToGroups in the rule will eventually be present in the cache.
 // Only the AppliedToGroups whose span includes this Node will eventually be received.
 func (c *ruleCache) GetCompletedRule(ruleID string) (completedRule *CompletedRule, effective bool, realizable bool) {

@@ -17,6 +17,8 @@ package openflow
 import (
 	"net"
 
+	"antrea.io/libOpenflow/openflow15"
+
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/openflow/cookie"
 	"antrea.io/antrea/pkg/apis/crd/v1alpha2"
@@ -48,7 +50,9 @@ type featurePodConnectivity struct {
 	ipCtZoneTypeRegMarks  map[binding.Protocol]*binding.RegMark
 	enableMulticast       bool
 	proxyAll              bool
+	enableDSR             bool
 	enableTrafficControl  bool
+	enableL7FlowExporter  bool
 
 	category cookie.Category
 }
@@ -65,7 +69,9 @@ func newFeaturePodConnectivity(
 	connectUplinkToBridge bool,
 	enableMulticast bool,
 	proxyAll bool,
-	enableTrafficControl bool) *featurePodConnectivity {
+	enableDSR bool,
+	enableTrafficControl bool,
+	enableL7FlowExporter bool) *featurePodConnectivity {
 	ctZones := make(map[binding.Protocol]int)
 	gatewayIPs := make(map[binding.Protocol]net.IP)
 	localCIDRs := make(map[binding.Protocol]net.IPNet)
@@ -91,7 +97,7 @@ func newFeaturePodConnectivity(
 		}
 	}
 
-	gatewayPort := uint32(config.HostGatewayOFPort)
+	gatewayPort := uint32(config.DefaultHostGatewayOFPort)
 	if nodeConfig.GatewayConfig != nil {
 		gatewayPort = nodeConfig.GatewayConfig.OFPort
 	}
@@ -118,15 +124,17 @@ func newFeaturePodConnectivity(
 		networkConfig:         networkConfig,
 		connectUplinkToBridge: connectUplinkToBridge,
 		enableTrafficControl:  enableTrafficControl,
+		enableL7FlowExporter:  enableL7FlowExporter,
 		ipCtZoneTypeRegMarks:  ipCtZoneTypeRegMarks,
 		ctZoneSrcField:        getZoneSrcField(connectUplinkToBridge),
 		enableMulticast:       enableMulticast,
 		proxyAll:              proxyAll,
+		enableDSR:             enableDSR,
 		category:              cookie.PodConnectivity,
 	}
 }
 
-func (f *featurePodConnectivity) initFlows() []binding.Flow {
+func (f *featurePodConnectivity) initFlows() []*openflow15.FlowMod {
 	var flows []binding.Flow
 	gatewayMAC := f.nodeConfig.GatewayConfig.MAC
 
@@ -138,7 +146,6 @@ func (f *featurePodConnectivity) initFlows() []binding.Flow {
 			flows = append(flows, f.arpSpoofGuardFlow(f.gatewayIPs[ipProtocol], gatewayMAC, f.gatewayPort))
 			if f.connectUplinkToBridge {
 				flows = append(flows, f.arpResponderFlow(f.gatewayIPs[ipProtocol], gatewayMAC))
-				flows = append(flows, f.arpSpoofGuardFlow(f.nodeConfig.NodeIPv4Addr.IP, gatewayMAC, f.gatewayPort))
 				flows = append(flows, f.hostBridgeUplinkVLANFlows()...)
 			}
 			if runtime.IsWindowsPlatform() || f.connectUplinkToBridge {
@@ -154,14 +161,14 @@ func (f *featurePodConnectivity) initFlows() []binding.Flow {
 	flows = append(flows, f.decTTLFlows()...)
 	flows = append(flows, f.conntrackFlows()...)
 	flows = append(flows, f.l2ForwardOutputFlow())
-	flows = append(flows, f.gatewayClassifierFlow())
+	flows = append(flows, f.gatewayClassifierFlows()...)
 	flows = append(flows, f.l2ForwardCalcFlow(gatewayMAC, f.gatewayPort))
 	flows = append(flows, f.gatewayIPSpoofGuardFlows()...)
 	flows = append(flows, f.l3FwdFlowToGateway()...)
 	// Add flow to ensure the liveliness check packet could be forwarded correctly.
 	flows = append(flows, f.localProbeFlows()...)
 
-	if f.networkConfig.TrafficEncapMode.SupportsEncap() {
+	if f.tunnelPort != 0 {
 		flows = append(flows, f.tunnelClassifierFlow(f.tunnelPort))
 		flows = append(flows, f.l2ForwardCalcFlow(GlobalVirtualMAC, f.tunnelPort))
 	}
@@ -169,32 +176,38 @@ func (f *featurePodConnectivity) initFlows() []binding.Flow {
 	if f.networkConfig.TrafficEncapMode.IsNetworkPolicyOnly() {
 		flows = append(flows, f.l3FwdFlowRouteToGW()...)
 		// If IPv6 is enabled, this flow will never get hit. Replies any ARP request with the same global virtual MAC.
-		flows = append(flows, f.arpResponderStaticFlow())
+		if f.networkConfig.IPv4Enabled {
+			flows = append(flows, f.arpResponderStaticFlow())
+		}
 	} else {
 		// If NetworkPolicyOnly mode is enabled, IPAM is implemented by the primary CNI, which may not use the Pod CIDR
 		// of the Node. Therefore, it doesn't make sense to install flows for the Pod CIDR. Individual flow for each local
 		// Pod IP will take care of routing the traffic to destination Pod.
 		flows = append(flows, f.l3FwdFlowToLocalPodCIDR()...)
 	}
-	if f.enableTrafficControl {
+	if f.enableTrafficControl || f.enableL7FlowExporter {
 		flows = append(flows, f.trafficControlCommonFlows()...)
 	}
-	return flows
+	return GetFlowModMessages(flows, binding.AddMessage)
 }
 
-func (f *featurePodConnectivity) replayFlows() []binding.Flow {
-	var flows []binding.Flow
+func (f *featurePodConnectivity) replayFlows() []*openflow15.FlowMod {
+	var flows []*openflow15.FlowMod
 
 	// Get cached flows.
 	for _, cachedFlows := range []*flowCategoryCache{f.nodeCachedFlows, f.podCachedFlows, f.tcCachedFlows} {
-		flows = append(flows, getCachedFlows(cachedFlows)...)
+		flows = append(flows, getCachedFlowMessages(cachedFlows)...)
 	}
 
 	return flows
 }
 
 // trafficControlMarkFlows generates the flows to mark the packets that need to be redirected or mirrored.
-func (f *featurePodConnectivity) trafficControlMarkFlows(sourceOFPorts []uint32, targetOFPort uint32, direction v1alpha2.Direction, action v1alpha2.TrafficControlAction) []binding.Flow {
+func (f *featurePodConnectivity) trafficControlMarkFlows(sourceOFPorts []uint32,
+	targetOFPort uint32,
+	direction v1alpha2.Direction,
+	action v1alpha2.TrafficControlAction,
+	priority uint16) []binding.Flow {
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	var actionRegMark *binding.RegMark
 	if action == v1alpha2.ActionRedirect {
@@ -206,7 +219,7 @@ func (f *featurePodConnectivity) trafficControlMarkFlows(sourceOFPorts []uint32,
 	for _, port := range sourceOFPorts {
 		if direction == v1alpha2.DirectionIngress || direction == v1alpha2.DirectionBoth {
 			// This generates the flow to mark the packets destined for a provided port.
-			flows = append(flows, TrafficControlTable.ofTable.BuildFlow(priorityNormal).
+			flows = append(flows, TrafficControlTable.ofTable.BuildFlow(priority).
 				Cookie(cookieID).
 				MatchRegFieldWithValue(TargetOFPortField, port).
 				Action().LoadToRegField(TrafficControlTargetOFPortField, targetOFPort).
@@ -216,7 +229,7 @@ func (f *featurePodConnectivity) trafficControlMarkFlows(sourceOFPorts []uint32,
 		}
 		// This generates the flow to mark the packets sourced from a provided port.
 		if direction == v1alpha2.DirectionEgress || direction == v1alpha2.DirectionBoth {
-			flows = append(flows, TrafficControlTable.ofTable.BuildFlow(priorityNormal).
+			flows = append(flows, TrafficControlTable.ofTable.BuildFlow(priority).
 				Cookie(cookieID).
 				MatchInPort(port).
 				Action().LoadToRegField(TrafficControlTargetOFPortField, targetOFPort).
@@ -246,24 +259,36 @@ func (f *featurePodConnectivity) trafficControlCommonFlows() []binding.Flow {
 	return []binding.Flow{
 		// This generates the flow to output packets to the original target port as well as mirror the packets to the target
 		// traffic control port.
-		L2ForwardingOutTable.ofTable.BuildFlow(priorityHigh+1).
+		OutputTable.ofTable.BuildFlow(priorityHigh+1).
 			Cookie(cookieID).
-			MatchRegMark(OFPortFoundRegMark, TrafficControlMirrorRegMark).
+			MatchRegMark(OutputToOFPortRegMark, TrafficControlMirrorRegMark).
 			Action().OutputToRegField(TargetOFPortField).
 			Action().OutputToRegField(TrafficControlTargetOFPortField).
 			Done(),
 		// This generates the flow to output the packets to be redirected to the target traffic control port.
-		L2ForwardingOutTable.ofTable.BuildFlow(priorityHigh+1).
+		OutputTable.ofTable.BuildFlow(priorityHigh+1).
 			Cookie(cookieID).
-			MatchRegMark(OFPortFoundRegMark, TrafficControlRedirectRegMark).
+			MatchRegMark(OutputToOFPortRegMark, TrafficControlRedirectRegMark).
 			Action().OutputToRegField(TrafficControlTargetOFPortField).
 			Done(),
 		// This generates the flow to forward the returned packets (with FromTCReturnRegMark) to stageOutput directly
 		// after loading output port number to reg1 in L2ForwardingCalcTable.
 		TrafficControlTable.ofTable.BuildFlow(priorityHigh).
 			Cookie(cookieID).
-			MatchRegMark(OFPortFoundRegMark, FromTCReturnRegMark).
+			MatchRegMark(OutputToOFPortRegMark, FromTCReturnRegMark).
 			Action().GotoStage(stageOutput).
 			Done(),
 	}
+}
+
+func (f *featurePodConnectivity) initGroups() []binding.OFEntry {
+	return nil
+}
+
+func (f *featurePodConnectivity) replayGroups() []binding.OFEntry {
+	return nil
+}
+
+func (f *featurePodConnectivity) replayMeters() []binding.OFEntry {
+	return nil
 }

@@ -23,16 +23,15 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,6 +43,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 	certutil "k8s.io/client-go/util/cert"
+	"k8s.io/utils/clock"
+	testingclock "k8s.io/utils/clock/testing"
 
 	ovsconfigtest "antrea.io/antrea/pkg/ovs/ovsconfig/testing"
 )
@@ -59,7 +60,7 @@ type fakeController struct {
 	caKey            crypto.Signer
 }
 
-func newFakeController(t *testing.T) *fakeController {
+func newFakeController(t *testing.T, clock clock.WithTicker) *fakeController {
 	mockController := gomock.NewController(t)
 	mockOVSBridgeClient := ovsconfigtest.NewMockOVSBridgeClient(mockController)
 	fakeClient := fake.NewSimpleClientset()
@@ -73,7 +74,6 @@ func newFakeController(t *testing.T) *fakeController {
 				csr.ObjectMeta.Name = fmt.Sprintf("%s%s", csr.ObjectMeta.GenerateName, utilrand.String(8))
 				csr.ObjectMeta.GenerateName = ""
 				csr.UID = uuid.NewUUID()
-				csr.CreationTimestamp = metav1.Now()
 			}
 			return false, csr, nil
 		}),
@@ -122,7 +122,7 @@ func newFakeController(t *testing.T) *fakeController {
 	require.NoError(t, err)
 	rootCA, err := certutil.NewSelfSignedCACert(cfg, key)
 	require.NoError(t, err)
-	tempDir, err := ioutil.TempDir("", "antrea-ipsec-test")
+	tempDir, err := os.MkdirTemp("", "antrea-ipsec-test")
 	require.NoError(t, err)
 	defaultCertificatesPath = tempDir
 	defer func() {
@@ -133,7 +133,7 @@ func newFakeController(t *testing.T) *fakeController {
 	err = certutil.WriteCert(filepath.Join(defaultCertificatesPath, "ca", "ca.crt"), caData)
 	require.NoError(t, err)
 
-	c := NewIPSecCertificateController(fakeClient, mockOVSBridgeClient, fakeNodeName)
+	c := newIPSecCertificateControllerWithCustomClock(fakeClient, mockOVSBridgeClient, fakeNodeName, clock)
 	return &fakeController{
 		Controller:       c,
 		mockController:   mockController,
@@ -146,9 +146,7 @@ func newFakeController(t *testing.T) *fakeController {
 
 func TestController_syncConfigurations(t *testing.T) {
 	t.Run("rotate certificate if current certificates are empty", func(t *testing.T) {
-		fakeController := newFakeController(t)
-		defer fakeController.mockController.Finish()
-
+		fakeController := newFakeController(t, clock.RealClock{})
 		ch := make(chan struct{})
 		fakeController.rotateCertificate = func() (*certificateKeyPair, error) {
 			close(ch)
@@ -160,7 +158,7 @@ func TestController_syncConfigurations(t *testing.T) {
 		<-ch
 	})
 	t.Run("should not touch existing certificate if rotate certificate failed", func(t *testing.T) {
-		fakeController := newFakeController(t)
+		fakeController := newFakeController(t, clock.RealClock{})
 		defer fakeController.mockController.Finish()
 		fakeController.certificateKeyPair = &certificateKeyPair{
 			certificatePath: "cert.crt",
@@ -179,15 +177,15 @@ func TestController_syncConfigurations(t *testing.T) {
 		<-ch
 	})
 	t.Run("should clean up new certificate if it is not valid", func(t *testing.T) {
-		fakeController := newFakeController(t)
+		fakeController := newFakeController(t, clock.RealClock{})
 		defer fakeController.mockController.Finish()
 		certPath := filepath.Join(fakeController.certificateFolderPath, "cert-1.crt")
 		keyPath := filepath.Join(fakeController.certificateFolderPath, "key-1.key")
 		ch := make(chan struct{})
 		fakeController.rotateCertificate = func() (*certificateKeyPair, error) {
 			close(ch)
-			require.NoError(t, ioutil.WriteFile(certPath, nil, 0600))
-			require.NoError(t, ioutil.WriteFile(keyPath, nil, 0400))
+			require.NoError(t, os.WriteFile(certPath, nil, 0600))
+			require.NoError(t, os.WriteFile(keyPath, nil, 0400))
 			return &certificateKeyPair{
 				certificatePath: certPath,
 				privateKeyPath:  keyPath,
@@ -204,7 +202,7 @@ func TestController_syncConfigurations(t *testing.T) {
 	t.Run("request and configure new certificates", func(t *testing.T) {
 		ch := make(chan struct{})
 		defer close(ch)
-		fakeController := newFakeController(t)
+		fakeController := newFakeController(t, clock.RealClock{})
 		defer fakeController.mockController.Finish()
 		assert.Equal(t, 0, fakeController.queue.Len())
 		ctx, cancel := context.WithCancel(context.Background())
@@ -271,9 +269,15 @@ func TestController_syncConfigurations(t *testing.T) {
 }
 
 func TestController_RotateCertificates(t *testing.T) {
-	ch := make(chan struct{})
-	defer close(ch)
-	fakeController := newFakeController(t)
+	// It is important to truncate to the second, because the accuracy of notAfter in the
+	// certificate is at the second level. If we don't, the certificate may actually be rotated
+	// before 7s.
+	// We use a time in the future (1 hour), because newFakeController will create self-signed
+	// root certificates using the wall-clock time. We want to make sure that the root
+	// certificates are valid for this virtual time.
+	now := time.Now().Add(1 * time.Hour).Truncate(time.Second)
+	fakeClock := testingclock.NewFakeClock(now)
+	fakeController := newFakeController(t, fakeClock)
 	defer fakeController.mockController.Finish()
 	assert.Equal(t, 0, fakeController.queue.Len())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -293,6 +297,7 @@ func TestController_RotateCertificates(t *testing.T) {
 				assert.True(t, ok)
 				// issue a certificate with lifetime of 10 seconds.
 				signCSR(t, fakeController, csr, time.Second*10)
+				signCh <- struct{}{}
 				counter++
 				if counter == 2 {
 					return
@@ -302,20 +307,30 @@ func TestController_RotateCertificates(t *testing.T) {
 	}()
 	fakeController.mockBridgeClient.EXPECT().GetOVSOtherConfig().Times(1)
 	fakeController.mockBridgeClient.EXPECT().UpdateOVSOtherConfig(gomock.Any()).MinTimes(1)
-	go fakeController.Run(ch)
-	// wait for the signer to finish signing two CSRs.
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	go fakeController.Run(stopCh)
 	<-signCh
+	// the rotation interval is determined by nextRotationDeadline as notBefore + (notAfter -
+	// notBefore) * k, where k is >= 0.7 and <= 0.9. We would therefore expect the rotation
+	// interval to be between [7, 9] seconds.
+	fakeClock.SetTime(now.Add(time.Millisecond * 6999))
+	select {
+	case <-signCh:
+		t.Fatal("CSR should not be signed before the rotation deadline")
+	case <-time.After(2 * time.Second):
+	}
+	fakeClock.SetTime(now.Add(time.Second * 9))
+	// wait for the signer to finish signing two CSRs.
+	select {
+	case <-signCh:
+		break
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout while waiting for second CSR to be signed")
+	}
 	list, err := fakeController.kubeClient.CertificatesV1().CertificateSigningRequests().List(context.TODO(), metav1.ListOptions{})
 	assert.NoError(t, err)
 	assert.Len(t, list.Items, 2)
-	delta := list.Items[0].CreationTimestamp.Sub(list.Items[1].CreationTimestamp.Time)
-	if delta < 0 {
-		delta = -delta
-	}
-	// the rotation interval should be in [7s, 9s], but it takes time to process the CSR request,
-	// so add one second to the upper bound.
-	assert.Less(t, delta, time.Second*10)
-	assert.LessOrEqual(t, time.Second*7, delta)
 }
 
 func newIPsecCertTemplate(t *testing.T, nodeName string, notBefore, notAfter time.Time) *x509.Certificate {
@@ -336,9 +351,16 @@ func newIPsecCertTemplate(t *testing.T, nodeName string, notBefore, notAfter tim
 	}
 }
 
-func createCertificate(t *testing.T, nodeName string, caCert *x509.Certificate, caKey crypto.Signer,
-	publicKey crypto.PublicKey, notBefore time.Time, expirationDuration time.Duration) []byte {
-	template := newIPsecCertTemplate(t, nodeName, notBefore, notBefore.Add(expirationDuration))
+func createCertificate(
+	t *testing.T,
+	nodeName string,
+	caCert *x509.Certificate,
+	caKey crypto.Signer,
+	publicKey crypto.PublicKey,
+	currentTime time.Time,
+	expirationDuration time.Duration,
+) []byte {
+	template := newIPsecCertTemplate(t, nodeName, currentTime, currentTime.Add(expirationDuration))
 	derBytes, err := x509.CreateCertificate(rand.Reader, template, caCert, publicKey, caKey)
 	require.NoError(t, err)
 	certs, err := x509.ParseCertificates(derBytes)
@@ -349,11 +371,13 @@ func createCertificate(t *testing.T, nodeName string, caCert *x509.Certificate, 
 	return encoded
 }
 
-func signCSR(t *testing.T, controller *fakeController,
-	csr *certificatesv1.CertificateSigningRequest, expirationDuration time.Duration) {
+func signCSR(
+	t *testing.T,
+	controller *fakeController,
+	csr *certificatesv1.CertificateSigningRequest,
+	expirationDuration time.Duration,
+) {
 	assert.Empty(t, csr.Status.Certificate)
-	// use the CreationTimestamp as the NotBefore field of issued certificates for testing.
-	assert.False(t, csr.CreationTimestamp.IsZero())
 	block, remain := pem.Decode(csr.Spec.Request)
 	assert.Empty(t, remain)
 	req, err := x509.ParseCertificateRequest(block.Bytes)
@@ -365,7 +389,7 @@ func signCSR(t *testing.T, controller *fakeController,
 	time.Sleep(1 * time.Second)
 
 	newCert := createCertificate(t, req.Subject.CommonName, controller.caCert,
-		controller.caKey, req.PublicKey, csr.CreationTimestamp.Time, expirationDuration)
+		controller.caKey, req.PublicKey, controller.clock.Now(), expirationDuration)
 	toUpdate := csr.DeepCopy()
 	toUpdate.Status.Conditions = append(toUpdate.Status.Conditions, certificatesv1.CertificateSigningRequestCondition{
 		Type:   certificatesv1.CertificateApproved,

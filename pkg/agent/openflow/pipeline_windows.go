@@ -23,27 +23,33 @@ import (
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
+// matchUplinkInPortInClassifierTable matches dstIP field to prevent unintended forwarding when promiscuous mode is enabled on Windows.
+func (f *featurePodConnectivity) matchUplinkInPortInClassifierTable(flowBuilder binding.FlowBuilder) binding.FlowBuilder {
+	return flowBuilder.MatchInPort(f.uplinkPort).MatchProtocol(binding.ProtocolIP).MatchDstIP(f.nodeConfig.NodeTransportIPv4Addr.IP)
+}
+
 // hostBridgeUplinkFlows generates the flows that forward traffic between the bridge local port and the uplink port to
 // support the host traffic with outside.
 func (f *featurePodConnectivity) hostBridgeUplinkFlows() []binding.Flow {
 	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	flows := f.hostBridgeLocalFlows()
-	flows = append(flows,
-		// This generates the flow to forward ARP packets from uplink port to bridge local port since uplink port is set
-		// to disable flood.
-		ARPSpoofGuardTable.ofTable.BuildFlow(priorityNormal).
-			Cookie(cookieID).
-			MatchInPort(f.uplinkPort).
-			Action().Output(f.hostIfacePort).
-			Done(),
-		// This generates the flow to forward ARP packets from bridge local port to uplink port since uplink port is set
-		// to disable flood.
-		ARPSpoofGuardTable.ofTable.BuildFlow(priorityNormal).
-			Cookie(cookieID).
-			MatchInPort(f.hostIfacePort).
-			Action().Output(f.uplinkPort).
-			Done(),
-	)
+	if f.networkConfig.IPv4Enabled {
+		flows = append(flows,
+			// This generates the flow to forward ARP packets from uplink port to bridge local port since uplink port is set
+			// to disable flood.
+			ARPSpoofGuardTable.ofTable.BuildFlow(priorityNormal).
+				Cookie(cookieID).
+				MatchInPort(f.uplinkPort).
+				Action().Output(f.hostIfacePort).
+				Done(),
+			// This generates the flow to forward ARP packets from bridge local port to uplink port since uplink port is set
+			// to disable flood.
+			ARPSpoofGuardTable.ofTable.BuildFlow(priorityNormal).
+				Cookie(cookieID).
+				MatchInPort(f.hostIfacePort).
+				Action().Output(f.uplinkPort).
+				Done())
+	}
 	if f.networkConfig.TrafficEncapMode.SupportsNoEncap() {
 		// TODO: support IPv6
 		localSubnetMap := map[binding.Protocol]net.IPNet{binding.ProtocolIP: *f.nodeConfig.PodIPv4CIDR}
@@ -95,7 +101,7 @@ func (f *featurePodConnectivity) l3FwdFlowToRemoteViaRouting(localGatewayMAC net
 				Cookie(cookieID).
 				MatchDstMAC(remoteGatewayMAC).
 				Action().LoadToRegField(TargetOFPortField, f.uplinkPort).
-				Action().LoadRegMark(OFPortFoundRegMark).
+				Action().LoadRegMark(OutputToOFPortRegMark).
 				Action().GotoStage(stageConntrack).
 				Done(),
 		)

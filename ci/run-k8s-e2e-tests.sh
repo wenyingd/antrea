@@ -28,24 +28,26 @@ function echoerr {
 RUN_CONFORMANCE=false
 RUN_WHOLE_CONFORMANCE=false
 RUN_NETWORK_POLICY=false
+RUN_SIG_NETWORK=false
 RUN_E2E_FOCUS=""
 RUN_E2E_SKIP=""
 KUBECONFIG_OPTION=""
 DEFAULT_E2E_CONFORMANCE_FOCUS="\[Conformance\]"
 DEFAULT_E2E_CONFORMANCE_SKIP="\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[sig-cli\]|\[sig-storage\]|\[sig-auth\]|\[sig-api-machinery\]|\[sig-apps\]|\[sig-node\]|\[sig-instrumentation\]"
 DEFAULT_E2E_NETWORKPOLICY_FOCUS="\[Feature:NetworkPolicy\]"
-DEFAULT_E2E_NETWORKPOLICY_SKIP=""
+DEFAULT_E2E_NETWORKPOLICY_SKIP="NetworkPolicyLegacy"
+DEFAULT_E2E_SIG_NETWORK_FOCUS="\[sig-network\]"
+DEFAULT_E2E_SIG_NETWORK_SKIP="\[Slow\]|\[Serial\]|\[Disruptive\]|\[GCE\]|\[Feature:.+\]|\[Feature:IPv6DualStack\]|\[Feature:IPv6DualStackAlphaFeature\]|should create pod that uses dns|should provide Internet connection for containers"
 MODE="report"
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-KUBE_CONFORMANCE_IMAGE_OPTION=""
 KUBE_CONFORMANCE_IMAGE_VERSION_OPTION=""
-IMAGE_PULL_POLICY="Always"
+IMAGE_PULL_POLICY="IfNotPresent"
 CONFORMANCE_IMAGE_CONFIG_PATH="${THIS_DIR}/conformance-image-config.yaml"
-SONOBUOY_IMAGE="projects.registry.vmware.com/sonobuoy/sonobuoy:v0.56.4"
-SYSTEMD_LOGS_IMAGE="projects.registry.vmware.com/sonobuoy/systemd-logs:v0.4"
+SONOBUOY_IMAGE="antrea/sonobuoy:v0.56.16"
+SYSTEMD_LOGS_IMAGE="antrea/systemd-logs:v0.4"
 
 _usage="Usage: $0 [--e2e-conformance] [--e2e-network-policy] [--e2e-focus <TestRegex>] [--e2e-skip <SkipRegex>]
-                  [--kubeconfig <Kubeconfig>] [--kube-conformance-image-version <ConformanceImageVersion>]
+                  [--kubeconfig <Kubeconfig>] [--kubernetes-version <ConformanceImageVersion>]
                   [--log-mode <SonobuoyResultLogLevel>]
 Run the K8s e2e community tests (Conformance & Network Policy) which are relevant to Project Antrea,
 using the sonobuoy tool. Possible exit codes are 0 (all tests pass), 1 (all tests were run, but at
@@ -53,13 +55,13 @@ least one failed) and 2 (internal error when running tests, not a test failure).
         --e2e-conformance                                         Run Conformance tests.
         --e2e-whole-conformance                                   Run whole Conformance tests.
         --e2e-network-policy                                      Run Network Policy tests.
-        --e2e-all                                                 Run both Conformance and Network Policy tests.
+        --e2e-sig-network                                         Run sig-network tests.
+        --e2e-all                                                 Run whole Conformance, Network Policy, and sig-network tests.
         --e2e-focus TestRegex                                     Run only tests matching a specific regex, this is useful to run a single tests for example.
         --e2e-skip TestRegex                                      Skip some tests matching a specific regex.
         --kubeconfig Kubeconfig                                   Explicit path to Kubeconfig file. You may also set the KUBECONFIG environment variable.
-        --kube-conformance-image ConformanceImage                 Container image override for the kube conformance image. Overrides --kube-conformance-image-version.
-        --kube-conformance-image-version ConformanceImageVersion  Use specific version of the Conformance tests container image. Default is $KUBE_CONFORMANCE_IMAGE_VERSION.
-        --log-mode                                                Use the flag to set either 'report', 'detail', or 'dump' level data for sonobouy results.
+        --kubernetes-version ConformanceImageVersion              Use specific version of the Conformance tests container image. Default is $KUBE_CONFORMANCE_IMAGE_VERSION.
+        --log-mode                                                Use the flag to set either 'report', 'detail', or 'dump' level data for sonobuoy results.
         --image-pull-policy                                       The ImagePullPolicy Sonobuoy should use for the aggregators and workers. (default Always)
         --sonobuoy-image SonobuoyImage                            Sonobuoy image to use. Default is $SONOBUOY_IMAGE.
         --help, -h                                                Print this message and exit
@@ -86,12 +88,8 @@ case $key in
     KUBECONFIG_OPTION="--kubeconfig $2"
     shift 2
     ;;
-    --kube-conformance-image)
-    KUBE_CONFORMANCE_IMAGE_OPTION="--kube-conformance-image $2"
-    shift 2
-    ;;
-    --kube-conformance-image-version)
-    KUBE_CONFORMANCE_IMAGE_VERSION_OPTION="--kube-conformance-image-version $2"
+    --kubernetes-version)
+    KUBE_CONFORMANCE_IMAGE_VERSION_OPTION="--kubernetes-version $2"
     shift 2
     ;;
     --e2e-conformance)
@@ -106,9 +104,14 @@ case $key in
     RUN_NETWORK_POLICY=true
     shift
     ;;
+    --e2e-sig-network)
+    RUN_SIG_NETWORK=true
+    shift
+    ;;
     --e2e-all)
-    RUN_CONFORMANCE=true
+    RUN_WHOLE_CONFORMANCE=true
     RUN_NETWORK_POLICY=true
+    RUN_SIG_NETWORK=true
     shift
     ;;
     --e2e-focus)
@@ -165,20 +168,19 @@ function run_sonobuoy() {
     local focus_regex="$1"
     local skip_regex="$2"
 
-    $SONOBUOY delete --wait $KUBECONFIG_OPTION
+    $SONOBUOY delete --wait=10 $KUBECONFIG_OPTION
     echo "Running tests with sonobuoy. While test is running, check logs with: $SONOBUOY $KUBECONFIG_OPTION logs -f."
     set -x
     if [[ "$focus_regex" == "" && "$skip_regex" == "" ]]; then
         $SONOBUOY run --wait \
                 $KUBECONFIG_OPTION \
-                $KUBE_CONFORMANCE_IMAGE_OPTION \
                 $KUBE_CONFORMANCE_IMAGE_VERSION_OPTION \
                 --mode "certified-conformance" --image-pull-policy ${IMAGE_PULL_POLICY} \
                 --sonobuoy-image ${SONOBUOY_IMAGE} --systemd-logs-image ${SYSTEMD_LOGS_IMAGE} --e2e-repo-config ${CONFORMANCE_IMAGE_CONFIG_PATH}
     else
         $SONOBUOY run --wait \
                 $KUBECONFIG_OPTION \
-                $KUBE_CONFORMANCE_IMAGE_OPTION \
+                --e2e-parallel=true \
                 $KUBE_CONFORMANCE_IMAGE_VERSION_OPTION \
                 --e2e-focus "$focus_regex" --e2e-skip "$skip_regex" --image-pull-policy ${IMAGE_PULL_POLICY} \
                 --sonobuoy-image ${SONOBUOY_IMAGE} --systemd-logs-image ${SYSTEMD_LOGS_IMAGE} --e2e-repo-config ${CONFORMANCE_IMAGE_CONFIG_PATH}
@@ -222,6 +224,19 @@ function run_network_policy() {
     run_sonobuoy "${DEFAULT_E2E_NETWORKPOLICY_FOCUS}" "${e2e_skip}"
 }
 
+function run_sig_network() {
+    local e2e_skip="${DEFAULT_E2E_SIG_NETWORK_SKIP}"
+
+    if [[ "$RUN_E2E_FOCUS" != "" ]]; then
+        echo "It is not allowed to specify focus when running sig-network tests"
+        exit 1
+    fi
+    if [[ "$RUN_E2E_SKIP" != "" ]]; then
+        e2e_skip="$RUN_E2E_SKIP"
+    fi
+    run_sonobuoy "${DEFAULT_E2E_SIG_NETWORK_FOCUS}" "${e2e_skip}"
+}
+
 if [[ "$RUN_E2E_FOCUS" != "" ]]; then
     run_sonobuoy "$RUN_E2E_FOCUS" "$RUN_E2E_SKIP"
 fi
@@ -238,8 +253,12 @@ if $RUN_NETWORK_POLICY; then
     run_network_policy
 fi
 
+if $RUN_SIG_NETWORK; then
+    run_sig_network
+fi
+
 echoerr "Deleting sonobuoy resources"
-$SONOBUOY delete --wait $KUBECONFIG_OPTION
+$SONOBUOY delete --wait=10 $KUBECONFIG_OPTION
 
 if [[ $errors -ne 0 ]]; then
     exit 1

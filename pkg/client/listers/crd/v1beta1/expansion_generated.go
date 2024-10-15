@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,3 +23,47 @@ type AntreaAgentInfoListerExpansion interface{}
 // AntreaControllerInfoListerExpansion allows custom methods to be added to
 // AntreaControllerInfoLister.
 type AntreaControllerInfoListerExpansion interface{}
+
+// ClusterGroupListerExpansion allows custom methods to be added to
+// ClusterGroupLister.
+type ClusterGroupListerExpansion interface{}
+
+// ClusterNetworkPolicyListerExpansion allows custom methods to be added to
+// ClusterNetworkPolicyLister.
+type ClusterNetworkPolicyListerExpansion interface{}
+
+// EgressListerExpansion allows custom methods to be added to
+// EgressLister.
+type EgressListerExpansion interface{}
+
+// ExternalIPPoolListerExpansion allows custom methods to be added to
+// ExternalIPPoolLister.
+type ExternalIPPoolListerExpansion interface{}
+
+// GroupListerExpansion allows custom methods to be added to
+// GroupLister.
+type GroupListerExpansion interface{}
+
+// GroupNamespaceListerExpansion allows custom methods to be added to
+// GroupNamespaceLister.
+type GroupNamespaceListerExpansion interface{}
+
+// IPPoolListerExpansion allows custom methods to be added to
+// IPPoolLister.
+type IPPoolListerExpansion interface{}
+
+// NetworkPolicyListerExpansion allows custom methods to be added to
+// NetworkPolicyLister.
+type NetworkPolicyListerExpansion interface{}
+
+// NetworkPolicyNamespaceListerExpansion allows custom methods to be added to
+// NetworkPolicyNamespaceLister.
+type NetworkPolicyNamespaceListerExpansion interface{}
+
+// TierListerExpansion allows custom methods to be added to
+// TierLister.
+type TierListerExpansion interface{}
+
+// TraceflowListerExpansion allows custom methods to be added to
+// TraceflowLister.
+type TraceflowListerExpansion interface{}

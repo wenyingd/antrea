@@ -29,7 +29,7 @@ import (
 	componentbaseconfig "k8s.io/component-base/config"
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/agent"
+	"antrea.io/antrea/pkg/agent/client"
 	"antrea.io/antrea/pkg/signals"
 	"antrea.io/antrea/pkg/util/env"
 	"antrea.io/antrea/pkg/util/k8s"
@@ -37,8 +37,8 @@ import (
 )
 
 func run() error {
-	klog.Infof("Starting Antrea agent simulator (version %s)", version.GetFullVersion())
-	k8sClient, _, _, _, _, err := k8s.CreateClients(componentbaseconfig.ClientConnectionConfiguration{}, "")
+	klog.InfoS("Starting Antrea agent simulator", "version", version.GetFullVersion())
+	k8sClient, _, _, _, _, _, err := k8s.CreateClients(componentbaseconfig.ClientConnectionConfiguration{}, "")
 	if err != nil {
 		return fmt.Errorf("error creating K8s clients: %v", err)
 	}
@@ -49,7 +49,10 @@ func run() error {
 	}
 
 	// Create Antrea Clientset for the given config.
-	antreaClientProvider := agent.NewAntreaClientProvider(componentbaseconfig.ClientConnectionConfiguration{}, k8sClient)
+	antreaClientProvider, err := client.NewAntreaClientProvider(componentbaseconfig.ClientConnectionConfiguration{}, k8sClient)
+	if err != nil {
+		return err
+	}
 
 	if err = antreaClientProvider.RunOnce(); err != nil {
 		return err
@@ -67,7 +70,7 @@ func run() error {
 
 	// Add loop to check whether client is ready
 	attempts := 0
-	if err := wait.PollImmediateUntil(200*time.Millisecond, func() (bool, error) {
+	if err := wait.PollUntilContextCancel(wait.ContextForChannel(stopCh), 200*time.Millisecond, true, func(ctx context.Context) (bool, error) {
 		if attempts%10 == 0 {
 			klog.Info("Waiting for Antrea client to be ready")
 		}
@@ -76,7 +79,7 @@ func run() error {
 			return false, nil
 		}
 		return true, nil
-	}, stopCh); err != nil {
+	}); err != nil {
 		klog.Info("Stopped waiting for Antrea client")
 		return err
 	}

@@ -15,26 +15,26 @@
 package openflow
 
 import (
-	"fmt"
 	"net"
 	"sync"
 
 	"antrea.io/libOpenflow/openflow15"
-	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/openflow/cookie"
 	"antrea.io/antrea/pkg/agent/types"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
 type featureMulticast struct {
-	cookieAllocator cookie.Allocator
-	ipProtocols     []binding.Protocol
-	bridge          binding.Bridge
-	gatewayPort     uint32
-	encapEnabled    bool
-	tunnelPort      uint32
+	cookieAllocator     cookie.Allocator
+	ipProtocols         []binding.Protocol
+	bridge              binding.Bridge
+	gatewayPort         uint32
+	encapEnabled        bool
+	flexibleIPAMEnabled bool
+	tunnelPort          uint32
+	uplinkPort          uint32
+	hostOFPort          uint32
 
 	cachedFlows        *flowCategoryCache
 	groupCache         sync.Map
@@ -47,18 +47,32 @@ func (f *featureMulticast) getFeatureName() string {
 	return "Multicast"
 }
 
-func newFeatureMulticast(cookieAllocator cookie.Allocator, ipProtocols []binding.Protocol, bridge binding.Bridge, anpEnabled bool, gwPort uint32, encapEnabled bool, tunnelPort uint32) *featureMulticast {
+func newFeatureMulticast(
+	cookieAllocator cookie.Allocator,
+	ipProtocols []binding.Protocol,
+	bridge binding.Bridge,
+	anpEnabled bool,
+	gwPort uint32,
+	encapEnabled bool,
+	tunnelPort uint32,
+	uplinkPort uint32,
+	hostOFPort uint32,
+	flexibleIPAMEnabled bool,
+) *featureMulticast {
 	return &featureMulticast{
-		cookieAllocator:    cookieAllocator,
-		ipProtocols:        ipProtocols,
-		cachedFlows:        newFlowCategoryCache(),
-		bridge:             bridge,
-		category:           cookie.Multicast,
-		groupCache:         sync.Map{},
-		enableAntreaPolicy: anpEnabled,
-		gatewayPort:        gwPort,
-		encapEnabled:       encapEnabled,
-		tunnelPort:         tunnelPort,
+		cookieAllocator:     cookieAllocator,
+		ipProtocols:         ipProtocols,
+		cachedFlows:         newFlowCategoryCache(),
+		bridge:              bridge,
+		category:            cookie.Multicast,
+		groupCache:          sync.Map{},
+		enableAntreaPolicy:  anpEnabled,
+		gatewayPort:         gwPort,
+		encapEnabled:        encapEnabled,
+		tunnelPort:          tunnelPort,
+		uplinkPort:          uplinkPort,
+		hostOFPort:          hostOFPort,
+		flexibleIPAMEnabled: flexibleIPAMEnabled,
 	}
 }
 
@@ -72,45 +86,54 @@ func multicastPipelineClassifyFlow(cookieID uint64, pipeline binding.Pipeline) b
 		Done()
 }
 
-func (f *featureMulticast) initFlows() []binding.Flow {
-	cookieID := f.cookieAllocator.Request(f.category).Raw()
-	return f.multicastOutputFlows(cookieID)
+func (f *featureMulticast) initFlows() []*openflow15.FlowMod {
+	// Install flows to send the IGMP report messages to Antrea Agent.
+	flows := f.igmpPktInFlows()
+	// Install flow to forward the IGMP query messages to all local Pods.
+	flows = append(flows, f.externalMulticastReceiverFlow())
+	// Install flows to forward the multicast traffic to antrea-gw0 if no local Pods have joined in the group, and this
+	// is to ensure local Pods can access the external multicast receivers.
+	flows = append(flows, f.multicastSkipIGMPMetricFlows()...)
+	if f.enableAntreaPolicy {
+		flows = append(flows, f.igmpEgressFlow())
+	}
+	// Install flows to output multicast packets.
+	flows = append(flows, f.multicastOutputFlows()...)
+	return GetFlowModMessages(flows, binding.AddMessage)
 }
 
-func (f *featureMulticast) replayFlows() []binding.Flow {
+func (f *featureMulticast) replayFlows() []*openflow15.FlowMod {
 	// Get cached flows.
-	return getCachedFlows(f.cachedFlows)
+	return getCachedFlowMessages(f.cachedFlows)
 }
 
-func (f *featureMulticast) multicastReceiversGroup(groupID binding.GroupIDType, tableID uint8, ports []uint32, remoteIPs []net.IP) error {
-	group := f.bridge.CreateGroupTypeAll(groupID).ResetBuckets()
+// IMPORTANT: Ensure any changes to this function are tested in TestMulticastReceiversGroupMaxBuckets.
+func (f *featureMulticast) multicastReceiversGroup(groupID binding.GroupIDType, tableID uint8, ports []uint32, remoteIPs []net.IP) binding.Group {
+	group := f.bridge.NewGroupTypeAll(groupID)
 	for i := range ports {
 		group = group.Bucket().
-			LoadToRegField(OFPortFoundRegMark.GetField(), OFPortFoundRegMark.GetValue()).
+			LoadToRegField(OutputToOFPortRegMark.GetField(), OutputToOFPortRegMark.GetValue()).
 			LoadToRegField(TargetOFPortField, ports[i]).
 			ResubmitToTable(tableID).
 			Done()
 	}
 	for _, ip := range remoteIPs {
 		group = group.Bucket().
-			LoadToRegField(OFPortFoundRegMark.GetField(), OFPortFoundRegMark.GetValue()).
+			LoadToRegField(OutputToOFPortRegMark.GetField(), OutputToOFPortRegMark.GetValue()).
 			LoadToRegField(TargetOFPortField, f.tunnelPort).
 			SetTunnelDst(ip).
 			ResubmitToTable(MulticastOutputTable.GetID()).
 			Done()
 	}
-	if err := group.Add(); err != nil {
-		return fmt.Errorf("error when installing Multicast receiver Group: %w", err)
-	}
-	f.groupCache.Store(groupID, group)
-	return nil
+	return group
 }
 
-func (f *featureMulticast) multicastOutputFlows(cookieID uint64) []binding.Flow {
+func (f *featureMulticast) multicastOutputFlows() []binding.Flow {
+	cookieID := f.cookieAllocator.Request(f.category).Raw()
 	flows := []binding.Flow{
 		MulticastOutputTable.ofTable.BuildFlow(priorityNormal).
 			Cookie(cookieID).
-			MatchRegMark(OFPortFoundRegMark).
+			MatchRegMark(OutputToOFPortRegMark).
 			Action().OutputToRegField(TargetOFPortField).
 			Done(),
 	}
@@ -124,15 +147,15 @@ func (f *featureMulticast) multicastOutputFlows(cookieID uint64) []binding.Flow 
 		flows = append(flows, MulticastOutputTable.ofTable.BuildFlow(priorityHigh).
 			Cookie(cookieID).
 			MatchRegMark(FromTunnelRegMark).
-			MatchRegMark(OFPortFoundRegMark).
-			MatchRegFieldWithValue(TargetOFPortField, config.HostGatewayOFPort).
+			MatchRegMark(OutputToOFPortRegMark).
+			MatchRegFieldWithValue(TargetOFPortField, f.gatewayPort).
 			Action().Drop().
 			Done(),
 			MulticastOutputTable.ofTable.BuildFlow(priorityHigh).
 				Cookie(cookieID).
 				MatchRegMark(FromGatewayRegMark).
-				MatchRegMark(OFPortFoundRegMark).
-				MatchRegFieldWithValue(TargetOFPortField, config.DefaultTunOFPort).
+				MatchRegMark(OutputToOFPortRegMark).
+				MatchRegFieldWithValue(TargetOFPortField, f.tunnelPort).
 				Action().Drop().
 				Done(),
 		)
@@ -175,15 +198,38 @@ func (f *featureMulticast) multicastPodMetricFlows(podIP net.IP, podOFPort uint3
 	}
 }
 
-func (f *featureMulticast) replayGroups() {
+func (f *featureMulticast) replayGroups() []binding.OFEntry {
+	var groups []binding.OFEntry
 	f.groupCache.Range(func(id, value interface{}) bool {
 		group := value.(binding.Group)
 		group.Reset()
-		if err := group.Add(); err != nil {
-			klog.ErrorS(err, "Error when replaying cached group", "group", id)
-		}
+		groups = append(groups, group)
 		return true
 	})
+	return groups
+}
+
+func (f *featureMulticast) initGroups() []binding.OFEntry {
+	return nil
+}
+
+func (f *featureMulticast) replayMeters() []binding.OFEntry {
+	return nil
+}
+
+func (f *featureMulticast) multicastForwardFlexibleIPAMFlows(table binding.Table) []binding.Flow {
+	ports := []uint32{f.uplinkPort, f.hostOFPort}
+	flows := make([]binding.Flow, 0, len(ports))
+	for _, port := range ports {
+		flows = append(flows, ClassifierTable.ofTable.BuildFlow(priorityHigh).
+			Cookie(f.cookieAllocator.Request(f.category).Raw()).
+			MatchInPort(port).
+			MatchProtocol(binding.ProtocolIP).
+			MatchDstIPNet(*types.McastCIDR).
+			Action().GotoTable(table.GetID()).
+			Done())
+	}
+	return flows
 }
 
 func (f *featureMulticast) multicastRemoteReportFlows(groupID binding.GroupIDType, firstMulticastTable binding.Table) []binding.Flow {
@@ -195,7 +241,6 @@ func (f *featureMulticast) multicastRemoteReportFlows(groupID binding.GroupIDTyp
 			Cookie(f.cookieAllocator.Request(f.category).Raw()).
 			MatchProtocol(binding.ProtocolIGMP).
 			MatchInPort(openflow15.P_CONTROLLER).
-			Action().LoadRegMark(CustomReasonIGMPRegMark).
 			Action().Group(groupID).
 			Done(),
 		// This flow ensures the IGMP report message sent from Antrea Agent to bypass the check in SpoofGuardTable.

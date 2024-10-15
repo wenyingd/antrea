@@ -28,6 +28,7 @@ import (
 	"antrea.io/libOpenflow/protocol"
 	"antrea.io/ofnet/ofctrl"
 	"github.com/miekg/dns"
+	"k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
@@ -36,6 +37,7 @@ import (
 	"antrea.io/antrea/pkg/agent/types"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 	utilsets "antrea.io/antrea/pkg/util/sets"
+	dnsutil "antrea.io/antrea/third_party/dns"
 )
 
 const (
@@ -101,7 +103,7 @@ type ruleRealizationUpdate struct {
 // ruleSyncTracker tracks the realization status of FQDN rules that are
 // applied to workloads on this Node.
 type ruleSyncTracker struct {
-	mutex sync.Mutex
+	mutex sync.RWMutex
 	// updateCh is the channel used by the rule reconciler to report rule realization status.
 	updateCh chan ruleRealizationUpdate
 	// ruleToSubscribers keeps track of the subscribers that are currently subscribed
@@ -113,7 +115,7 @@ type ruleSyncTracker struct {
 	// successful, its ID is removed from this set. Otherwise it will stay in the
 	// dirtyRules set. This is to ensure that the fqdnController does not send
 	// DNS response which has a fqdn rule that previously failed to realize.
-	dirtyRules sets.String
+	dirtyRules sets.Set[string]
 }
 
 type fqdnController struct {
@@ -129,24 +131,24 @@ type fqdnController struct {
 	// FQDN names this controller is tracking, with their corresponding dnsMeta.
 	dnsEntryCache map[string]dnsMeta
 	// FQDN names that needs to be re-queried after their respective TTLs.
-	dnsQueryQueue workqueue.RateLimitingInterface
+	dnsQueryQueue workqueue.TypedRateLimitingInterface[string]
 	// idAllocator provides interfaces to allocateForRule and release uint32 id.
 	idAllocator *idAllocator
 
 	fqdnRuleToPodsMutex sync.Mutex
 	// The mapping between FQDN rule IDs and the Pod's ofPort IDs that the rule selects.
-	fqdnRuleToSelectedPods map[string]sets.Int32
+	fqdnRuleToSelectedPods map[string]sets.Set[int32]
 
 	// Mutex for fqdnToSelectorItem, selectorItemToFQDN and selectorItemToRuleIDs.
 	fqdnSelectorMutex sync.Mutex
 	// fqdnToSelectorItem stores known FQDNSelectorItems that selects the FQDN, for each
 	// FQDN tracked by this controller.
-	fqdnToSelectorItem map[string]map[fqdnSelectorItem]struct{}
+	fqdnToSelectorItem map[string]sets.Set[fqdnSelectorItem]
 	// selectorItemToFQDN is a reversed map of fqdnToSelectorItem. It stores all known
 	// FQDNs that match the fqdnSelectorItem.
-	selectorItemToFQDN map[fqdnSelectorItem]sets.String
+	selectorItemToFQDN map[fqdnSelectorItem]sets.Set[string]
 	// selectorItemToRuleIDs maps fqdnToSelectorItem to the rules that contains the selector.
-	selectorItemToRuleIDs map[fqdnSelectorItem]sets.String
+	selectorItemToRuleIDs map[fqdnSelectorItem]sets.Set[string]
 	ipv4Enabled           bool
 	ipv6Enabled           bool
 	gwPort                uint32
@@ -154,22 +156,27 @@ type fqdnController struct {
 
 func newFQDNController(client openflow.Client, allocator *idAllocator, dnsServerOverride string, dirtyRuleHandler func(string), v4Enabled, v6Enabled bool, gwPort uint32) (*fqdnController, error) {
 	controller := &fqdnController{
-		ofClient:               client,
-		dirtyRuleHandler:       dirtyRuleHandler,
-		ruleSyncTracker:        &ruleSyncTracker{updateCh: make(chan ruleRealizationUpdate, 1), ruleToSubscribers: map[string][]*subscriber{}, dirtyRules: sets.NewString()},
-		idAllocator:            allocator,
-		dnsQueryQueue:          workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "fqdn"),
+		ofClient:         client,
+		dirtyRuleHandler: dirtyRuleHandler,
+		ruleSyncTracker:  &ruleSyncTracker{updateCh: make(chan ruleRealizationUpdate, 1), ruleToSubscribers: map[string][]*subscriber{}, dirtyRules: sets.New[string]()},
+		idAllocator:      allocator,
+		dnsQueryQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "fqdn",
+			},
+		),
 		dnsEntryCache:          map[string]dnsMeta{},
-		fqdnRuleToSelectedPods: map[string]sets.Int32{},
-		fqdnToSelectorItem:     map[string]map[fqdnSelectorItem]struct{}{},
-		selectorItemToFQDN:     map[fqdnSelectorItem]sets.String{},
-		selectorItemToRuleIDs:  map[fqdnSelectorItem]sets.String{},
+		fqdnRuleToSelectedPods: map[string]sets.Set[int32]{},
+		fqdnToSelectorItem:     map[string]sets.Set[fqdnSelectorItem]{},
+		selectorItemToFQDN:     map[fqdnSelectorItem]sets.Set[string]{},
+		selectorItemToRuleIDs:  map[fqdnSelectorItem]sets.Set[string]{},
 		ipv4Enabled:            v4Enabled,
 		ipv6Enabled:            v6Enabled,
 		gwPort:                 gwPort,
 	}
 	if controller.ofClient != nil {
-		if err := controller.ofClient.NewDNSpacketInConjunction(dnsInterceptRuleID); err != nil {
+		if err := controller.ofClient.NewDNSPacketInConjunction(dnsInterceptRuleID); err != nil {
 			return nil, fmt.Errorf("failed to install flow for DNS response interception: %w", err)
 		}
 	}
@@ -179,7 +186,7 @@ func newFQDNController(client openflow.Client, allocator *idAllocator, dnsServer
 	} else {
 		host, port := os.Getenv(kubeDNSServiceHost), os.Getenv(kubeDNSServicePort)
 		if host == "" || port == "" {
-			klog.InfoS("Unable to derive DNS server from the kube-dns Service, will fall back to local resolver")
+			klog.InfoS("Unable to derive DNS server from the kube-dns Service, will fall back to local resolver and DNS names matching the configured cluster domain suffix are not supported")
 			controller.dnsServerAddr = ""
 		} else {
 			controller.dnsServerAddr = net.JoinHostPort(host, port)
@@ -191,6 +198,7 @@ func newFQDNController(client openflow.Client, allocator *idAllocator, dnsServer
 
 // fqdnToSelectorItem converts a FQDN expression to a fqdnSelectorItem.
 func fqdnToSelectorItem(fqdn string) fqdnSelectorItem {
+	fqdn = strings.ToLower(fqdn)
 	if strings.Contains(fqdn, "*") {
 		return fqdnSelectorItem{
 			matchRegex: toRegex(fqdn),
@@ -203,7 +211,6 @@ func fqdnToSelectorItem(fqdn string) fqdnSelectorItem {
 // match FQDNs against.
 func toRegex(pattern string) string {
 	pattern = strings.TrimSpace(pattern)
-	pattern = strings.ToLower(pattern)
 
 	// Replace "." as a regex literal, since it's recogized as a separator in FQDN.
 	pattern = strings.Replace(pattern, ".", "[.]", -1)
@@ -219,15 +226,13 @@ func toRegex(pattern string) string {
 func (f *fqdnController) setFQDNMatchSelector(fqdn string, selectorItem fqdnSelectorItem) {
 	matchedSelectorItems, ok := f.fqdnToSelectorItem[fqdn]
 	if !ok {
-		f.fqdnToSelectorItem[fqdn] = map[fqdnSelectorItem]struct{}{
-			selectorItem: {},
-		}
+		f.fqdnToSelectorItem[fqdn] = sets.New(selectorItem)
 	} else {
-		matchedSelectorItems[selectorItem] = struct{}{}
+		matchedSelectorItems.Insert(selectorItem)
 	}
 	matchedFQDNs, ok := f.selectorItemToFQDN[selectorItem]
 	if !ok {
-		f.selectorItemToFQDN[selectorItem] = sets.NewString(fqdn)
+		f.selectorItemToFQDN[selectorItem] = sets.New[string](fqdn)
 	} else {
 		matchedFQDNs.Insert(fqdn)
 	}
@@ -259,7 +264,7 @@ func (f *fqdnController) getIPsForFQDNSelectors(fqdns []string) []net.IP {
 
 // addFQDNRule adds a new FQDN rule to fqdnSelectorItem mapping, as well as the OFAddresses of
 // Pods selected by the FQDN rule.
-func (f *fqdnController) addFQDNRule(ruleID string, fqdns []string, podOFAddrs sets.Int32) error {
+func (f *fqdnController) addFQDNRule(ruleID string, fqdns []string, podOFAddrs sets.Set[int32]) error {
 	f.addFQDNSelector(ruleID, fqdns)
 	return f.updateRuleSelectedPods(ruleID, podOFAddrs)
 }
@@ -271,31 +276,34 @@ func (f *fqdnController) addFQDNSelector(ruleID string, fqdns []string) {
 		fqdnSelectorItem := fqdnToSelectorItem(fqdn)
 		ruleIDs, exists := f.selectorItemToRuleIDs[fqdnSelectorItem]
 		if !exists {
-			// This is a new fqdnSelectorItem. All existing FQDNs in the cache needs to be matched
-			// against this fqdnSelectorItem to update the mapping.
-			f.selectorItemToRuleIDs[fqdnSelectorItem] = sets.NewString(ruleID)
-			for fqdn := range f.dnsEntryCache {
-				if fqdnSelectorItem.matches(fqdn) {
-					f.setFQDNMatchSelector(fqdn, fqdnSelectorItem)
+			// This is a new fqdnSelectorItem.
+			f.selectorItemToRuleIDs[fqdnSelectorItem] = sets.New[string](ruleID)
+			// Existing FQDNs in the cache needs to be matched against this fqdnSelectorItem to update the mapping.
+			if fqdnSelectorItem.matchRegex != "" {
+				// As the selector matches regex, all existing FQDNs can potentially match it.
+				for fqdn := range f.dnsEntryCache {
+					if fqdnSelectorItem.matches(fqdn) {
+						f.setFQDNMatchSelector(fqdn, fqdnSelectorItem)
+					}
 				}
+			} else {
+				// As the selector matches name, only the FQDN of this name matches it.
+				f.setFQDNMatchSelector(fqdnSelectorItem.matchName, fqdnSelectorItem)
+				// Trigger a DNS query immediately for the FQDN.
+				f.dnsQueryQueue.Add(fqdnSelectorItem.matchName)
 			}
 		} else {
 			f.selectorItemToRuleIDs[fqdnSelectorItem] = ruleIDs.Insert(ruleID)
-		}
-		if fqdnSelectorItem.matchName != "" {
-			// Start a DNS query immediately for matchName selectors.
-			f.setFQDNMatchSelector(fqdnSelectorItem.matchName, fqdnSelectorItem)
-			f.dnsQueryQueue.Add(fqdnSelectorItem.matchName)
 		}
 	}
 }
 
 // updateRuleSelectedPods updates the Pod OFAddresses selected by a FQDN rule. Those addresses
 // are used to create DNS response interception rules.
-func (f *fqdnController) updateRuleSelectedPods(ruleID string, podOFAddrs sets.Int32) error {
+func (f *fqdnController) updateRuleSelectedPods(ruleID string, podOFAddrs sets.Set[int32]) error {
 	f.fqdnRuleToPodsMutex.Lock()
 	defer f.fqdnRuleToPodsMutex.Unlock()
-	originalPodSet, newPodSet := sets.Int32{}, sets.Int32{}
+	originalPodSet, newPodSet := sets.Set[int32]{}, sets.Set[int32]{}
 	for _, pods := range f.fqdnRuleToSelectedPods {
 		utilsets.MergeInt32(originalPodSet, pods)
 	}
@@ -352,15 +360,15 @@ func (f *fqdnController) deleteFQDNSelector(ruleID string, fqdns []string) {
 func (f *fqdnController) cleanupFQDNSelectorItem(fs fqdnSelectorItem) {
 	for fqdn := range f.selectorItemToFQDN[fs] {
 		selectors := f.fqdnToSelectorItem[fqdn]
-		if _, ok := selectors[fs]; ok {
-			if len(selectors) == 1 {
+		if selectors.Has(fs) {
+			selectors.Delete(fs)
+			if len(selectors) == 0 {
 				// the fqdnSelectorItem being deleted is the last fqdnSelectorItem
 				// that selects this FQDN. Hence this FQDN no longer needs to be
 				// tracked by the fqdnController.
 				delete(f.fqdnToSelectorItem, fqdn)
 				delete(f.dnsEntryCache, fqdn)
 			}
-			delete(selectors, fs)
 		}
 	}
 	delete(f.selectorItemToFQDN, fs)
@@ -374,7 +382,7 @@ func (f *fqdnController) deleteRuleSelectedPods(ruleID string) error {
 	if _, exists := f.fqdnRuleToSelectedPods[ruleID]; !exists {
 		return nil
 	}
-	originalPodSet, newPodSet := sets.Int32{}, sets.Int32{}
+	originalPodSet, newPodSet := sets.Set[int32]{}, sets.Set[int32]{}
 	for _, pods := range f.fqdnRuleToSelectedPods {
 		utilsets.MergeInt32(originalPodSet, pods)
 	}
@@ -399,7 +407,6 @@ func (f *fqdnController) onDNSResponse(
 	fqdn string,
 	responseIPs map[string]net.IP,
 	lowestTTL uint32,
-	lookupTime time.Time,
 	waitCh chan error,
 ) {
 	if len(responseIPs) == 0 {
@@ -414,7 +421,7 @@ func (f *fqdnController) onDNSResponse(
 	// addressUpdate is only true if there has been an update in IP addresses
 	// corresponded with the FQDN.
 	mustCacheResponse, addressUpdate := false, false
-	recordTTL := lookupTime.Add(time.Duration(lowestTTL) * time.Second)
+	recordTTL := time.Now().Add(time.Duration(lowestTTL) * time.Second)
 
 	f.fqdnSelectorMutex.Lock()
 	defer f.fqdnSelectorMutex.Unlock()
@@ -462,7 +469,7 @@ func (f *fqdnController) onDNSResponse(
 }
 
 // onDNSResponseMsg handles a DNS response message intercepted.
-func (f *fqdnController) onDNSResponseMsg(dnsMsg *dns.Msg, lookupTime time.Time, waitCh chan error) {
+func (f *fqdnController) onDNSResponseMsg(dnsMsg *dns.Msg, waitCh chan error) {
 	fqdn, responseIPs, lowestTTL, err := f.parseDNSResponse(dnsMsg)
 	if err != nil {
 		klog.V(2).InfoS("Failed to parse DNS response")
@@ -471,7 +478,7 @@ func (f *fqdnController) onDNSResponseMsg(dnsMsg *dns.Msg, lookupTime time.Time,
 		}
 		return
 	}
-	f.onDNSResponse(fqdn, responseIPs, lowestTTL, lookupTime, waitCh)
+	f.onDNSResponse(fqdn, responseIPs, lowestTTL, waitCh)
 }
 
 // syncDirtyRules triggers rule syncs for rules that are affected by the FQDN of DNS response
@@ -481,29 +488,29 @@ func (f *fqdnController) onDNSResponseMsg(dnsMsg *dns.Msg, lookupTime time.Time,
 // wait for another attempt of realization of these rules, before forwarding the response to the
 // original client.
 func (f *fqdnController) syncDirtyRules(fqdn string, waitCh chan error, addressUpdate bool) {
+	if waitCh == nil && !addressUpdate {
+		// No dirty rules to sync
+		return
+	}
+	dirtyRules := sets.New[string]()
+	for selectorItem := range f.fqdnToSelectorItem[fqdn] {
+		utilsets.MergeString(dirtyRules, f.selectorItemToRuleIDs[selectorItem])
+	}
 	if waitCh == nil {
 		if addressUpdate {
-			for selectorItem := range f.fqdnToSelectorItem[fqdn] {
-				for ruleID := range f.selectorItemToRuleIDs[selectorItem] {
-					klog.V(4).InfoS("Reconciling dirty rule", "ruleID", ruleID)
-					f.dirtyRuleHandler(ruleID)
-				}
+			for ruleID := range dirtyRules {
+				klog.V(4).InfoS("Reconciling dirty rule for FQDN address updates", "ruleID", ruleID)
+				f.dirtyRuleHandler(ruleID)
 			}
 		}
 	} else {
-		dirtyRules := sets.NewString()
-		for selectorItem := range f.fqdnToSelectorItem[fqdn] {
-			utilsets.MergeString(dirtyRules, f.selectorItemToRuleIDs[selectorItem])
-		}
 		if !addressUpdate {
-			f.ruleSyncTracker.mutex.Lock()
-			defer f.ruleSyncTracker.mutex.Unlock()
 			// If there is no address update for this FQDN, and rules selecting this FQDN
 			// were all previously realized successfully, then there will be no dirty rules
 			// left to be synced. On the contrary, if some rules that select this FQDN are
 			// still in the dirtyRules set of the ruleSyncTracker, then only those rules
 			// should be retried for reconciliation, and packetOut shall be blocked.
-			dirtyRules = f.ruleSyncTracker.dirtyRules.Intersection(dirtyRules)
+			dirtyRules = f.ruleSyncTracker.getDirtyRules().Intersection(dirtyRules)
 		}
 		if len(dirtyRules) > 0 {
 			klog.V(4).InfoS("Dirty rules blocking packetOut", "dirtyRules", dirtyRules)
@@ -522,7 +529,7 @@ func (f *fqdnController) syncDirtyRules(fqdn string, waitCh chan error, addressU
 // ruleSyncTracker receives a rule realization update, it will decrease the
 // dirty rule count of each subscriber of that rule by one, if the rule is
 // successfully reconciled.
-func (rst *ruleSyncTracker) subscribe(waitCh chan error, dirtyRules sets.String) {
+func (rst *ruleSyncTracker) subscribe(waitCh chan error, dirtyRules sets.Set[string]) {
 	subscriber := &subscriber{waitCh, len(dirtyRules)}
 	rst.mutex.Lock()
 	defer rst.mutex.Unlock()
@@ -530,6 +537,14 @@ func (rst *ruleSyncTracker) subscribe(waitCh chan error, dirtyRules sets.String)
 	for r := range dirtyRules {
 		rst.ruleToSubscribers[r] = append(rst.ruleToSubscribers[r], subscriber)
 	}
+}
+
+// getDirtyRules retrieves the current dirty rule set of ruleSyncTracker.
+func (rst *ruleSyncTracker) getDirtyRules() sets.Set[string] {
+	rst.mutex.RLock()
+	defer rst.mutex.RUnlock()
+	// Must return a copy as the set can be updated in-place by Run func.
+	return rst.dirtyRules.Clone()
 }
 
 func (rst *ruleSyncTracker) Run(stopCh <-chan struct{}) {
@@ -627,12 +642,12 @@ func (f *fqdnController) processNextWorkItem() bool {
 
 	ctx, cancel := context.WithTimeout(context.Background(), dnsRequestTimeout)
 	defer cancel()
-	err := f.makeDNSRequest(ctx, key.(string))
+	err := f.makeDNSRequest(ctx, key)
 	f.handleErr(err, key)
 	return true
 }
 
-func (f *fqdnController) handleErr(err error, key interface{}) {
+func (f *fqdnController) handleErr(err error, key string) {
 	if err == nil {
 		f.dnsQueryQueue.Forget(key)
 		return
@@ -645,7 +660,7 @@ func (f *fqdnController) lookupIP(ctx context.Context, fqdn string) error {
 	const defaultTTL = 600 // 600 seconds, 10 minutes
 	resolver := net.DefaultResolver
 
-	v4ok, v6ok := true, true
+	var errs []error
 
 	makeResponseIPs := func(ips []net.IP) map[string]net.IP {
 		responseIPs := make(map[string]net.IP)
@@ -656,26 +671,21 @@ func (f *fqdnController) lookupIP(ctx context.Context, fqdn string) error {
 	}
 
 	if f.ipv4Enabled {
-		lookupTime := time.Now()
 		if ips, err := resolver.LookupIP(ctx, "ip4", fqdn); err == nil {
-			f.onDNSResponse(fqdn, makeResponseIPs(ips), defaultTTL, lookupTime, nil)
+			f.onDNSResponse(fqdn, makeResponseIPs(ips), defaultTTL, nil)
 		} else {
-			v4ok = false
+			errs = append(errs, fmt.Errorf("DNS request failed for IPv4: %w", err))
 		}
 	}
 	if f.ipv6Enabled {
-		lookupTime := time.Now()
 		if ips, err := resolver.LookupIP(ctx, "ip6", fqdn); err == nil {
-			f.onDNSResponse(fqdn, makeResponseIPs(ips), defaultTTL, lookupTime, nil)
+			f.onDNSResponse(fqdn, makeResponseIPs(ips), defaultTTL, nil)
 		} else {
-			v6ok = false
+			errs = append(errs, fmt.Errorf("DNS request failed for IPv6: %w", err))
 		}
 	}
 
-	if !v4ok || !v6ok {
-		return fmt.Errorf("DNS request failed for at least one network (v4 and/or v6)")
-	}
-	return nil
+	return errors.NewAggregate(errs)
 }
 
 // makeDNSRequest makes a proactive query for a FQDN to the coreDNS service.
@@ -691,85 +701,109 @@ func (f *fqdnController) makeDNSRequest(ctx context.Context, fqdn string) error 
 	if fqdn[len(fqdn)-1] != '.' {
 		fqdnToQuery = fqdn + "."
 	}
-	query := func(m *dns.Msg) (*dns.Msg, error) {
+	query := func(qtype uint16) (*dns.Msg, error) {
+		m := &dns.Msg{}
+		m.SetQuestion(fqdnToQuery, qtype)
 		r, _, err := dnsClient.ExchangeContext(ctx, m, f.dnsServerAddr)
 		if err != nil {
-			klog.ErrorS(err, "DNS exchange failed")
 			return nil, err
 		}
 		return r, nil
 	}
-	v4ok, v6ok := true, true
+	var errs []error
 	if f.ipv4Enabled {
-		m := dns.Msg{}
-		m.SetQuestion(fqdnToQuery, dns.TypeA)
-		lookupTime := time.Now()
-		if res, err := query(&m); err == nil {
-			f.onDNSResponseMsg(res, lookupTime, nil)
+		if res, err := query(dns.TypeA); err == nil {
+			f.onDNSResponseMsg(res, nil)
 		} else {
-			v4ok = false
+			errs = append(errs, fmt.Errorf("DNS request failed for IPv4: %w", err))
 		}
 	}
 	if f.ipv6Enabled {
-		m := dns.Msg{}
-		m.SetQuestion(fqdnToQuery, dns.TypeAAAA)
-		lookupTime := time.Now()
-		if res, err := query(&m); err == nil {
-			f.onDNSResponseMsg(res, lookupTime, nil)
+		if res, err := query(dns.TypeAAAA); err == nil {
+			f.onDNSResponseMsg(res, nil)
 		} else {
-			v6ok = false
+			errs = append(errs, fmt.Errorf("DNS request failed for IPv6: %w", err))
 		}
 	}
-	if !v4ok || !v6ok {
-		return fmt.Errorf("DNS request failed for at least one of type A or AAAA queries")
-	}
-	return nil
+	return errors.NewAggregate(errs)
 }
 
-// implements openflow.PacketInHandler
+// HandlePacketIn implements openflow.PacketInHandler
 func (f *fqdnController) HandlePacketIn(pktIn *ofctrl.PacketIn) error {
-	matches := pktIn.GetMatches()
-	// Get custom reasons in this packet-in.
-	match := getMatchRegField(matches, openflow.CustomReasonField)
-	customReasons, err := getInfoInReg(match, openflow.CustomReasonField.GetRange().ToNXRange())
-	if err != nil {
-		return fmt.Errorf("received error while unloading customReason from reg: %v", err)
-	}
-	if customReasons&openflow.CustomReasonDNS == openflow.CustomReasonDNS {
-		if err := f.handlePacketIn(pktIn); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (f *fqdnController) handlePacketIn(pktIn *ofctrl.PacketIn) error {
 	klog.V(4).InfoS("Received a packetIn for DNS response")
 	waitCh := make(chan error, 1)
-	handleUDPData := func(dnsPkt *protocol.UDP) {
-		dnsData := dnsPkt.Data
+	handleUDP := func(udp *protocol.UDP) {
 		dnsMsg := dns.Msg{}
-		if err := dnsMsg.Unpack(dnsData); err != nil {
-			waitCh <- err
+		if err := dnsMsg.Unpack(udp.Data); err != nil {
+			// A non-DNS response packet or a fragmented DNS response is received. Forward it to the Pod.
+			waitCh <- nil
 			return
 		}
-		f.onDNSResponseMsg(&dnsMsg, time.Now(), waitCh)
+		f.onDNSResponseMsg(&dnsMsg, waitCh)
+	}
+	handleTCP := func(tcpPkt *protocol.TCP) {
+		dnsData, dataLength, err := binding.GetTCPDNSData(tcpPkt)
+		if err != nil {
+			// The packet doesn't contain a valid DNS length field and data. Forward it to the Pod.
+			klog.V(4).InfoS("Unable to get DNS data from the packet, skipping it", "err", err)
+			waitCh <- nil
+			return
+		}
+		dnsMsg := dns.Msg{}
+		if dataLength > len(dnsData) {
+			// This is likely the first fragment containing the length field and partial message of a DNS response.
+			// Usually the first fragment contains the question and answer sections, from which we can get FQDN <-> IP
+			// mapping. So we try to partially unpack it.
+			klog.InfoS("Received a fragmented DNS response, partially unpacking it", "lengthField", dataLength, "actualLength", len(dnsData))
+			if err := dnsutil.UnpackDNSMsgPartially(dnsData, &dnsMsg); err != nil {
+				klog.InfoS("Unable to unpack the DNS response partially, skipping it", "err", err)
+				waitCh <- nil
+				return
+			}
+		} else if err := dnsMsg.Unpack(dnsData); err != nil {
+			// This is likely a non-DNS response packet or a non-first-DNS response packet containing partial message.
+			// Set verbose level to 2 as normally we are not interested in it.
+			klog.V(2).InfoS("Unable to unpack the DNS response, skipping it", "err", err)
+			waitCh <- nil
+			return
+		}
+		f.onDNSResponseMsg(&dnsMsg, waitCh)
 	}
 	go func() {
-		ethernetPkt, err := getEthernetPacket(pktIn)
+		ethernetPkt, err := openflow.GetEthernetPacket(pktIn)
 		if err != nil {
+			// Can't parse the packet. Forward it to the Pod.
+			waitCh <- nil
 			return
 		}
 		switch ipPkt := ethernetPkt.Data.(type) {
 		case *protocol.IPv4:
-			switch dnsPkt := ipPkt.Data.(type) {
-			case *protocol.UDP:
-				handleUDPData(dnsPkt)
+			proto := ipPkt.Protocol
+			switch proto {
+			case protocol.Type_UDP:
+				handleUDP(ipPkt.Data.(*protocol.UDP))
+			case protocol.Type_TCP:
+				tcpPkt, err := binding.GetTCPPacketFromIPMessage(ipPkt)
+				if err != nil {
+					// Can't parse the packet. Forward it to the Pod.
+					waitCh <- nil
+					return
+				}
+				handleTCP(tcpPkt)
 			}
 		case *protocol.IPv6:
-			switch dnsPkt := ipPkt.Data.(type) {
-			case *protocol.UDP:
-				handleUDPData(dnsPkt)
+			proto := ipPkt.NextHeader
+			switch proto {
+			case protocol.Type_UDP:
+				handleUDP(ipPkt.Data.(*protocol.UDP))
+			case protocol.Type_TCP:
+				tcpPkt, err := binding.GetTCPPacketFromIPMessage(ipPkt)
+				if err != nil {
+					// Can't parse the packet. Forward it to the Pod.
+					waitCh <- nil
+					return
+				}
+				handleTCP(tcpPkt)
 			}
 		}
 	}()
@@ -780,74 +814,7 @@ func (f *fqdnController) handlePacketIn(pktIn *ofctrl.PacketIn) error {
 		if err != nil {
 			return fmt.Errorf("error when syncing up rules for DNS reply, dropping packet: %v", err)
 		}
-		klog.V(2).InfoS("Rule sync is successful or not needed, forwarding DNS response to Pod")
-		return f.sendDNSPacketout(pktIn)
+		klog.V(2).InfoS("Rule sync is successful or not needed or a non-DNS response packet was received, forwarding the packet to Pod")
+		return f.ofClient.ResumePausePacket(pktIn)
 	}
-}
-
-// sendDNSPacketout forwards the DNS response packet to the original requesting client.
-func (f *fqdnController) sendDNSPacketout(pktIn *ofctrl.PacketIn) error {
-	var (
-		packetData   []byte
-		srcIP, dstIP string
-		prot         uint8
-		isIPv6       bool
-	)
-	ethernetPkt, err := getEthernetPacket(pktIn)
-	if err != nil {
-		return err
-	}
-	switch ipPkt := ethernetPkt.Data.(type) {
-	case *protocol.IPv4:
-		srcIP = ipPkt.NWSrc.String()
-		dstIP = ipPkt.NWDst.String()
-		prot = ipPkt.Protocol
-		isIPv6 = false
-		switch dnsPkt := ipPkt.Data.(type) {
-		case *protocol.UDP:
-			packetData = dnsPkt.Data
-		}
-	case *protocol.IPv6:
-		srcIP = ipPkt.NWSrc.String()
-		dstIP = ipPkt.NWDst.String()
-		prot = ipPkt.NextHeader
-		isIPv6 = true
-		switch dnsPkt := ipPkt.Data.(type) {
-		case *protocol.UDP:
-			packetData = dnsPkt.Data
-		}
-	}
-	if prot == protocol.Type_UDP {
-		inPort := f.gwPort
-		if inPort == 0 {
-			// Use the original in_port number in the packetIn message to avoid an invalid input port number. Note that,
-			// this should not happen in container case as antrea-gw0 always exists. This check is for security.
-			matches := pktIn.GetMatches()
-			inPortField := matches.GetMatchByName("OXM_OF_IN_PORT")
-			if inPortField != nil {
-				inPort = inPortField.GetValue().(uint32)
-			}
-		}
-		udpSrcPort, udpDstPort, err := binding.GetUDPHeaderData(ethernetPkt.Data)
-		if err != nil {
-			klog.ErrorS(err, "Failed to get UDP header data")
-			return err
-		}
-		mutatePacketOut := func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
-			return packetOutBuilder.AddLoadRegMark(openflow.CustomReasonDNSRegMark)
-		}
-		return f.ofClient.SendUDPPacketOut(
-			ethernetPkt.HWSrc.String(),
-			ethernetPkt.HWDst.String(),
-			srcIP,
-			dstIP,
-			inPort,
-			0,
-			isIPv6,
-			udpSrcPort,
-			udpDstPort,
-			packetData,
-			mutatePacketOut)
-	}
-	return nil
 }

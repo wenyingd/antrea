@@ -32,6 +32,16 @@ import (
 	"antrea.io/antrea/pkg/features"
 )
 
+var (
+	tableColumnDefinitions = []metav1.TableColumnDefinition{
+		{Name: "Name", Type: "string", Format: "name", Description: swaggerMetadataDescriptions["name"]},
+		{Name: "Sessions", Type: "integer", Description: "The sessions count hit by the K8s NetworkPolicy."},
+		{Name: "Packets", Type: "integer", Description: "The packets count hit by the K8s NetworkPolicy."},
+		{Name: "Bytes", Type: "integer", Description: "The bytes count hit by the K8s NetworkPolicy."},
+		{Name: "Created At", Type: "date", Description: swaggerMetadataDescriptions["creationTimestamp"]},
+	}
+)
+
 type REST struct {
 	statsProvider statsProvider
 }
@@ -42,10 +52,11 @@ func NewREST(p statsProvider) *REST {
 }
 
 var (
-	_ rest.Storage = &REST{}
-	_ rest.Scoper  = &REST{}
-	_ rest.Getter  = &REST{}
-	_ rest.Lister  = &REST{}
+	_ rest.Storage              = &REST{}
+	_ rest.Scoper               = &REST{}
+	_ rest.Getter               = &REST{}
+	_ rest.Lister               = &REST{}
+	_ rest.SingularNameProvider = &REST{}
 )
 
 type statsProvider interface {
@@ -56,6 +67,9 @@ type statsProvider interface {
 
 func (r *REST) New() runtime.Object {
 	return &statsv1alpha1.NetworkPolicyStats{}
+}
+
+func (r *REST) Destroy() {
 }
 
 func (r *REST) NewList() runtime.Object {
@@ -101,15 +115,13 @@ func (r *REST) Get(ctx context.Context, name string, options *metav1.GetOptions)
 
 var swaggerMetadataDescriptions = metav1.ObjectMeta{}.SwaggerDoc()
 
+func formatTimestamp(t metav1.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
+
 func (r *REST) ConvertToTable(ctx context.Context, obj runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
 	table := &metav1.Table{
-		ColumnDefinitions: []metav1.TableColumnDefinition{
-			{Name: "Name", Type: "string", Format: "name", Description: swaggerMetadataDescriptions["name"]},
-			{Name: "Sessions", Type: "integer", Description: "The sessions count hit by the K8s NetworkPolicy."},
-			{Name: "Packets", Type: "integer", Description: "The packets count hit by the K8s NetworkPolicy."},
-			{Name: "Bytes", Type: "integer", Description: "The bytes count hit by the K8s NetworkPolicy."},
-			{Name: "Created At", Type: "date", Description: swaggerMetadataDescriptions["creationTimestamp"]},
-		},
+		ColumnDefinitions: tableColumnDefinitions,
 	}
 	if m, err := meta.ListAccessor(obj); err == nil {
 		table.ResourceVersion = m.GetResourceVersion()
@@ -124,11 +136,15 @@ func (r *REST) ConvertToTable(ctx context.Context, obj runtime.Object, tableOpti
 	var err error
 	table.Rows, err = metatable.MetaToTableRow(obj, func(obj runtime.Object, m metav1.Object, name, age string) ([]interface{}, error) {
 		stats := obj.(*statsv1alpha1.NetworkPolicyStats)
-		return []interface{}{name, stats.TrafficStats.Sessions, stats.TrafficStats.Packets, stats.TrafficStats.Bytes, m.GetCreationTimestamp().Time.UTC().Format(time.RFC3339)}, nil
+		return []interface{}{name, stats.TrafficStats.Sessions, stats.TrafficStats.Packets, stats.TrafficStats.Bytes, formatTimestamp(m.GetCreationTimestamp())}, nil
 	})
 	return table, err
 }
 
 func (r *REST) NamespaceScoped() bool {
 	return true
+}
+
+func (r *REST) GetSingularName() string {
+	return "networkpolicystats"
 }

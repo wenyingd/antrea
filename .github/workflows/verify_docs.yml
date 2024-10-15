@@ -8,14 +8,15 @@ on:
 jobs:
   verify:
     name: Verify docs and spelling
+    if: github.repository == 'antrea-io/antrea'
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     - name: Run verify scripts
       run: make verify
     - name: Checking for broken Markdown links for main branch
@@ -26,5 +27,5 @@ jobs:
         config-file: 'hack/.md_links_config.json'
     - name: Markdownlint
       run: |
-        sudo npm install -g markdownlint-cli@0.31.1
+        sudo npm install -g markdownlint-cli@0.38.0
         make markdownlint 

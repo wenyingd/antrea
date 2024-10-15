@@ -39,13 +39,13 @@ import (
 )
 
 const (
-	crdName        = "antrea-controller"
 	controllerName = "AntreaControllerMonitor"
 	// How long to wait before retrying the processing of a Node/ExternalNode change.
 	minRetryDelay = 5 * time.Second
 	maxRetryDelay = 300 * time.Second
 	// Default number of workers processing a Node/ExternalNode change.
-	defaultWorkers = 4
+	defaultWorkers        = 4
+	agentInfoResourceKind = "AntreaAgentInfo"
 )
 
 var (
@@ -66,8 +66,8 @@ type controllerMonitor struct {
 
 	externalNodeEnabled bool
 
-	nodeQueue         workqueue.RateLimitingInterface
-	externalNodeQueue workqueue.RateLimitingInterface
+	nodeQueue         workqueue.TypedRateLimitingInterface[string]
+	externalNodeQueue workqueue.TypedRateLimitingInterface[string]
 
 	querier controllerquerier.ControllerQuerier
 	// controllerCRD is the desired state of controller monitoring CRD which controllerMonitor expects.
@@ -83,11 +83,16 @@ func NewControllerMonitor(
 	externalNodeEnabled bool,
 ) *controllerMonitor {
 	m := &controllerMonitor{
-		client:              client,
-		nodeInformer:        nodeInformer,
-		nodeLister:          nodeInformer.Lister(),
-		nodeListerSynced:    nodeInformer.Informer().HasSynced,
-		nodeQueue:           workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "node"),
+		client:           client,
+		nodeInformer:     nodeInformer,
+		nodeLister:       nodeInformer.Lister(),
+		nodeListerSynced: nodeInformer.Informer().HasSynced,
+		nodeQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "node",
+			},
+		),
 		querier:             querier,
 		controllerCRD:       nil,
 		externalNodeEnabled: externalNodeEnabled,
@@ -102,7 +107,12 @@ func NewControllerMonitor(
 		m.externalNodeInformer = externalNodeInformer
 		m.externalNodeLister = externalNodeInformer.Lister()
 		m.externalNodeListerSynced = externalNodeInformer.Informer().HasSynced
-		m.externalNodeQueue = workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "externalNode")
+		m.externalNodeQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "externalNode",
+			},
+		)
 		externalNodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    m.enqueueExternalNode,
 			UpdateFunc: nil,
@@ -128,17 +138,22 @@ func (monitor *controllerMonitor) Run(stopCh <-chan struct{}) {
 		return
 	}
 
-	monitor.deleteStaleAgentCRDs()
-
 	// Sync controller monitoring CRD every minute util stopCh is closed.
 	go wait.Until(monitor.syncControllerCRD, time.Minute, stopCh)
 
+	if !monitor.antreaAgentInfoAPIAvailable(stopCh) {
+		klog.InfoS("The AntreaAgentInfo API is unavailable, will not run node workers")
+		return
+	}
+	monitor.deleteStaleAgentCRDs()
 	for i := 0; i < defaultWorkers; i++ {
 		go wait.Until(monitor.nodeWorker, time.Second, stopCh)
 		if monitor.externalNodeEnabled {
 			go wait.Until(monitor.externalNodeWorker, time.Second, stopCh)
 		}
 	}
+
+	<-stopCh
 }
 
 func (monitor *controllerMonitor) syncControllerCRD() {
@@ -151,10 +166,10 @@ func (monitor *controllerMonitor) syncControllerCRD() {
 		monitor.controllerCRD = nil
 	}
 
-	monitor.controllerCRD, err = monitor.getControllerCRD(crdName)
+	monitor.controllerCRD, err = monitor.getControllerCRD(v1beta1.AntreaControllerInfoResourceName)
 
 	if errors.IsNotFound(err) {
-		monitor.controllerCRD, err = monitor.createControllerCRD(crdName)
+		monitor.controllerCRD, err = monitor.createControllerCRD(v1beta1.AntreaControllerInfoResourceName)
 		if err != nil {
 			klog.ErrorS(err, "Failed to create controller monitoring CRD")
 			monitor.controllerCRD = nil
@@ -185,14 +200,14 @@ func (monitor *controllerMonitor) createControllerCRD(crdName string) (*v1beta1.
 	controllerCRD := new(v1beta1.AntreaControllerInfo)
 	controllerCRD.Name = crdName
 	monitor.querier.GetControllerInfo(controllerCRD, false)
-	klog.V(2).Infof("Creating controller monitoring CRD %+v", controllerCRD)
+	klog.V(2).InfoS("Creating controller monitoring CRD", "name", klog.KObj(controllerCRD))
 	return monitor.client.CrdV1beta1().AntreaControllerInfos().Create(context.TODO(), controllerCRD, metav1.CreateOptions{})
 }
 
 // updateControllerCRD updates the monitoring CRD.
 func (monitor *controllerMonitor) updateControllerCRD(partial bool) (*v1beta1.AntreaControllerInfo, error) {
 	monitor.querier.GetControllerInfo(monitor.controllerCRD, partial)
-	klog.V(2).Infof("Updating controller monitoring CRD %+v, partial: %t", monitor.controllerCRD, partial)
+	klog.V(2).InfoS("Updating controller monitoring CRD", "name", klog.KObj(monitor.controllerCRD), "partial", partial)
 	return monitor.client.CrdV1beta1().AntreaControllerInfos().Update(context.TODO(), monitor.controllerCRD, metav1.UpdateOptions{})
 }
 
@@ -204,12 +219,12 @@ func (monitor *controllerMonitor) deleteStaleAgentCRDs() {
 		klog.ErrorS(err, "Failed to list agent monitoring CRDs")
 		return
 	}
-	existingNames := sets.NewString()
+	existingNames := sets.New[string]()
 	for _, crd := range crds.Items {
 		existingNames.Insert(crd.Name)
 	}
 	// Delete stale agent monitoring CRD based on existing Nodes and ExternalNodes.
-	expectedNames := sets.NewString()
+	expectedNames := sets.New[string]()
 	nodes, err := monitor.nodeLister.List(labels.Everything())
 	if err != nil {
 		klog.ErrorS(err, "Failed to list nodes")
@@ -229,7 +244,7 @@ func (monitor *controllerMonitor) deleteStaleAgentCRDs() {
 		}
 	}
 	staleSet := existingNames.Difference(expectedNames)
-	for _, name := range staleSet.List() {
+	for _, name := range sets.List(staleSet) {
 		monitor.deleteAgentCRD(name)
 	}
 }
@@ -257,17 +272,13 @@ func (n *controllerMonitor) externalNodeWorker() {
 }
 
 func (c *controllerMonitor) processNextNodeWorkItem() bool {
-	obj, quit := c.nodeQueue.Get()
+	key, quit := c.nodeQueue.Get()
 	if quit {
 		return false
 	}
-	defer c.nodeQueue.Done(obj)
+	defer c.nodeQueue.Done(key)
 
-	if key, ok := obj.(string); !ok {
-		c.nodeQueue.Forget(obj)
-		klog.Errorf("Expected string in Node work queue but got %#v", obj)
-		return true
-	} else if err := c.syncNode(key); err == nil {
+	if err := c.syncNode(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.nodeQueue.Forget(key)
@@ -280,17 +291,13 @@ func (c *controllerMonitor) processNextNodeWorkItem() bool {
 }
 
 func (c *controllerMonitor) processNextExternalNodeWorkItem() bool {
-	obj, quit := c.externalNodeQueue.Get()
+	key, quit := c.externalNodeQueue.Get()
 	if quit {
 		return false
 	}
-	defer c.externalNodeQueue.Done(obj)
+	defer c.externalNodeQueue.Done(key)
 
-	if key, ok := obj.(string); !ok {
-		c.externalNodeQueue.Forget(obj)
-		klog.Errorf("Expected string in ExternalNode work queue but got %#v", obj)
-		return true
-	} else if err := c.syncExternalNode(key); err == nil {
+	if err := c.syncExternalNode(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.externalNodeQueue.Forget(key)
@@ -364,4 +371,39 @@ func (monitor *controllerMonitor) deleteAgentCRD(name string) error {
 		}
 	}
 	return nil
+}
+
+func (monitor *controllerMonitor) antreaAgentInfoAPIAvailable(stopCh <-chan struct{}) bool {
+	groupVersion := v1beta1.SchemeGroupVersion.String()
+	checkFunc := func() (done bool, err error) {
+		resources, err := monitor.client.Discovery().ServerResourcesForGroupVersion(groupVersion)
+		if err != nil {
+			if !errors.IsNotFound(err) {
+				return false, err
+			}
+			klog.InfoS("No server resources found for GroupVersion", "groupVersion", groupVersion)
+			return false, nil
+		}
+		for _, resource := range resources.APIResources {
+			if resource.Kind == agentInfoResourceKind {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	found := false
+	if err := wait.PollUntilContextCancel(wait.ContextForChannel(stopCh), time.Second*10, true, func(ctx context.Context) (done bool, err error) {
+		var checkErr error
+		found, checkErr = checkFunc()
+		if checkErr != nil {
+			klog.ErrorS(err, "Error getting server resources for GroupVersion, will retry after 10s", "groupVersion", groupVersion)
+			return false, nil
+		}
+		return true, nil
+	}); err != nil {
+		klog.ErrorS(err, "Failed to get server resources for GroupVersion", "groupVersion", groupVersion)
+		found = false
+	}
+	return found
 }

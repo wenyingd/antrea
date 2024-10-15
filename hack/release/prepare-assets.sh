@@ -49,12 +49,16 @@ pushd $THIS_DIR/../.. > /dev/null
 mkdir -p "$1"
 OUTPUT_DIR=$(cd "$1" && pwd)
 
+# Cgo should always be disabled for release assets.
+export CGO_ENABLED=0
+
 ANTREA_BUILDS=(
     "linux amd64 linux-x86_64"
     "linux arm64 linux-arm64"
     "linux arm linux-arm"
     "windows amd64 windows-x86_64.exe"
     "darwin amd64 darwin-x86_64"
+    "darwin arm64 darwin-arm64"
 )
 
 for build in "${ANTREA_BUILDS[@]}"; do
@@ -63,38 +67,62 @@ for build in "${ANTREA_BUILDS[@]}"; do
     arch="${args[1]}"
     suffix="${args[2]}"
 
-    # cgo is disabled by default when cross-compiling, but enabled by default
-    # for native builds. We ensure it is always disabled for portability since
-    # these binaries will be distributed as release assets.
-    GOOS=$os GOARCH=$arch CGO_ENABLED=0 ANTCTL_BINARY_NAME="antctl-$suffix" BINDIR="$OUTPUT_DIR"/ make antctl-release
-    cd ./plugins/octant && GOOS=$os GOARCH=$arch CGO_ENABLED=0 ANTREA_OCTANT_PLUGIN_BINARY_NAME="antrea-octant-plugin-$suffix" \
-    BINDIR="$OUTPUT_DIR" make antrea-octant-plugin-release && cd ../..
+    GOOS=$os GOARCH=$arch ANTCTL_BINARY_NAME="antctl-$suffix" BINDIR="$OUTPUT_DIR" make antctl-release
 done
 
-# the windows-bin Makefile target builds antrea-cni and antrea-agent with cgo
-# explicitly disabled.
-BINDIR="$OUTPUT_DIR" make windows-bin
+ANTREA_AGENT_BUILDS=(
+    "linux amd64 linux-x86_64"
+    "linux arm64 linux-arm64"
+    "linux arm linux-arm"
+    "windows amd64 windows-x86_64.exe"
+)
+
+for build in "${ANTREA_AGENT_BUILDS[@]}"; do
+    args=($build)
+    os="${args[0]}"
+    arch="${args[1]}"
+    suffix="${args[2]}"
+
+    GOOS=$os GOARCH=$arch BINDIR="$OUTPUT_DIR" ANTREA_AGENT_BINARY_NAME="antrea-agent-$suffix" make antrea-agent-release
+done
+
+ANTREA_CNI_BUILDS=(
+    "windows amd64 windows-x86_64.exe"
+)
+
+for build in "${ANTREA_CNI_BUILDS[@]}"; do
+    args=($build)
+    os="${args[0]}"
+    arch="${args[1]}"
+    suffix="${args[2]}"
+
+    GOOS=$os GOARCH=$arch BINDIR="$OUTPUT_DIR" ANTREA_CNI_BINARY_NAME="antrea-cni-$suffix" make antrea-cni-release
+done
+
 sed "s/AntreaVersion=\"latest\"/AntreaVersion=\"$VERSION\"/" ./hack/windows/Start-AntreaAgent.ps1 > "$OUTPUT_DIR"/Start-AntreaAgent.ps1
+
+cp ./hack/externalnode/install-vm.sh "$OUTPUT_DIR/"
+cp ./hack/externalnode/install-vm.ps1 "$OUTPUT_DIR/"
 
 export IMG_TAG=$VERSION
 
-export IMG_NAME=projects.registry.vmware.com/antrea/antrea-ubuntu
+export AGENT_IMG_NAME=antrea/antrea-agent-ubuntu
+export CONTROLLER_IMG_NAME=antrea/antrea-controller-ubuntu
 ./hack/generate-standard-manifests.sh --mode release --out "$OUTPUT_DIR"
 
-export IMG_NAME=projects.registry.vmware.com/antrea/octant-antrea-ubuntu
-./hack/generate-manifest-octant.sh --mode release > "$OUTPUT_DIR"/antrea-octant.yml
-
-export IMG_NAME=projects.registry.vmware.com/antrea/antrea-windows
+export IMG_NAME=antrea/antrea-windows
 ./hack/generate-manifest-windows.sh --mode release > "$OUTPUT_DIR"/antrea-windows.yml
+./hack/generate-manifest-windows.sh --mode release --include-ovs > "$OUTPUT_DIR"/antrea-windows-with-ovs.yml
 
-export IMG_NAME=projects.registry.vmware.com/antrea/flow-aggregator
+export IMG_NAME=antrea/flow-aggregator
 ./hack/generate-manifest-flow-aggregator.sh --mode release > "$OUTPUT_DIR"/flow-aggregator.yml
 
 # Generate multicluster manifests
-export IMG_NAME=projects.registry.vmware.com/antrea/antrea-mc-controller
+export IMG_NAME=antrea/antrea-mc-controller
 cd multicluster
 ./hack/generate-manifest.sh -g > "$OUTPUT_DIR"/antrea-multicluster-leader-global.yml
-./hack/generate-manifest.sh -r -l antrea-multicluster > "$OUTPUT_DIR"/antrea-multicluster-leader-namespaced.yml
+./hack/generate-manifest.sh -r -n antrea-multicluster > "$OUTPUT_DIR"/antrea-multicluster-leader-namespaced.yml
+./hack/generate-manifest.sh -r -l antrea-multicluster > "$OUTPUT_DIR"/antrea-multicluster-leader.yml
 ./hack/generate-manifest.sh -r -m > "$OUTPUT_DIR"/antrea-multicluster-member.yml
 cd -
 

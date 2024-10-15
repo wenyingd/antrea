@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -24,8 +24,6 @@ import (
 	fakecrdv1alpha1 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1alpha1/fake"
 	crdv1alpha2 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1alpha2"
 	fakecrdv1alpha2 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1alpha2/fake"
-	crdv1alpha3 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1alpha3"
-	fakecrdv1alpha3 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1alpha3/fake"
 	crdv1beta1 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1beta1"
 	fakecrdv1beta1 "antrea.io/antrea/pkg/client/clientset/versioned/typed/crd/v1beta1/fake"
 	statsv1alpha1 "antrea.io/antrea/pkg/client/clientset/versioned/typed/stats/v1alpha1"
@@ -41,8 +39,12 @@ import (
 
 // NewSimpleClientset returns a clientset that will respond with the provided objects.
 // It's backed by a very simple object tracker that processes creates, updates and deletions as-is,
-// without applying any validations and/or defaults. It shouldn't be considered a replacement
+// without applying any field management, validations and/or defaults. It shouldn't be considered a replacement
 // for a real clientset and is mostly useful in simple unit tests.
+//
+// DEPRECATED: NewClientset replaces this with support for field management, which significantly improves
+// server side apply testing. NewClientset is only available when apply configurations are generated (e.g.
+// via --with-applyconfig).
 func NewSimpleClientset(objects ...runtime.Object) *Clientset {
 	o := testing.NewObjectTracker(scheme, codecs.UniversalDecoder())
 	for _, obj := range objects {
@@ -102,11 +104,6 @@ func (c *Clientset) CrdV1alpha1() crdv1alpha1.CrdV1alpha1Interface {
 // CrdV1alpha2 retrieves the CrdV1alpha2Client
 func (c *Clientset) CrdV1alpha2() crdv1alpha2.CrdV1alpha2Interface {
 	return &fakecrdv1alpha2.FakeCrdV1alpha2{Fake: &c.Fake}
-}
-
-// CrdV1alpha3 retrieves the CrdV1alpha3Client
-func (c *Clientset) CrdV1alpha3() crdv1alpha3.CrdV1alpha3Interface {
-	return &fakecrdv1alpha3.FakeCrdV1alpha3{Fake: &c.Fake}
 }
 
 // CrdV1beta1 retrieves the CrdV1beta1Client

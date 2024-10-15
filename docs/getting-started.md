@@ -54,7 +54,7 @@ should work with Antrea, starting with version 7.4.
 
 In case a node does not have a supported OVS module installed,
 you can install it following the instructions at:
-[Installing Open vSwitch](https://docs.openvswitch.org/en/latest/intro/install).
+[Installing Open vSwitch](https://docs.openvswitch.org/en/latest/intro/install/).
 Please be aware that the `vport-stt` module is not in the Linux tree and needs to be
 built from source, please build and load it manually before STT tunneling is enabled.
 
@@ -69,7 +69,7 @@ encountered when running Antrea on specific OSes are documented
 There are also a few network prerequisites which need to be satisfied, and they depend
 on the tunnel mode you choose, please check [network requirements](./network-requirements.md).
 
-## Installation
+## Installation / Upgrade
 
 To deploy a released version of Antrea, pick a deployment manifest from the
 [list of releases](https://github.com/antrea-io/antrea/releases). For any
@@ -80,11 +80,14 @@ kubectl apply -f https://github.com/antrea-io/antrea/releases/download/<TAG>/ant
 ```
 
 To deploy the latest version of Antrea (built from the main branch), use the
-checked-in [deployment yaml](/build/yamls/antrea.yml):
+checked-in [deployment yaml](../build/yamls/antrea.yml):
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/antrea-io/antrea/main/build/yamls/antrea.yml
 ```
+
+You can use the same `kubectl apply` command to upgrade to a more recent version
+of Antrea.
 
 Antrea supports some experimental features that can be enabled or disabled,
 please refer to the [Feature Gates documentation](feature-gates.md) for more
@@ -100,8 +103,9 @@ If you want to add Windows Nodes to your cluster, please refer to these
 Starting with v1.0, Antrea supports arm64 and arm/v7 Nodes. The installation
 instructions do not change when some (or all) Linux Nodes in a cluster use an
 ARM architecture: the same deployment YAML can be used, as the
-`antrea/antrea-ubuntu` Docker image is actually a manifest list with support for
-the amd64, arm64 and arm/v7 architectures.
+`antrea/antrea-agent-ubuntu` and `antrea/antrea-controller-ubuntu` Docker images
+are actually manifest lists with support for the amd64, arm64 and arm/v7
+architectures.
 
 Note that while we do run a subset of the Kubernetes conformance tests on both
 the arm/v7 and arm64 Docker images (using [k3s](https://k3s.io/) as the
@@ -137,7 +141,7 @@ following:
 2. Delete Flannel bridge and tunnel interface with `ip link delete flannel.1 &&
 ip link delete flannel cni0` **on each Node**.
 3. Ensure [requirements](#ensuring-requirements-are-satisfied) are satisfied.
-4. [Deploy Antrea](#installation).
+4. [Deploy Antrea](#installation--upgrade).
 5. Drain and uncordon Nodes one-by-one. For each Node, run `kubectl drain
 --ignore-daemonsets <node name> && kubectl uncordon <node name>`. The
 `--ignore-daemonsets` flag will ignore DaemonSet-managed Pods, including the
@@ -160,6 +164,11 @@ please refer to this [guide](kind.md).
 
 To deploy Antrea in a [Minikube](https://github.com/kubernetes/minikube) cluster,
 please refer to this [guide](minikube.md).
+
+### Deploying Antrea in Rancher Managed Cluster
+
+To deploy Antrea in a [Rancher](https://github.com/rancher/rancher) managed cluster,
+please refer to this [guide](kubernetes-installers.md#rancher).
 
 ### Deploying Antrea in AKS, EKS, and GKE
 
@@ -212,11 +221,12 @@ are in different subnets, but does not encapsulate when the source and the
 destination Nodes are in the same subnet. Refer to [this guide](noencap-hybrid-modes.md)
 to learn how to configure Antrea with `NoEncap` or `Hybrid` mode.
 
-### Octant UI
+### Antrea Web UI
 
-Antrea ships with an Octant UI plugin which can show runtime information of Antrea
-components and perform Antrea Traceflow operations. Refer to [this guide](octant-plugin-installation.md)
-to learn how to install Octant and the Antrea plugin.
+Antrea comes with a web UI, which can show runtime information of Antrea
+components and perform Antrea Traceflow operations. Please refer to the [Antrea
+UI repository](https://github.com/antrea-io/antrea-ui) for installation
+instructions and more information.
 
 ### OVS Hardware Offload
 

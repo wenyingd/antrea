@@ -7,7 +7,7 @@ metadata:
 spec:
   group: crd.antrea.io
   versions:
-    - name: v1alpha2
+    - name: v1beta1
       served: true
       storage: true
       schema:
@@ -46,6 +46,25 @@ spec:
                         oneOf:
                           - format: ipv4
                           - format: ipv6
+                subnetInfo:
+                  type: object
+                  required:
+                    - gateway
+                    - prefixLength
+                  properties:
+                    gateway:
+                      type: string
+                      oneOf:
+                        - format: ipv4
+                        - format: ipv6
+                    prefixLength:
+                      type: integer
+                      minimum: 1
+                      maximum: 127
+                    vlan:
+                      type: integer
+                      minimum: 0
+                      maximum: 4094
                 nodeSelector:
                   type: object
                   properties:
@@ -69,7 +88,10 @@ spec:
                         type: object
                       type: array
                     matchLabels:
-                      x-kubernetes-preserve-unknown-fields: true
+                      additionalProperties:
+                        type: string
+                        pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                      type: object
             status:
               type: object
               properties:
@@ -93,7 +115,7 @@ spec:
           name: Age
           type: date
       subresources:
-        status: {}
+        status: { }
   scope: Cluster
   names:
     plural: externalippools

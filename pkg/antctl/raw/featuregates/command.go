@@ -18,8 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -28,25 +28,33 @@ import (
 
 	"antrea.io/antrea/pkg/antctl/raw"
 	"antrea.io/antrea/pkg/antctl/runtime"
+	"antrea.io/antrea/pkg/apiserver/apis"
 	"antrea.io/antrea/pkg/apiserver/handlers/featuregates"
 	antrea "antrea.io/antrea/pkg/client/clientset/versioned"
 )
 
 var Command *cobra.Command
+var getClients = getConfigAndClients
+var getRestClient = getRestClientByMode
+
+var option = &struct {
+	insecure bool
+}{}
 
 func init() {
 	Command = &cobra.Command{
 		Use:   "featuregates",
-		Short: "Get feature gates list",
+		Short: "Print Antrea feature gates",
 	}
 	if runtime.Mode == runtime.ModeAgent {
 		Command.RunE = agentRunE
-		Command.Long = "Get current Antrea agent feature gates info"
+		Command.Long = "Print current Antrea agent feature gates info"
 	} else if runtime.Mode == runtime.ModeController && runtime.InPod {
 		Command.RunE = controllerLocalRunE
-		Command.Long = "Get Antrea feature gates info including Controller and Agent"
+		Command.Long = "Print Antrea feature gates info including Controller and Agent"
 	} else if runtime.Mode == runtime.ModeController && !runtime.InPod {
-		Command.Long = "Get Antrea feature gates info including Controller and Agent"
+		Command.Long = "Print Antrea feature gates info including Controller and Agent"
+		Command.Flags().BoolVar(&option.insecure, "insecure", false, "Skip TLS verification when connecting to Antrea API.")
 		Command.RunE = controllerRemoteRunE
 	}
 }
@@ -64,58 +72,81 @@ func controllerRemoteRunE(cmd *cobra.Command, _ []string) error {
 }
 
 func featureGateRequest(cmd *cobra.Command, mode string) error {
-	kubeconfig, err := raw.ResolveKubeconfig(cmd)
+	ctx := cmd.Context()
+	kubeconfig, k8sClientset, antreaClientset, err := getClients(cmd)
 	if err != nil {
 		return err
 	}
-	kubeconfig.GroupVersion = &schema.GroupVersion{Group: "", Version: ""}
-	restconfigTmpl := rest.CopyConfig(kubeconfig)
-	raw.SetupKubeconfig(restconfigTmpl)
-	if server, err := Command.Flags().GetString("server"); err != nil {
-		kubeconfig.Host = server
-	}
 
-	k8sClientset, antreaClientset, err := raw.SetupClients(kubeconfig)
+	client, err := getRestClient(ctx, kubeconfig, k8sClientset, antreaClientset, mode)
 	if err != nil {
-		return fmt.Errorf("failed to create clientset: %w", err)
+		return err
 	}
 
-	var resp []featuregates.Response
-	var client *rest.RESTClient
-
-	switch mode {
-	case runtime.ModeAgent, runtime.ModeController:
-		client, err = rest.RESTClientFor(restconfigTmpl)
-	case "remote":
-		client, err = getControllerClient(k8sClientset, antreaClientset, restconfigTmpl)
-	}
-	if err != nil {
-		return fmt.Errorf("fail to create rest client: %w", err)
-	}
-
+	var resp []apis.FeatureGateResponse
 	if resp, err = getFeatureGatesRequest(client); err != nil {
 		return err
 	}
-	var agentGates []featuregates.Response
-	var controllerGates []featuregates.Response
+	var agentGates []apis.FeatureGateResponse
+	var agentWindowsGates []apis.FeatureGateResponse
+	var controllerGates []apis.FeatureGateResponse
 	for _, v := range resp {
-		if v.Component == "agent" {
+		switch v.Component {
+		case featuregates.AgentMode:
 			agentGates = append(agentGates, v)
-		} else {
+		case featuregates.AgentWindowsMode:
+			agentWindowsGates = append(agentWindowsGates, v)
+		case featuregates.ControllerMode:
 			controllerGates = append(controllerGates, v)
 		}
 	}
 	if len(agentGates) > 0 {
-		fmt.Println(output(agentGates, runtime.ModeAgent))
+		output(agentGates, featuregates.AgentMode, cmd.OutOrStdout())
+	}
+	if len(agentWindowsGates) > 0 {
+		output(agentWindowsGates, featuregates.AgentWindowsMode, cmd.OutOrStdout())
 	}
 	if len(controllerGates) > 0 {
-		fmt.Println(output(controllerGates, runtime.ModeController))
+		output(controllerGates, featuregates.ControllerMode, cmd.OutOrStdout())
 	}
 	return nil
 }
 
-func getControllerClient(k8sClientset kubernetes.Interface, antreaClientset antrea.Interface, cfgTmpl *rest.Config) (*rest.RESTClient, error) {
-	controllerClientCfg, err := raw.CreateControllerClientCfg(k8sClientset, antreaClientset, cfgTmpl)
+func getConfigAndClients(cmd *cobra.Command) (*rest.Config, kubernetes.Interface, antrea.Interface, error) {
+	kubeconfig, err := raw.ResolveKubeconfig(cmd)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if server, _ := Command.Flags().GetString("server"); server != "" {
+		kubeconfig.Host = server
+	}
+	k8sClientset, antreaClientset, err := raw.SetupClients(kubeconfig)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create clientset: %w", err)
+	}
+	return kubeconfig, k8sClientset, antreaClientset, nil
+}
+
+func getRestClientByMode(ctx context.Context, kubeconfig *rest.Config, k8sClientset kubernetes.Interface, antreaClientset antrea.Interface, mode string) (*rest.RESTClient, error) {
+	cfg := rest.CopyConfig(kubeconfig)
+	cfg.GroupVersion = &schema.GroupVersion{Group: "", Version: ""}
+	var err error
+	var client *rest.RESTClient
+	switch mode {
+	case runtime.ModeAgent, runtime.ModeController:
+		raw.SetupLocalKubeconfig(cfg)
+		client, err = rest.RESTClientFor(cfg)
+	case "remote":
+		client, err = getControllerClient(ctx, k8sClientset, antreaClientset, cfg, option.insecure)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rest client: %w", err)
+	}
+	return client, nil
+}
+
+func getControllerClient(ctx context.Context, k8sClientset kubernetes.Interface, antreaClientset antrea.Interface, kubeconfig *rest.Config, insecure bool) (*rest.RESTClient, error) {
+	controllerClientCfg, err := raw.CreateControllerClientCfg(ctx, k8sClientset, antreaClientset, kubeconfig, insecure)
 	if err != nil {
 		return nil, fmt.Errorf("error when creating controller client config: %w", err)
 	}
@@ -126,8 +157,8 @@ func getControllerClient(k8sClientset kubernetes.Interface, antreaClientset antr
 	return controllerClient, nil
 }
 
-func getFeatureGatesRequest(client *rest.RESTClient) ([]featuregates.Response, error) {
-	var resp []featuregates.Response
+func getFeatureGatesRequest(client *rest.RESTClient) ([]apis.FeatureGateResponse, error) {
+	var resp []apis.FeatureGateResponse
 	u := url.URL{Path: "/featuregates"}
 	getter := client.Get().RequestURI(u.RequestURI())
 	rawResp, err := getter.DoRaw(context.TODO())
@@ -136,23 +167,34 @@ func getFeatureGatesRequest(client *rest.RESTClient) ([]featuregates.Response, e
 	}
 	err = json.Unmarshal(rawResp, &resp)
 	if err != nil {
-		return nil, fmt.Errorf("fail to unmarshal feature gates list: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal feature gates list: %w", err)
 	}
 	return resp, nil
 }
 
-func output(resps []featuregates.Response, runtimeMode string) string {
-	var output strings.Builder
-	switch runtimeMode {
-	case runtime.ModeAgent:
+func output(resps []apis.FeatureGateResponse, component string, output io.Writer) {
+	switch component {
+	case featuregates.AgentMode:
 		output.Write([]byte("Antrea Agent Feature Gates\n"))
-	case runtime.ModeController:
+	case featuregates.AgentWindowsMode:
+		output.Write([]byte("\n"))
+		output.Write([]byte("Antrea Agent Feature Gates (Windows)\n"))
+	case featuregates.ControllerMode:
+		output.Write([]byte("\n"))
 		output.Write([]byte("Antrea Controller Feature Gates\n"))
 	}
-	formatter := "%-25s%-15s%-10s\n"
+
+	maxNameLen := len("FEATUREGATE")
+	maxStatusLen := len("STATUS")
+
+	for _, r := range resps {
+		maxNameLen = max(maxNameLen, len(r.Name))
+		maxStatusLen = max(maxStatusLen, len(r.Status))
+	}
+
+	formatter := fmt.Sprintf("%%-%ds%%-%ds%%-s\n", maxNameLen+5, maxStatusLen+5)
 	output.Write([]byte(fmt.Sprintf(formatter, "FEATUREGATE", "STATUS", "VERSION")))
 	for _, r := range resps {
-		fmt.Fprintf(&output, formatter, r.Name, r.Status, r.Version)
+		fmt.Fprintf(output, formatter, r.Name, r.Status, r.Version)
 	}
-	return output.String()
 }

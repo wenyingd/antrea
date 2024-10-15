@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,6 +28,15 @@ type CrdV1beta1Interface interface {
 	RESTClient() rest.Interface
 	AntreaAgentInfosGetter
 	AntreaControllerInfosGetter
+	ClusterGroupsGetter
+	ClusterNetworkPoliciesGetter
+	EgressesGetter
+	ExternalIPPoolsGetter
+	GroupsGetter
+	IPPoolsGetter
+	NetworkPoliciesGetter
+	TiersGetter
+	TraceflowsGetter
 }
 
 // CrdV1beta1Client is used to interact with features provided by the crd.antrea.io group.
@@ -41,6 +50,42 @@ func (c *CrdV1beta1Client) AntreaAgentInfos() AntreaAgentInfoInterface {
 
 func (c *CrdV1beta1Client) AntreaControllerInfos() AntreaControllerInfoInterface {
 	return newAntreaControllerInfos(c)
+}
+
+func (c *CrdV1beta1Client) ClusterGroups() ClusterGroupInterface {
+	return newClusterGroups(c)
+}
+
+func (c *CrdV1beta1Client) ClusterNetworkPolicies() ClusterNetworkPolicyInterface {
+	return newClusterNetworkPolicies(c)
+}
+
+func (c *CrdV1beta1Client) Egresses() EgressInterface {
+	return newEgresses(c)
+}
+
+func (c *CrdV1beta1Client) ExternalIPPools() ExternalIPPoolInterface {
+	return newExternalIPPools(c)
+}
+
+func (c *CrdV1beta1Client) Groups(namespace string) GroupInterface {
+	return newGroups(c, namespace)
+}
+
+func (c *CrdV1beta1Client) IPPools() IPPoolInterface {
+	return newIPPools(c)
+}
+
+func (c *CrdV1beta1Client) NetworkPolicies(namespace string) NetworkPolicyInterface {
+	return newNetworkPolicies(c, namespace)
+}
+
+func (c *CrdV1beta1Client) Tiers() TierInterface {
+	return newTiers(c)
+}
+
+func (c *CrdV1beta1Client) Traceflows() TraceflowInterface {
+	return newTraceflows(c)
 }
 
 // NewForConfig creates a new CrdV1beta1Client for the given config.

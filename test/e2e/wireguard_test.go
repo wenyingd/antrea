@@ -17,7 +17,6 @@ package e2e
 import (
 	"fmt"
 	"net"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,17 +36,18 @@ func TestWireGuard(t *testing.T) {
 	skipIfAntreaIPAMTest(t)
 
 	data, err := setupTest(t)
-	skipIfEncapModeIsNot(t, data, config.TrafficEncapModeEncap)
-	for _, node := range clusterInfo.nodes {
-		skipIfMissingKernelModule(t, data, node.name, []string{"wireguard"})
-	}
-
 	if err != nil {
 		t.Fatalf("Error when setting up test: %v", err)
 	}
 	defer teardownTest(t, data)
-
+	skipIfMulticastEnabled(t, data)
+	skipIfEncapModeIsNot(t, data, config.TrafficEncapModeEncap)
+	for _, node := range clusterInfo.nodes {
+		skipIfMissingKernelModule(t, data, node.name, []string{"wireguard"})
+	}
+	var previousTrafficEncryptionMode string
 	ac := func(config *agentconfig.AgentConfig) {
+		previousTrafficEncryptionMode = config.TrafficEncryptionMode
 		config.TrafficEncryptionMode = "wireguard"
 	}
 	if err := data.mutateAntreaConfigMap(nil, ac, false, true); err != nil {
@@ -55,7 +55,7 @@ func TestWireGuard(t *testing.T) {
 	}
 	defer func() {
 		ac := func(config *agentconfig.AgentConfig) {
-			config.TrafficEncryptionMode = "none"
+			config.TrafficEncryptionMode = previousTrafficEncryptionMode
 		}
 		if err := data.mutateAntreaConfigMap(nil, ac, false, true); err != nil {
 			t.Errorf("Failed to disable WireGuard tunnel: %v", err)
@@ -66,43 +66,11 @@ func TestWireGuard(t *testing.T) {
 	t.Run("testServiceConnectivity", func(t *testing.T) { testServiceConnectivity(t, data) })
 }
 
-func (data *TestData) getWireGuardPeerEndpointsWithHandshake(nodeName string) ([]string, error) {
-	var peerEndpoints []string
-	antreaPodName, err := data.getAntreaPodOnNode(nodeName)
-	if err != nil {
-		return peerEndpoints, err
-	}
-	cmd := []string{"wg"}
-	stdout, stderr, err := data.RunCommandFromPod(antreaNamespace, antreaPodName, "wireguard", cmd)
-	if err != nil {
-		return peerEndpoints, fmt.Errorf("error when running 'wg' on '%s': %v - stdout: %s - stderr: %s", nodeName, err, stdout, stderr)
-	}
-	peerConfigs := strings.Split(stdout, "\n\n")
-	if len(peerConfigs) < 1 {
-		return peerEndpoints, fmt.Errorf("invalid 'wg' output on '%s': %v - stdout: %s - stderr: %s", nodeName, err, stdout, stderr)
-	}
-
-	for _, p := range peerConfigs[1:] {
-		lines := strings.Split(p, "\n")
-		if len(lines) < 2 {
-			return peerEndpoints, fmt.Errorf("invalid WireGuard peer config output - %s", p)
-		}
-		peerEndpoint := strings.TrimPrefix(strings.TrimSpace(lines[1]), "endpoint: ")
-		for _, l := range lines {
-			if strings.Contains(l, "latest handshake") {
-				peerEndpoints = append(peerEndpoints, peerEndpoint)
-				break
-			}
-		}
-	}
-	return peerEndpoints, nil
-}
-
 func testPodConnectivity(t *testing.T, data *TestData) {
 	podInfos, deletePods := createPodsOnDifferentNodes(t, data, data.testNamespace, "differentnodes")
 	defer deletePods()
 	numPods := 2
-	data.runPingMesh(t, podInfos[:numPods], agnhostContainerName)
+	data.runPingMesh(t, podInfos[:numPods], toolboxContainerName, true)
 
 	// Make sure that route to Pod on peer Node and route to peer gateway is targeting the WireGuard device.
 	srcPod, err := data.getAntreaPodOnNode(nodeName(0))
@@ -122,11 +90,11 @@ func testPodConnectivity(t *testing.T, data *TestData) {
 	}
 	podIPs := waitForPodIPs(t, data, podInfos)
 	for _, pi := range podInfos {
-		if pi.os == "linux" && pi.nodeName != nodeName(0) {
-			if podIPs[pi.name].ipv4 != nil {
-				peerPodIP = podIPs[pi.name].ipv4.String()
+		if pi.OS == "linux" && pi.NodeName != nodeName(0) {
+			if podIPs[pi.Name].IPv4 != nil {
+				peerPodIP = podIPs[pi.Name].IPv4.String()
 			} else {
-				peerPodIP = podIPs[pi.name].ipv6.String()
+				peerPodIP = podIPs[pi.Name].IPv6.String()
 			}
 			break
 		}
@@ -174,8 +142,8 @@ func testServiceConnectivity(t *testing.T, data *TestData) {
 	defer cleanup()
 
 	// Create the a hostNetwork Pod on a Node different from the service's backend Pod, so the service traffic will be transferred across the tunnel.
-	require.NoError(t, NewPodBuilder(clientPodName, data.testNamespace, busyboxImage).OnNode(clientPodNode).WithCommand([]string{"sleep", "3600"}).InHostNetwork().Create(data))
-	defer data.deletePodAndWait(defaultTimeout, clientPodName, data.testNamespace)
+	require.NoError(t, NewPodBuilder(clientPodName, data.testNamespace, ToolboxImage).OnNode(clientPodNode).InHostNetwork().Create(data))
+	defer data.DeletePodAndWait(defaultTimeout, clientPodName, data.testNamespace)
 	require.NoError(t, data.podWaitForRunning(defaultTimeout, clientPodName, data.testNamespace))
 
 	err := data.runNetcatCommandFromTestPod(clientPodName, data.testNamespace, svc.Spec.ClusterIP, 80)

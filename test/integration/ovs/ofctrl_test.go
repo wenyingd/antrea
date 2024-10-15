@@ -15,6 +15,7 @@
 package ovs
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
@@ -42,9 +43,9 @@ var (
 
 	priorityNormal = uint16(200)
 
-	portFoundMark   = binding.NewOneBitRegMark(0, 16, "OFPortFound")
-	portCacheField  = binding.NewRegField(1, 0, 31, "OFPortCache")
-	sourceField     = binding.NewRegField(0, 0, 15, "PacketSourceField")
+	portFoundMark   = binding.NewOneBitRegMark(0, 16)
+	portCacheField  = binding.NewRegField(1, 0, 31)
+	sourceField     = binding.NewRegField(0, 0, 15)
 	fromLocalMark   = binding.NewRegMark(sourceField, 2)
 	fromGatewayMark = binding.NewRegMark(sourceField, 1)
 
@@ -94,7 +95,7 @@ func TestDeleteFlowStrict(t *testing.T) {
 	}()
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(t3, t4.GetID(), binding.TableMissActionNext)
+	table = bridge.NewTable(t3, t4.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	if err != nil {
@@ -183,8 +184,8 @@ func TestOFctrlFlow(t *testing.T) {
 	}()
 
 	bridge := newOFBridge(br)
-	table1 := bridge.CreateTable(t1, t2.GetID(), binding.TableMissActionNext)
-	table2 := bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
+	table1 := bridge.NewTable(t1, t2.GetID(), binding.TableMissActionNext)
+	table2 := bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
 	if err != nil {
@@ -213,7 +214,7 @@ func TestOFctrlFlow(t *testing.T) {
 		// Test: DumpTableStatus
 		for _, tableStates := range bridge.DumpTableStatus() {
 			if tableStates.ID == uint(myTable.GetID()) {
-				if int(tableStates.FlowCount) != len(flowList) {
+				if tableStates.FlowCount != uint(len(flowList)) {
 					t.Errorf("Flow count of table %d in the cache is incorrect, expect: %d, actual %d", dumpTable, len(flowList), tableStates.FlowCount)
 				}
 			}
@@ -222,7 +223,7 @@ func TestOFctrlFlow(t *testing.T) {
 		// Test: DumpFlows
 		dumpCookieID, dumpCookieMask := getCookieIDMask()
 		flowStates, err := bridge.DumpFlows(dumpCookieID, dumpCookieMask)
-		require.Nil(t, err, "no error returns in DumpFlows")
+		require.NoError(t, err, "no error returns in DumpFlows")
 		if len(flowStates) != len(flowList) {
 			t.Errorf("Flow count in dump result is incorrect")
 		}
@@ -240,11 +241,11 @@ func TestOFctrlFlow(t *testing.T) {
 		if err != nil {
 			t.Errorf("Failed to DeleteFlowsByCookie: %v", err)
 		}
-		require.NoError(t, wait.PollImmediate(time.Millisecond*100, time.Second, func() (done bool, err error) {
-			flowList, err = OfctlDumpTableFlowsWithoutName(ovsCtlClient, myTable.GetID())
-			require.Nil(t, err)
-			return len(flowList) == 0, nil
-		}), "Failed to delete flows by CookieID")
+		require.Eventually(t, func() bool {
+			flowList, err := OfctlDumpTableFlowsWithoutName(ovsCtlClient, myTable.GetID())
+			require.NoError(t, err)
+			return len(flowList) == 0
+		}, time.Second, time.Millisecond*100, "Failed to delete flows by CookieID")
 	}
 }
 
@@ -290,9 +291,9 @@ func TestOFctrlGroup(t *testing.T) {
 			var group binding.Group
 			gid := binding.GroupIDType(id)
 			if name == "TypeAll" {
-				group = br.CreateGroupTypeAll(gid)
+				group = br.NewGroupTypeAll(gid)
 			} else {
-				group = br.CreateGroup(gid)
+				group = br.NewGroup(gid)
 			}
 			for _, bucket := range buckets {
 				require.NotZero(t, bucket.weight, "Weight value of a bucket must be specified")
@@ -304,19 +305,20 @@ func TestOFctrlGroup(t *testing.T) {
 					bucketBuilder = bucketBuilder.ResubmitToTable(bucket.resubmitTable)
 				}
 				for _, loading := range bucket.reg2reg {
-					regField := binding.NewRegField(int(loading[0]), loading[2], loading[3], "field")
+					regField := binding.NewRegField(int(loading[0]), loading[2], loading[3])
 					bucketBuilder = bucketBuilder.LoadToRegField(regField, loading[1])
 				}
 				group = bucketBuilder.Done()
 			}
 			// Check if the group could be added.
-			require.Nil(t, group.Add())
+			require.NoError(t, group.Add())
 			var groups [][]string
-			require.NoError(t, wait.PollImmediate(openFlowCheckInterval, openFlowCheckTimeout, func() (done bool, err error) {
-				groups, err = OfCtlDumpGroups(ovsCtlClient)
-				require.Nil(t, err)
-				return len(groups) == 1, nil
-			}), "Failed to install group")
+			require.NoError(t, wait.PollUntilContextTimeout(context.Background(), openFlowCheckInterval, openFlowCheckTimeout, true,
+				func(ctx context.Context) (done bool, err error) {
+					groups, err = OfCtlDumpGroups(ovsCtlClient)
+					require.Nil(t, err)
+					return len(groups) == 1, nil
+				}), "Failed to install group")
 			dumpedGroup := groups[0]
 			for i, bucket := range buckets {
 				if name == "Normal" {
@@ -341,12 +343,12 @@ func TestOFctrlGroup(t *testing.T) {
 				}
 			}
 			// Check if the group could be deleted.
-			require.Nil(t, group.Delete())
-			require.NoError(t, wait.PollImmediate(openFlowCheckInterval, openFlowCheckTimeout, func() (done bool, err error) {
-				groups, err = OfCtlDumpGroups(ovsCtlClient)
-				require.Nil(t, err)
-				return len(groups) == 0, nil
-			}), "Failed to delete group")
+			require.NoError(t, group.Delete())
+			require.Eventually(t, func() bool {
+				groups, err := OfCtlDumpGroups(ovsCtlClient)
+				require.NoError(t, err)
+				return len(groups) == 0
+			}, openFlowCheckTimeout, openFlowCheckInterval, "Failed to delete group")
 		})
 		id++
 	}
@@ -355,24 +357,23 @@ func TestOFctrlGroup(t *testing.T) {
 func TestTransactions(t *testing.T) {
 	br := "br04"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer func() {
 		err = DeleteOVSBridge(br)
-		require.Nil(t, err, fmt.Sprintf("error while deleting OVS bridge: %v", err))
+		require.NoError(t, err, "error while deleting OVS bridge")
 	}()
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
 
-	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, bridge.Connect(maxRetry, make(chan struct{})), "Failed to start OFService")
 	defer bridge.Disconnect()
 
 	ovsCtlClient := ovsctl.NewClient(br)
 
 	flows, expectflows := prepareFlows(table)
-	err = bridge.AddFlowsInBundle(flows, nil, nil)
-	require.Nil(t, err, fmt.Sprintf("Failed to add flows in a transaction: %v", err))
+	err = bridge.AddFlowsInBundle(openflow.GetFlowModMessages(flows, binding.AddMessage), nil, nil)
+	require.NoError(t, err, "Failed to add flows in a transaction")
 	dumpTable := table.GetID()
 	flowList := CheckFlowExists(t, ovsCtlClient, "", dumpTable, true, expectflows)
 
@@ -386,8 +387,8 @@ func TestTransactions(t *testing.T) {
 	}
 
 	// Delete flows in a bundle
-	err = bridge.AddFlowsInBundle(nil, nil, flows)
-	require.Nil(t, err, fmt.Sprintf("Failed to delete flows in a transaction: %v", err))
+	err = bridge.AddFlowsInBundle(nil, nil, openflow.GetFlowModMessages(flows, binding.DeleteMessage))
+	require.NoError(t, err, "Failed to delete flows in a transaction")
 	dumpTable = table.GetID()
 	flowList = CheckFlowExists(t, ovsCtlClient, "", dumpTable, false, expectflows)
 
@@ -401,7 +402,7 @@ func TestTransactions(t *testing.T) {
 
 	// Invoke AddFlowsInBundle with no Flow to add/modify/delete.
 	err = bridge.AddFlowsInBundle(nil, nil, nil)
-	require.Nil(t, err, fmt.Sprintf("Not compatible with none flows in the request: %v", err))
+	require.NoError(t, err, "Not compatible with none flows in the request")
 	for _, tableStates := range bridge.DumpTableStatus() {
 		if tableStates.ID == uint(dumpTable) {
 			if int(tableStates.FlowCount) != len(flowList) {
@@ -414,17 +415,17 @@ func TestTransactions(t *testing.T) {
 func TestBundleErrorWhenOVSRestart(t *testing.T) {
 	br := "br06"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer func() {
 		err = DeleteOVSBridge(br)
-		require.Nil(t, err, fmt.Sprintf("error while deleting OVS bridge: %v", err))
+		require.NoError(t, err, "Failed to delete bridge")
 	}()
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, err, "Failed to start OFService")
 	defer bridge.Disconnect()
 
 	// Ensure OVS is connected before sending bundle messages.
@@ -471,7 +472,7 @@ func TestBundleErrorWhenOVSRestart(t *testing.T) {
 					MatchInPort(uint32(count + 1)).
 					Action().NextTable().
 					Done()}
-				err = bridge.AddFlowsInBundle(flows, nil, nil)
+				err = bridge.AddFlowsInBundle(openflow.GetFlowModMessages(flows, binding.AddMessage), nil, nil)
 				if err != nil {
 					errMsg := err.Error()
 					_, found := expectedErrorMsgs[errMsg]
@@ -501,7 +502,7 @@ func TestBundleErrorWhenOVSRestart(t *testing.T) {
 func TestReconnectOFSwitch(t *testing.T) {
 	br := "br07"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
@@ -513,7 +514,7 @@ func TestReconnectOFSwitch(t *testing.T) {
 		}
 	}()
 	err = bridge.Connect(maxRetry, reconnectCh)
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, err, "Failed to start OFService")
 	defer bridge.Disconnect()
 
 	require.Equal(t, connectCount, 1)
@@ -523,11 +524,11 @@ func TestReconnectOFSwitch(t *testing.T) {
 		DeleteOVSBridge(br)
 		time.Sleep(8 * time.Second)
 		err := PrepareOVSBridge(br)
-		require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+		require.NoError(t, err, "Failed to prepare OVS bridge")
 	}()
 
 	err = DeleteOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to delete bridge: %v", err))
+	require.NoError(t, err, "Failed to delete bridge")
 	time.Sleep(12 * time.Second)
 	require.Equal(t, 2, connectCount)
 }
@@ -536,23 +537,23 @@ func TestReconnectOFSwitch(t *testing.T) {
 func TestBundleWithGroupAndFlow(t *testing.T) {
 	br := "br08"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, err, "Failed to start OFService")
 	defer bridge.Disconnect()
 
 	ovsCtlClient := ovsctl.NewClient(br)
 
 	groupID := binding.GroupIDType(4)
-	field1 := binding.NewRegField(1, 0, 31, "field1")
-	field2 := binding.NewRegField(2, 0, 31, "field2")
-	field3 := binding.NewRegField(3, 0, 31, "field3")
-	group := bridge.CreateGroup(groupID).
+	field1 := binding.NewRegField(1, 0, 31)
+	field2 := binding.NewRegField(2, 0, 31)
+	field3 := binding.NewRegField(3, 0, 31)
+	group := bridge.NewGroup(groupID).
 		Bucket().Weight(100).
 		LoadToRegField(field1, uint32(0xa0a0002)).
 		LoadToRegField(field2, uint32(0x35)).
@@ -564,7 +565,7 @@ func TestBundleWithGroupAndFlow(t *testing.T) {
 		LoadToRegField(field3, uint32(0xfff1)).
 		ResubmitToTable(table.GetNext()).Done()
 
-	reg3Field := binding.NewRegField(3, 0, 31, "reg3Field")
+	reg3Field := binding.NewRegField(3, 0, 31)
 	flow := table.BuildFlow(priorityNormal).
 		Cookie(getCookieID()).
 		MatchProtocol(binding.ProtocolTCP).
@@ -583,12 +584,12 @@ func TestBundleWithGroupAndFlow(t *testing.T) {
 	bucket1 := "weight:100,actions=set_field:0xa0a0202->reg1,set_field:0x35->reg2,set_field:0xfff1->reg3,resubmit(,3)"
 	expectedGroupBuckets := []string{bucket0, bucket1}
 	err = bridge.AddOFEntriesInBundle([]binding.OFEntry{flow, group}, nil, nil)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectedFlows)
 	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, true)
 
 	err = bridge.AddOFEntriesInBundle(nil, nil, []binding.OFEntry{flow, group})
-	require.Nil(t, err)
+	require.NoError(t, err)
 	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), false, expectedFlows)
 	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, false)
 }
@@ -596,21 +597,21 @@ func TestBundleWithGroupAndFlow(t *testing.T) {
 func TestPacketOutIn(t *testing.T) {
 	br := "br09"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table0 := bridge.CreateTable(t0, t1.GetID(), binding.TableMissActionNext)
-	table1 := bridge.CreateTable(t1, t2.GetID(), binding.TableMissActionNext)
+	table0 := bridge.NewTable(t0, t1.GetID(), binding.TableMissActionNext)
+	table1 := bridge.NewTable(t1, t2.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, err, "Failed to start OFService")
 	defer bridge.Disconnect()
 
-	reason := uint8(1)
+	category := uint8(1)
 	pktInQueue := binding.NewPacketInQueue(200, rate.Limit(100))
-	err = bridge.SubscribePacketIn(reason, pktInQueue)
-	require.Nil(t, err)
+	err = bridge.SubscribePacketIn(category, pktInQueue)
+	require.NoError(t, err)
 
 	srcMAC, _ := net.ParseMAC("11:11:11:11:11:11")
 	dstcMAC, _ := net.ParseMAC("11:11:11:11:11:22")
@@ -620,9 +621,9 @@ func TestPacketOutIn(t *testing.T) {
 	srcPort := uint16(10001)
 	dstPort := uint16(8080)
 	reg2Data := uint32(0x1234)
-	reg2Field := binding.NewRegField(2, 0, 15, "reg2Field")
+	reg2Field := binding.NewRegField(2, 0, 15)
 	reg3Data := uint32(0x1234)
-	reg3Field := binding.NewRegField(3, 0, 31, "reg3Field")
+	reg3Field := binding.NewRegField(3, 0, 31)
 	stopCh := make(chan struct{})
 
 	go func() {
@@ -657,14 +658,14 @@ func TestPacketOutIn(t *testing.T) {
 	}()
 
 	pktBuilder := bridge.BuildPacketOut()
-	regField := binding.NewRegField(0, 18, 18, "field")
+	regField := binding.NewRegField(0, 18, 18)
 	mark := binding.NewRegMark(regField, 0x1)
 	pkt := pktBuilder.SetSrcMAC(srcMAC).SetDstMAC(dstcMAC).
 		SetDstIP(dstIP).SetSrcIP(srcIP).SetIPProtocol(binding.ProtocolTCP).
 		SetTCPSrcPort(srcPort).SetTCPDstPort(dstPort).
 		AddLoadRegMark(mark).
 		Done()
-	require.Nil(t, err)
+	require.NoError(t, err)
 	flow0 := table0.BuildFlow(100).
 		MatchSrcMAC(srcMAC).MatchDstMAC(dstcMAC).
 		MatchSrcIP(srcIP).MatchDstIP(dstIP).MatchProtocol(binding.ProtocolTCP).
@@ -678,100 +679,33 @@ func TestPacketOutIn(t *testing.T) {
 		MatchSrcMAC(srcMAC).MatchDstMAC(dstcMAC).
 		MatchSrcIP(srcIP).MatchDstIP(dstIP).MatchProtocol(binding.ProtocolTCP).
 		MatchRegFieldWithValue(regField, 0x1).
-		Action().SendToController(0x1).
+		Action().SendToController([]byte{0x1}, false).
 		Done()
-	err = bridge.AddFlowsInBundle([]binding.Flow{flow0, flow1}, nil, nil)
-	require.Nil(t, err)
+	err = bridge.AddFlowsInBundle(openflow.GetFlowModMessages([]binding.Flow{flow0, flow1}, binding.AddMessage), nil, nil)
+	require.NoError(t, err)
 	err = bridge.SendPacketOut(pkt)
 	require.NoError(t, err)
 	<-stopCh
 }
 
-func TestTLVMap(t *testing.T) {
-	br := "br10"
-	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
-	defer DeleteOVSBridge(br)
-
-	bridge := newOFBridge(br)
-	table := bridge.CreateTable(t0, t1.GetID(), binding.TableMissActionNext)
-
-	ch := make(chan struct{})
-	err = bridge.Connect(maxRetry, ch)
-	require.Nil(t, err, "Failed to start OFService")
-	defer bridge.Disconnect()
-
-	// Wait until the OVS Bridge is connected.
-	<-ch
-
-	err = bridge.AddTLVMap(0xffff, 0x1, 4, 0)
-	require.Nil(t, err)
-	time.Sleep(1 * time.Second)
-	flow1 := table.BuildFlow(100).
-		MatchProtocol(binding.ProtocolIP).MatchTunMetadata(0, 0x1234).
-		Action().NextTable().
-		Done()
-	err = bridge.AddFlowsInBundle([]binding.Flow{flow1}, nil, nil)
-	require.Nil(t, err)
-	expectedFlows := []*ExpectFlow{
-		{
-			MatchStr: "priority=100,ip,tun_metadata0=0x1234",
-			ActStr:   fmt.Sprintf("goto_table:%d", table.GetNext()),
-		},
-	}
-	ovsCtlClient := ovsctl.NewClient(br)
-	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectedFlows)
-}
-
-func TestMoveTunMetadata(t *testing.T) {
-	br := "br11"
-	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
-	//defer DeleteOVSBridge(br)
-
-	bridge := newOFBridge(br)
-	table := bridge.CreateTable(t0, t1.GetID(), binding.TableMissActionNext)
-
-	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
-	defer bridge.Disconnect()
-
-	err = bridge.AddTLVMap(0xffff, 0x1, 4, 0)
-	require.Nil(t, err)
-	time.Sleep(1 * time.Second)
-	flow1 := table.BuildFlow(100).
-		MatchProtocol(binding.ProtocolIP).MatchTunMetadata(0, 0x1234).
-		Action().MoveFromTunMetadata(0, "NXM_NX_REG0", binding.Range{28, 31}, binding.Range{28, 31}, 4).
-		Action().NextTable().
-		Done()
-	err = bridge.AddFlowsInBundle([]binding.Flow{flow1}, nil, nil)
-	require.Nil(t, err)
-	expectedFlows := []*ExpectFlow{
-		{
-			MatchStr: "priority=100,ip,tun_metadata0=0x1234",
-			ActStr:   fmt.Sprintf("move:NXM_NX_TUN_METADATA0[28..31]->NXM_NX_REG0[28..31],goto_table:%d", table.GetNext()),
-		},
-	}
-	ovsCtlClient := ovsctl.NewClient(br)
-	CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectedFlows)
-}
-
 func TestFlowWithCTMatchers(t *testing.T) {
 	br := "br09"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, err, "Failed to start OFService")
 	defer bridge.Disconnect()
 
 	ofctlClient := ovsctl.NewClient(br)
 	ctIPSrc, ctIPSrcNet, _ := net.ParseCIDR("1.1.1.1/24")
 	ctIPDst, ctIPDstNet, _ := net.ParseCIDR("2.2.2.2/24")
+	ctIPv6Src, ctIPv6SrcNet, _ := net.ParseCIDR("1:1:1::1/64")
+	ctIPv6Dst, ctIPv6DstNet, _ := net.ParseCIDR("2:2:2::2/64")
 	ctPortSrc := uint16(10001)
 	ctPortDst := uint16(20002)
 	priority := uint16(200)
@@ -793,6 +727,24 @@ func TestFlowWithCTMatchers(t *testing.T) {
 		MatchCTProtocol(binding.ProtocolTCP).
 		Action().NextTable().
 		Done()
+	flow3 := table.BuildFlow(priority).
+		MatchProtocol(binding.ProtocolIPv6).
+		MatchCTStateNew(true).
+		MatchCTSrcIP(ctIPv6Src).
+		MatchCTDstIP(ctIPv6Dst).
+		MatchCTSrcPort(ctPortSrc).
+		MatchCTDstPort(ctPortDst).
+		MatchCTProtocol(binding.ProtocolTCPv6).
+		Action().NextTable().
+		Done()
+	flow4 := table.BuildFlow(priority).
+		MatchProtocol(binding.ProtocolIPv6).
+		MatchCTStateEst(true).
+		MatchCTSrcIPNet(*ctIPv6SrcNet).
+		MatchCTDstIPNet(*ctIPv6DstNet).
+		MatchCTProtocol(binding.ProtocolTCPv6).
+		Action().NextTable().
+		Done()
 	expectFlows := []*ExpectFlow{
 		{fmt.Sprintf("priority=%d,ct_state=+new,ct_nw_src=%s,ct_nw_dst=%s,ct_nw_proto=6,ct_tp_src=%d,ct_tp_dst=%d,ip",
 			priority, ctIPSrc.String(), ctIPDst.String(), ctPortSrc, ctPortDst),
@@ -803,13 +755,22 @@ func TestFlowWithCTMatchers(t *testing.T) {
 				priority, ctIPSrcNet.String(), ctIPDstNet.String()),
 			fmt.Sprintf("goto_table:%d", table.GetNext()),
 		},
+		{fmt.Sprintf("priority=%d,ct_state=+new,ct_ipv6_src=%s,ct_ipv6_dst=%s,ct_nw_proto=6,ct_tp_src=%d,ct_tp_dst=%d,ipv6",
+			priority, ctIPv6Src.String(), ctIPv6Dst.String(), ctPortSrc, ctPortDst),
+			fmt.Sprintf("goto_table:%d", table.GetNext()),
+		},
+		{
+			fmt.Sprintf("priority=%d,ct_state=+est,ct_ipv6_src=%s,ct_ipv6_dst=%s,ct_nw_proto=6,ipv6",
+				priority, ctIPv6SrcNet.String(), ctIPv6DstNet.String()),
+			fmt.Sprintf("goto_table:%d", table.GetNext()),
+		},
 	}
-	for _, f := range []binding.Flow{flow1, flow2} {
+	for _, f := range []binding.Flow{flow1, flow2, flow3, flow4} {
 		err = f.Add()
 		assert.Nil(t, err, "no error returned when adding flow")
 	}
 	CheckFlowExists(t, ofctlClient, "", table.GetID(), true, expectFlows)
-	for _, f := range []binding.Flow{flow1, flow2} {
+	for _, f := range []binding.Flow{flow1, flow2, flow3, flow4} {
 		err = f.Delete()
 		assert.Nil(t, err, "no error returned when deleting flow")
 	}
@@ -819,14 +780,14 @@ func TestFlowWithCTMatchers(t *testing.T) {
 func TestNoteAction(t *testing.T) {
 	br := "br10"
 	err := PrepareOVSBridge(br)
-	require.Nil(t, err, fmt.Sprintf("Failed to prepare OVS bridge: %v", err))
+	require.NoError(t, err, "Failed to prepare OVS bridge")
 	defer DeleteOVSBridge(br)
 
 	bridge := newOFBridge(br)
-	table = bridge.CreateTable(t2, t3.GetID(), binding.TableMissActionNext)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
 
 	err = bridge.Connect(maxRetry, make(chan struct{}))
-	require.Nil(t, err, "Failed to start OFService")
+	require.NoError(t, err, "Failed to start OFService")
 	defer bridge.Disconnect()
 
 	ofctlClient := ovsctl.NewClient(br)
@@ -867,17 +828,158 @@ func TestNoteAction(t *testing.T) {
 	CheckFlowExists(t, ofctlClient, "", table.GetID(), false, expectFlows)
 }
 
+func TestLoadToLabelFieldAction(t *testing.T) {
+	br := "br13"
+	err := PrepareOVSBridge(br)
+	require.NoError(t, err, "Failed to prepare OVS bridge")
+	defer DeleteOVSBridge(br)
+
+	bridge := newOFBridge(br)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
+
+	err = bridge.Connect(maxRetry, make(chan struct{}))
+	require.NoError(t, err, "Failed to start OFService")
+	defer bridge.Disconnect()
+
+	ovsCtlClient := ovsctl.NewClient(br)
+	priority := uint16(1001)
+
+	testCases := []struct {
+		ctLabel *binding.CtLabel
+		data    uint64
+	}{
+		{
+			ctLabel: binding.NewCTLabel(16, 31),
+			data:    0x1001,
+		},
+		{
+			ctLabel: binding.NewCTLabel(0, 63),
+			data:    0x1001100110011001,
+		},
+		{
+			ctLabel: binding.NewCTLabel(80, 95),
+			data:    0x1001,
+		},
+		{
+			ctLabel: binding.NewCTLabel(64, 127),
+			data:    0x1001100110011001,
+		},
+	}
+
+	srcIP := net.ParseIP("1.1.1.2")
+	for _, tc := range testCases {
+		maskStr := fmt.Sprintf("0x%x", ^uint64(0)>>(64-tc.ctLabel.GetRange().Length())<<(tc.ctLabel.GetRange().Offset()%64))
+		dataStr := fmt.Sprintf("0x%x", tc.data<<(tc.ctLabel.GetRange().Offset()%64))
+		if tc.ctLabel.GetRange().Offset() > 63 {
+			maskStr += "0000000000000000"
+			dataStr += "0000000000000000"
+		}
+		expectFlows := []*ExpectFlow{
+			{fmt.Sprintf("priority=%d,ip,nw_src=%s", priority, srcIP.String()),
+				fmt.Sprintf("ct(commit,table=%d,zone=65520,exec(set_field:%s/%s->ct_label))", table.GetNext(), dataStr, maskStr)},
+		}
+		flow1 := table.BuildFlow(priority).
+			MatchProtocol(binding.ProtocolIP).
+			MatchSrcIP(srcIP).
+			Action().CT(true, table.GetNext(), 65520, nil).
+			LoadToLabelField(tc.data, tc.ctLabel).
+			CTDone().
+			Done()
+		err = flow1.Add()
+		assert.Nil(t, err, "expected no error when adding flow")
+		CheckFlowExists(t, ovsCtlClient, "", table.GetID(), true, expectFlows)
+		err = flow1.Delete()
+		assert.Nil(t, err, "expected no error when deleting flow")
+		CheckFlowExists(t, ovsCtlClient, "", table.GetID(), false, expectFlows)
+	}
+}
+
+func TestBundleWithGroupInsertBucket(t *testing.T) {
+	br := "br12"
+	err := PrepareOVSBridge(br)
+	require.NoError(t, err, "Failed to prepare OVS bridge")
+	defer DeleteOVSBridge(br)
+
+	bridge := newOFBridge(br)
+	table = bridge.NewTable(t2, t3.GetID(), binding.TableMissActionNext)
+	// Set the maximum of buckets in a message to test insert_buckets.
+	binding.MaxBucketsPerMessage = 2
+	// In case it affects other tests, set the maximum of buckets in a message back to 800.
+	defer func() {
+		binding.MaxBucketsPerMessage = 800
+	}()
+
+	err = bridge.Connect(maxRetry, make(chan struct{}))
+	require.NoError(t, err, "Failed to start OFService")
+	defer bridge.Disconnect()
+
+	ovsCtlClient := ovsctl.NewClient(br)
+	groupID := binding.GroupIDType(4)
+
+	group := bridge.NewGroup(groupID)
+	expectedGroupBuckets := []string{}
+	err = bridge.AddOFEntriesInBundle([]binding.OFEntry{group}, nil, nil)
+	require.NoError(t, err)
+	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, true)
+
+	field1 := binding.NewRegField(1, 0, 31)
+	field2 := binding.NewRegField(2, 0, 31)
+	field3 := binding.NewRegField(3, 0, 31)
+	group = group.
+		Bucket().Weight(100).
+		LoadToRegField(field1, uint32(0xa0a0002)).
+		LoadToRegField(field2, uint32(0x1)).
+		LoadToRegField(field3, uint32(0xfff1)).
+		ResubmitToTable(table.GetNext()).Done().
+		Bucket().Weight(100).
+		LoadToRegField(field1, uint32(0xa0a0202)).
+		LoadToRegField(field2, uint32(0x2)).
+		LoadToRegField(field3, uint32(0xfff1)).
+		ResubmitToTable(table.GetNext()).Done().
+		Bucket().Weight(100).
+		LoadToRegField(field1, uint32(0xa0a0202)).
+		LoadToRegField(field2, uint32(0x3)).
+		LoadToRegField(field3, uint32(0xfff1)).
+		ResubmitToTable(table.GetNext()).Done()
+
+	bucket1 := "weight:100,actions=set_field:0xa0a0002->reg1,set_field:0x1->reg2,set_field:0xfff1->reg3,resubmit(,3)"
+	bucket2 := "weight:100,actions=set_field:0xa0a0202->reg1,set_field:0x2->reg2,set_field:0xfff1->reg3,resubmit(,3)"
+	bucket3 := "weight:100,actions=set_field:0xa0a0202->reg1,set_field:0x3->reg2,set_field:0xfff1->reg3,resubmit(,3)"
+	expectedGroupBuckets = []string{bucket1, bucket2, bucket3}
+	err = bridge.AddOFEntriesInBundle(nil, []binding.OFEntry{group}, nil)
+	require.NoError(t, err)
+	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, true)
+
+	group = group.
+		Bucket().Weight(100).
+		LoadToRegField(field1, uint32(0xa0a0202)).
+		LoadToRegField(field2, uint32(0x4)).
+		LoadToRegField(field3, uint32(0xfff1)).
+		ResubmitToTable(table.GetNext()).Done()
+
+	bucket4 := "weight:100,actions=set_field:0xa0a0202->reg1,set_field:0x4->reg2,set_field:0xfff1->reg3,resubmit(,3)"
+	expectedGroupBuckets = []string{bucket1, bucket2, bucket3, bucket4}
+	err = bridge.AddOFEntriesInBundle(nil, []binding.OFEntry{group}, nil)
+	require.NoError(t, err)
+	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, true)
+
+	group.ResetBuckets()
+	expectedGroupBuckets = []string{}
+	err = bridge.AddOFEntriesInBundle(nil, []binding.OFEntry{group}, nil)
+	require.NoError(t, err)
+	CheckGroupExists(t, ovsCtlClient, groupID, "select", expectedGroupBuckets, true)
+}
+
 func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 	var flows []binding.Flow
 	_, AllIPs, _ := net.ParseCIDR("0.0.0.0/0")
 	_, conjSrcIPNet, _ := net.ParseCIDR("192.168.3.0/24")
 	_, peerSubnetIPv6, _ := net.ParseCIDR("fd74:ca9b:172:21::/64")
 	tunnelPeerIPv6 := net.ParseIP("20:ca9b:172:35::3")
-	regField0 := binding.NewRegField(0, 0, 15, "field0")
+	regField0 := binding.NewRegField(0, 0, 15)
 	mark0 := binding.NewRegMark(regField0, 0x0fff)
-	regField1 := binding.NewRegField(0, 16, 31, "field1")
+	regField1 := binding.NewRegField(0, 16, 31)
 	mark1 := binding.NewRegMark(regField1, 0x0ffe)
-	//gatewayCTMark := binding.NewCTMark()
 	flows = append(flows,
 		table.BuildFlow(priorityNormal-10).
 			Cookie(getCookieID()).
@@ -917,9 +1019,11 @@ func prepareFlows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 			Action().Normal().Done(),
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolTCP).
 			Cookie(getCookieID()).
-			Action().Learn(table.GetID(), priorityNormal-10, 10, 0, 1).
+			Action().Learn(table.GetID(), priorityNormal-10, 10, 0, 0, 0, 1).
 			DeleteLearned().
-			MatchLearnedTCPDstPort().
+			MatchEthernetProtocol(false).
+			MatchIPProtocol(binding.ProtocolTCP).
+			MatchLearnedDstPort(binding.ProtocolTCP).
 			MatchRegMark(mark0).
 			LoadFieldToField(regField0, regField0).
 			LoadRegMark(mark1).
@@ -1075,10 +1179,10 @@ func prepareNATflows(table binding.Table) ([]binding.Flow, []*ExpectFlow) {
 	natIPRange1 := &binding.IPRange{StartIP: natedIP1, EndIP: natedIP1}
 	natIPRange2 := &binding.IPRange{StartIP: natedIP1, EndIP: natedIP2}
 	snatCTMark := binding.NewCTMark(binding.NewCTMarkField(0, 7), 0x40)
-	snatMark1 := binding.NewOneBitRegMark(marksReg, 17, "SNATMark1")
-	snatMark2 := binding.NewOneBitRegMark(marksReg, 18, "SNATMark2")
-	dnatMark1 := binding.NewOneBitRegMark(marksReg, 19, "DNATMark1")
-	dnatMark2 := binding.NewOneBitRegMark(marksReg, 20, "DNATMark2")
+	snatMark1 := binding.NewOneBitRegMark(marksReg, 17)
+	snatMark2 := binding.NewOneBitRegMark(marksReg, 18)
+	dnatMark1 := binding.NewOneBitRegMark(marksReg, 19)
+	dnatMark2 := binding.NewOneBitRegMark(marksReg, 20)
 	flows := []binding.Flow{
 		table.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
 			Action().CT(false, table.GetNext(), ctZone, nil).NAT().CTDone().

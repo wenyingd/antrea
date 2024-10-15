@@ -15,13 +15,256 @@
 package openflow
 
 import (
+	"math/rand"
 	"net"
 	"reflect"
 	"testing"
 
+	"antrea.io/libOpenflow/openflow15"
 	"antrea.io/libOpenflow/protocol"
 	"antrea.io/ofnet/ofctrl"
+	"github.com/stretchr/testify/assert"
 )
+
+func Test_ofPacketOutBuilder(t *testing.T) {
+	newPktOutBuilder := func() *ofPacketOutBuilder {
+		return &ofPacketOutBuilder{
+			pktOut: &ofctrl.PacketOut{},
+		}
+	}
+
+	t.Run("SetSrcMAC", func(t *testing.T) {
+		mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+		b := newPktOutBuilder()
+		pb := b.SetSrcMAC(mac)
+		assert.Equal(t, mac, pb.(*ofPacketOutBuilder).pktOut.SrcMAC)
+	})
+	t.Run("SetDstMAC", func(t *testing.T) {
+		mac, _ := net.ParseMAC("aa:bb:cc:dd:ee:ff")
+		b := newPktOutBuilder()
+		pb := b.SetDstMAC(mac)
+		assert.Equal(t, mac, pb.(*ofPacketOutBuilder).pktOut.DstMAC)
+
+	})
+	t.Run("SetIPProtocolValue", func(t *testing.T) {
+		ipv4ProtoValue := uint8(6)
+		ipv6ProtoValue := uint8(17)
+		testCases := []struct {
+			isIPv6     bool
+			protoValue uint8
+			expected   *ofctrl.PacketOut
+		}{
+			{
+				isIPv6:     true,
+				protoValue: ipv6ProtoValue,
+				expected: &ofctrl.PacketOut{
+					IPv6Header: &protocol.IPv6{
+						NextHeader: ipv6ProtoValue,
+					},
+				},
+			},
+			{
+				isIPv6:     false,
+				protoValue: ipv4ProtoValue,
+				expected: &ofctrl.PacketOut{
+					IPHeader: &protocol.IPv4{
+						Protocol: ipv4ProtoValue,
+					},
+				},
+			},
+		}
+		for _, tc := range testCases {
+			b := newPktOutBuilder()
+			pb := b.SetIPProtocolValue(tc.isIPv6, tc.protoValue)
+			assert.Equal(t, tc.expected, pb.(*ofPacketOutBuilder).pktOut)
+		}
+	})
+	t.Run("SetIPHeaderID", func(t *testing.T) {
+		id := uint16(111)
+		testCases := []struct {
+			id       uint16
+			pktOut   *ofctrl.PacketOut
+			expected *ofctrl.PacketOut
+		}{
+			{
+				id:     id,
+				pktOut: &ofctrl.PacketOut{},
+				expected: &ofctrl.PacketOut{
+					IPHeader: &protocol.IPv4{
+						Id: id,
+					},
+				},
+			},
+			{
+				pktOut: &ofctrl.PacketOut{
+					IPv6Header: &protocol.IPv6{},
+				},
+				expected: &ofctrl.PacketOut{
+					IPv6Header: &protocol.IPv6{},
+				},
+			},
+		}
+		for _, tc := range testCases {
+			b := newPktOutBuilder()
+			b.pktOut = tc.pktOut
+			pb := b.SetIPHeaderID(tc.id)
+			assert.Equal(t, tc.expected, pb.(*ofPacketOutBuilder).pktOut)
+		}
+	})
+	t.Run("SetTCPSrcPort", func(t *testing.T) {
+		port := uint16(30000)
+		b := newPktOutBuilder()
+		pb := b.SetTCPSrcPort(port)
+		assert.Equal(t, port, pb.(*ofPacketOutBuilder).pktOut.TCPHeader.PortSrc)
+	})
+	t.Run("SetTCPDstPort", func(t *testing.T) {
+		port := uint16(30000)
+		b := newPktOutBuilder()
+		pb := b.SetTCPDstPort(port)
+		assert.Equal(t, port, pb.(*ofPacketOutBuilder).pktOut.TCPHeader.PortDst)
+	})
+	t.Run("SetTCPFlags", func(t *testing.T) {
+		tcpFlags := uint8(1)
+		b := newPktOutBuilder()
+		pb := b.SetTCPFlags(tcpFlags)
+		assert.Equal(t, tcpFlags, pb.(*ofPacketOutBuilder).pktOut.TCPHeader.Code)
+	})
+	t.Run("SetTCPSeqNum", func(t *testing.T) {
+		tcpSeqNum := uint32(1345678)
+		b := newPktOutBuilder()
+		pb := b.SetTCPSeqNum(tcpSeqNum)
+		assert.Equal(t, tcpSeqNum, pb.(*ofPacketOutBuilder).pktOut.TCPHeader.SeqNum)
+	})
+	t.Run("SetTCPAckNum", func(t *testing.T) {
+		tcpAckNum := uint32(1345678)
+		b := newPktOutBuilder()
+		pb := b.SetTCPAckNum(tcpAckNum)
+		assert.Equal(t, tcpAckNum, pb.(*ofPacketOutBuilder).pktOut.TCPHeader.AckNum)
+	})
+	t.Run("SetUDPSrcPort", func(t *testing.T) {
+		port := uint16(30000)
+		b := newPktOutBuilder()
+		pb := b.SetUDPSrcPort(port)
+		assert.Equal(t, port, pb.(*ofPacketOutBuilder).pktOut.UDPHeader.PortSrc)
+	})
+	t.Run("SetUDPDstPort", func(t *testing.T) {
+		port := uint16(30000)
+		b := newPktOutBuilder()
+		pb := b.SetUDPDstPort(port)
+		assert.Equal(t, port, pb.(*ofPacketOutBuilder).pktOut.UDPHeader.PortDst)
+	})
+	t.Run("SetICMPType", func(t *testing.T) {
+		icmpType := uint8(1)
+		b := newPktOutBuilder()
+		pb := b.SetICMPType(icmpType)
+		assert.Equal(t, icmpType, pb.(*ofPacketOutBuilder).pktOut.ICMPHeader.Type)
+	})
+	t.Run("SetICMPCode", func(t *testing.T) {
+		icmpCode := uint8(1)
+		b := newPktOutBuilder()
+		pb := b.SetICMPCode(icmpCode)
+		assert.Equal(t, icmpCode, pb.(*ofPacketOutBuilder).pktOut.ICMPHeader.Code)
+	})
+	t.Run("SetICMPID", func(t *testing.T) {
+		icmpID := uint16(1)
+		b := newPktOutBuilder()
+		pb := b.SetICMPID(icmpID)
+		assert.Equal(t, icmpID, *pb.(*ofPacketOutBuilder).icmpID)
+	})
+	t.Run("SetICMPSequence", func(t *testing.T) {
+		seq := uint16(1)
+		b := newPktOutBuilder()
+		pb := b.SetICMPSequence(seq)
+		assert.Equal(t, seq, *pb.(*ofPacketOutBuilder).icmpSeq)
+	})
+	t.Run("SetICMPData", func(t *testing.T) {
+		data := []byte{0x11, 0x22}
+		b := newPktOutBuilder()
+		pb := b.SetICMPData(data)
+		assert.Equal(t, data, pb.(*ofPacketOutBuilder).pktOut.ICMPHeader.Data)
+	})
+	t.Run("SetUDPData", func(t *testing.T) {
+		data := []byte{0x11, 0x22}
+		b := newPktOutBuilder()
+		pb := b.SetUDPData(data)
+		assert.Equal(t, data, pb.(*ofPacketOutBuilder).pktOut.UDPHeader.Data)
+	})
+	t.Run("SetInport", func(t *testing.T) {
+		inPort := uint32(1)
+		b := newPktOutBuilder()
+		pb := b.SetInport(inPort)
+		assert.Equal(t, inPort, pb.(*ofPacketOutBuilder).pktOut.InPort)
+	})
+	t.Run("SetOutport", func(t *testing.T) {
+		outPort := uint32(1)
+		b := newPktOutBuilder()
+		pb := b.SetOutport(outPort)
+		assert.Equal(t, outPort, pb.(*ofPacketOutBuilder).pktOut.OutPort)
+	})
+	t.Run("SetL4Packet", func(t *testing.T) {
+		igmp := &protocol.IGMPv1or2{
+			Type:         protocol.IGMPQuery,
+			GroupAddress: net.ParseIP("1.2.3.4"),
+		}
+		b := newPktOutBuilder()
+		b.pktOut.IPHeader = new(protocol.IPv4)
+		pb := b.SetL4Packet(igmp)
+		assert.Equal(t, igmp, pb.(*ofPacketOutBuilder).pktOut.IPHeader.Data)
+	})
+	t.Run("AddSetIPTOSAction", func(t *testing.T) {
+		data := uint8(1)
+		b := newPktOutBuilder()
+		pb := b.AddSetIPTOSAction(data)
+		pktOut := pb.(*ofPacketOutBuilder).pktOut
+
+		assert.Equal(t, 1, len(pktOut.Actions))
+		action := pktOut.Actions[0]
+
+		assert.IsType(t, &ofctrl.SetFieldAction{}, action)
+		setFieldAction := action.(*ofctrl.SetFieldAction)
+
+		assert.Equal(t, openflow15.OXM_CLASS_NXM_0, int(setFieldAction.Field.Class))
+		assert.Equal(t, openflow15.NXM_OF_IP_TOS, setFieldAction.Field.Field)
+
+		assert.IsType(t, &openflow15.IpDscpField{}, setFieldAction.Field.Value)
+		value := setFieldAction.Field.Value.(*openflow15.IpDscpField)
+		assert.Equal(t, data<<2, value.Dscp)
+	})
+	t.Run("AddLoadRegMark", func(t *testing.T) {
+		mark := NewRegMark(NewRegField(1, 0, 15), 0x1234)
+		b := newPktOutBuilder()
+		pb := b.AddLoadRegMark(mark)
+		pktOut := pb.(*ofPacketOutBuilder).pktOut
+
+		assert.Equal(t, 1, len(pktOut.Actions))
+		action := pktOut.Actions[0]
+
+		assert.IsType(t, &ofctrl.SetFieldAction{}, action)
+		setFieldAction := action.(*ofctrl.SetFieldAction)
+
+		assert.Equal(t, openflow15.OXM_CLASS_NXM_1, int(setFieldAction.Field.Class))
+		assert.Equal(t, openflow15.NXM_NX_REG1, int(setFieldAction.Field.Field))
+
+		assert.IsType(t, &openflow15.Uint32Message{}, setFieldAction.Field.Value)
+		assert.IsType(t, &openflow15.Uint32Message{}, setFieldAction.Field.Mask)
+		value := setFieldAction.Field.Value.(*openflow15.Uint32Message)
+		mask := setFieldAction.Field.Mask.(*openflow15.Uint32Message)
+
+		assert.Equal(t, uint32(0x1234), value.Data)
+		assert.Equal(t, uint32(0xffff), mask.Data)
+	})
+	t.Run("AddResubmitAction", func(t *testing.T) {
+		table := uint8(1)
+		b := newPktOutBuilder()
+		pb := b.AddResubmitAction(nil, &table)
+		pktOut := pb.(*ofPacketOutBuilder).pktOut
+
+		assert.Equal(t, 1, len(pktOut.Actions))
+		action := pktOut.Actions[0]
+
+		assert.IsType(t, &ofctrl.Resubmit{}, action)
+	})
+}
 
 func Test_ofPacketOutBuilder_SetSrcIP(t *testing.T) {
 	type fields struct {
@@ -395,6 +638,22 @@ func Test_ofPacketOutBuilder_SetIPProtocol(t *testing.T) {
 			},
 		},
 		{
+			name: "ProtocolIGMP",
+			fields: fields{
+				pktOut:  &ofctrl.PacketOut{},
+				icmpID:  nil,
+				icmpSeq: nil,
+			},
+			args: args{proto: ProtocolIGMP},
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					IPHeader: &protocol.IPv4{
+						Protocol: protocol.Type_IGMP,
+					},
+				},
+			},
+		},
+		{
 			name: "ProtocolUnknown",
 			fields: fields{
 				pktOut:  &ofctrl.PacketOut{},
@@ -601,6 +860,135 @@ func Test_ofPacketOutBuilder_SetIPFlags(t *testing.T) {
 	}
 }
 
+func Test_ofPacketOutBuilder_SetTCPHdrLen(t *testing.T) {
+	tests := []struct {
+		name          string
+		pktOutBuilder *ofPacketOutBuilder
+		tcpHdrLen     uint8
+		want          PacketOutBuilder
+	}{
+		{
+			name:          "New TCP header",
+			pktOutBuilder: &ofPacketOutBuilder{pktOut: new(ofctrl.PacketOut)},
+			tcpHdrLen:     5,
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					TCPHeader: &protocol.TCP{
+						HdrLen: 5,
+					},
+				},
+			},
+		},
+		{
+			name: "Existing TCP header",
+			pktOutBuilder: &ofPacketOutBuilder{pktOut: &ofctrl.PacketOut{
+				TCPHeader: &protocol.TCP{},
+			}},
+			tcpHdrLen: 5,
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					TCPHeader: &protocol.TCP{
+						HdrLen: 5,
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.pktOutBuilder.SetTCPHdrLen(tt.tcpHdrLen); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("SetTCPHdrLen() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_ofPacketOutBuilder_SetTCPWinSize(t *testing.T) {
+	tests := []struct {
+		name          string
+		pktOutBuilder *ofPacketOutBuilder
+		tcpWinSize    uint16
+		want          PacketOutBuilder
+	}{
+		{
+			name:          "New TCP header",
+			pktOutBuilder: &ofPacketOutBuilder{pktOut: new(ofctrl.PacketOut)},
+			tcpWinSize:    1,
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					TCPHeader: &protocol.TCP{
+						WinSize: 1,
+					},
+				},
+			},
+		},
+		{
+			name: "Existing TCP header",
+			pktOutBuilder: &ofPacketOutBuilder{pktOut: &ofctrl.PacketOut{
+				TCPHeader: &protocol.TCP{},
+			}},
+			tcpWinSize: 1,
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					TCPHeader: &protocol.TCP{
+						WinSize: 1,
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.pktOutBuilder.SetTCPWinSize(tt.tcpWinSize); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("SetTCPWinSize() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_ofPacketOutBuilder_SetTCPData(t *testing.T) {
+	tests := []struct {
+		name          string
+		pktOutBuilder *ofPacketOutBuilder
+		tcpData       []byte
+		want          PacketOutBuilder
+	}{
+		{
+			name:          "New TCP header",
+			pktOutBuilder: &ofPacketOutBuilder{pktOut: new(ofctrl.PacketOut)},
+			tcpData:       []byte{1},
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					TCPHeader: &protocol.TCP{
+						Data: []byte{1},
+					},
+				},
+			},
+		},
+		{
+			name: "Existing TCP header",
+			pktOutBuilder: &ofPacketOutBuilder{pktOut: &ofctrl.PacketOut{
+				TCPHeader: &protocol.TCP{},
+			}},
+			tcpData: []byte{1},
+			want: &ofPacketOutBuilder{
+				pktOut: &ofctrl.PacketOut{
+					TCPHeader: &protocol.TCP{
+						Data: []byte{1},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.pktOutBuilder.SetTCPData(tt.tcpData); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("SetTCPData() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func Test_ofPacketOutBuilder_Done(t *testing.T) {
 	type fields struct {
 		pktOut  *ofctrl.PacketOut
@@ -644,12 +1032,109 @@ func Test_ofPacketOutBuilder_Done(t *testing.T) {
 					Version:  0x4,
 					Length:   28,
 					Checksum: 46753,
+					Id:       1090,
 				},
 				ICMPHeader: &protocol.ICMP{
 					Type:     3,
 					Code:     4,
 					Checksum: 64760,
 					Data:     []byte{0x0, 0x1, 0x0, 0x2},
+				},
+			},
+		},
+		{
+			name: "IPv4 IGMPv1or2",
+			fields: fields{
+				pktOut: &ofctrl.PacketOut{
+					IPHeader: &protocol.IPv4{
+						Protocol: protocol.Type_IGMP,
+						Data: &protocol.IGMPv1or2{
+							GroupAddress: net.ParseIP("1.2.3.4"),
+						},
+					},
+				},
+			},
+			want: &ofctrl.PacketOut{
+				IPHeader: &protocol.IPv4{
+					Version:  uint8(4),
+					Id:       uint16(1090),
+					Protocol: protocol.Type_IGMP,
+					Length:   uint16(28),
+					Checksum: uint16(46751),
+					Data: &protocol.IGMPv1or2{
+						Checksum:     uint16(64505),
+						GroupAddress: net.ParseIP("1.2.3.4"),
+					},
+				},
+			},
+		},
+		{
+			name: "IPv4 IGMPv3Query",
+			fields: fields{
+				pktOut: &ofctrl.PacketOut{
+					IPHeader: &protocol.IPv4{
+						Protocol: protocol.Type_IGMP,
+						Data: &protocol.IGMPv3Query{
+							GroupAddress:    net.ParseIP("1.2.3.4"),
+							NumberOfSources: 1,
+							SourceAddresses: []net.IP{net.ParseIP("10.10.0.1")},
+						},
+					},
+				},
+			},
+			want: &ofctrl.PacketOut{
+				IPHeader: &protocol.IPv4{
+					Version:  uint8(4),
+					Id:       uint16(1090),
+					Protocol: protocol.Type_IGMP,
+					Length:   uint16(36),
+					Checksum: uint16(46743),
+					Data: &protocol.IGMPv3Query{
+						Checksum:        uint16(61933),
+						GroupAddress:    net.ParseIP("1.2.3.4"),
+						NumberOfSources: 1,
+						SourceAddresses: []net.IP{net.ParseIP("10.10.0.1")},
+					},
+				},
+			},
+		},
+		{
+			name: "IPv4 IGMPv3MembershipReport",
+			fields: fields{
+				pktOut: &ofctrl.PacketOut{
+					IPHeader: &protocol.IPv4{
+						Protocol: protocol.Type_IGMP,
+						Data: &protocol.IGMPv3MembershipReport{
+							NumberOfGroups: 1,
+							GroupRecords: []protocol.IGMPv3GroupRecord{
+								{
+									NumberOfSources:  1,
+									MulticastAddress: net.ParseIP("224.0.0.224"),
+									SourceAddresses:  []net.IP{net.ParseIP("1.2.3.4")},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &ofctrl.PacketOut{
+				IPHeader: &protocol.IPv4{
+					Version:  uint8(4),
+					Id:       uint16(1090),
+					Protocol: protocol.Type_IGMP,
+					Length:   uint16(40),
+					Checksum: uint16(46739),
+					Data: &protocol.IGMPv3MembershipReport{
+						Checksum:       uint16(6935),
+						NumberOfGroups: 1,
+						GroupRecords: []protocol.IGMPv3GroupRecord{
+							{
+								NumberOfSources:  1,
+								MulticastAddress: net.ParseIP("224.0.0.224"),
+								SourceAddresses:  []net.IP{net.ParseIP("1.2.3.4")},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -669,13 +1154,16 @@ func Test_ofPacketOutBuilder_Done(t *testing.T) {
 				IPHeader: &protocol.IPv4{
 					Version:  0x4,
 					Length:   40,
-					Checksum: 45409,
+					Checksum: 8009,
+					Id:       39822,
 				},
 				TCPHeader: &protocol.TCP{
 					PortSrc:  10000,
 					PortDst:  10001,
 					HdrLen:   5,
-					Checksum: 63286,
+					Checksum: 40408,
+					SeqNum:   2596996162,
+					AckNum:   4039455774,
 				},
 			},
 		},
@@ -694,7 +1182,8 @@ func Test_ofPacketOutBuilder_Done(t *testing.T) {
 				IPHeader: &protocol.IPv4{
 					Version:  0x4,
 					Length:   28,
-					Checksum: 45025,
+					Checksum: 46753,
+					Id:       1090,
 				},
 				UDPHeader: &protocol.UDP{
 					PortSrc:  10000,
@@ -751,7 +1240,9 @@ func Test_ofPacketOutBuilder_Done(t *testing.T) {
 					PortSrc:  10000,
 					PortDst:  10001,
 					HdrLen:   5,
-					Checksum: 26538,
+					Checksum: 40408,
+					SeqNum:   2596996162,
+					AckNum:   4039455774,
 				},
 			},
 		},
@@ -782,43 +1273,16 @@ func Test_ofPacketOutBuilder_Done(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Specify a hardcoded seed for testing to make output predictable.
+			// #nosec G404: random number generator not used for security purposes
+			pktRand = rand.New(rand.NewSource(1))
 			b := &ofPacketOutBuilder{
 				pktOut:  tt.fields.pktOut,
 				icmpID:  tt.fields.icmpID,
 				icmpSeq: tt.fields.icmpSeq,
 			}
 			got := b.Done()
-			if got == nil {
-				if tt.want != nil {
-					t.Errorf("Done() = %v, want %v", got, tt.want)
-				}
-				return
-			}
-			if got.IPHeader != nil {
-				got.IPHeader.Id = 0
-			}
-			if got.TCPHeader != nil {
-				got.TCPHeader.SeqNum = 0
-				got.TCPHeader.AckNum = 0
-			}
-			if !reflect.DeepEqual(got.ICMPHeader, tt.want.ICMPHeader) {
-				t.Errorf("Done() = %v, want %v", got.ICMPHeader, tt.want.ICMPHeader)
-			}
-			if !reflect.DeepEqual(got.TCPHeader, tt.want.TCPHeader) {
-				t.Errorf("Done() = %+v, want %+v", got.TCPHeader, tt.want.TCPHeader)
-			}
-			if !reflect.DeepEqual(got.UDPHeader, tt.want.UDPHeader) {
-				t.Errorf("Done() = %v, want %v", got.UDPHeader, tt.want.UDPHeader)
-			}
-			if !reflect.DeepEqual(got.IPHeader, tt.want.IPHeader) {
-				t.Errorf("Done() = %v, want %v", got.IPHeader, tt.want.IPHeader)
-			}
-			if !reflect.DeepEqual(got.IPv6Header, tt.want.IPv6Header) {
-				t.Errorf("Done() = %v, want %v", got.IPv6Header, tt.want.IPv6Header)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Done() = %+v, want %+v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

@@ -2,61 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.9.0
-  creationTimestamp: null
-  labels:
-    app: antrea
-  name: clusterclaims.multicluster.crd.antrea.io
-spec:
-  group: multicluster.crd.antrea.io
-  names:
-    kind: ClusterClaim
-    listKind: ClusterClaimList
-    plural: clusterclaims
-    singular: clusterclaim
-  scope: Namespaced
-  versions:
-  - additionalPrinterColumns:
-    - description: Value of the ClusterClaim
-      jsonPath: .value
-      name: Value
-      type: string
-    - jsonPath: .metadata.creationTimestamp
-      name: Age
-      type: date
-    name: v1alpha2
-    schema:
-      openAPIV3Schema:
-        description: ClusterClaim is the Schema for the clusterclaims API.
-        properties:
-          apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation
-              of an object. Servers should convert recognized schemas to the latest
-              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
-            type: string
-          kind:
-            description: 'Kind is a string value representing the REST resource this
-              object represents. Servers may infer this from the endpoint the client
-              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
-            type: string
-          metadata:
-            type: object
-          value:
-            description: Value of the ClusterClaim.
-            type: string
-        required:
-        - value
-        type: object
-    served: true
-    storage: true
-    subresources: {}
----
-apiVersion: apiextensions.k8s.io/v1
-kind: CustomResourceDefinition
-metadata:
-  annotations:
-    controller-gen.kubebuilder.io/version: v0.9.0
-  creationTimestamp: null
+    controller-gen.kubebuilder.io/version: v0.16.3
   labels:
     app: antrea
   name: clusterinfoimports.multicluster.crd.antrea.io
@@ -86,14 +32,19 @@ spec:
       openAPIV3Schema:
         properties:
           apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation
-              of an object. Servers should convert recognized schemas to the latest
-              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
-            description: 'Kind is a string value representing the REST resource this
-              object represents. Servers may infer this from the endpoint the client
-              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
@@ -111,9 +62,21 @@ spec:
                       type: string
                   type: object
                 type: array
+              podCIDRs:
+                description: PodCIDRs is the Pod IP address CIDRs.
+                items:
+                  type: string
+                type: array
               serviceCIDR:
                 description: ServiceCIDR is the IP ranges used by Service ClusterIP.
                 type: string
+              wireGuard:
+                description: WireGuardInfo includes information of a WireGuard tunnel.
+                properties:
+                  publicKey:
+                    description: Public key of the WireGuard tunnel.
+                    type: string
+                type: object
             type: object
           status:
             description: ClusterInfoImportStatus defines the observed state of ClusterInfoImport.
@@ -155,8 +118,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.9.0
-  creationTimestamp: null
+    controller-gen.kubebuilder.io/version: v0.16.3
   labels:
     app: antrea
   name: clustersets.multicluster.crd.antrea.io
@@ -191,14 +153,19 @@ spec:
         description: ClusterSet represents a ClusterSet.
         properties:
           apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation
-              of an object. Servers should convert recognized schemas to the latest
-              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           kind:
-            description: 'Kind is a string value representing the REST resource this
-              object represents. Servers may infer this from the endpoint the client
-              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
             type: object
@@ -229,7 +196,8 @@ spec:
                 minItems: 1
                 type: array
               members:
-                description: Members include member clusters known to the leader clusters.
+                description: |-
+                  Members include member clusters known to the leader clusters.
                   Used in leader cluster.
                 items:
                   description: MemberCluster defines member cluster information.
@@ -251,10 +219,169 @@ spec:
                   type: object
                 type: array
               namespace:
-                description: The leader cluster Namespace in which the ClusterSet
-                  is defined. Used in member cluster.
+                description: |-
+                  The leader cluster Namespace in which the ClusterSet is defined.
+                  Used in member cluster.
                 type: string
             required:
+            - leaders
+            type: object
+          status:
+            description: ClusterSetStatus defines the observed state of ClusterSet.
+            properties:
+              clusterStatuses:
+                description: The status of individual member clusters.
+                items:
+                  properties:
+                    clusterID:
+                      description: ClusterID is the unique identifier of this cluster.
+                      type: string
+                    conditions:
+                      items:
+                        description: ClusterCondition indicates the readiness condition
+                          of a cluster.
+                        properties:
+                          lastTransitionTime:
+                            description: Last time the condition transited from one
+                              status to another.
+                            format: date-time
+                            type: string
+                          message:
+                            description: A human readable message indicating details
+                              about the transition.
+                            type: string
+                          reason:
+                            description: Unique, one-word, CamelCase reason for the
+                              condition's last transition.
+                            type: string
+                          status:
+                            description: Status of the condition, one of True, False,
+                              Unknown.
+                            type: string
+                          type:
+                            type: string
+                        type: object
+                      type: array
+                  type: object
+                type: array
+              conditions:
+                description: The overall condition of the cluster set.
+                items:
+                  description: ClusterSetCondition indicates the readiness condition
+                    of the clusterSet.
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transited from one status
+                        to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: A human readable message indicating details about
+                        the transition.
+                      type: string
+                    reason:
+                      description: Unique, one-word, CamelCase reason for the condition's
+                        last transition.
+                      type: string
+                    status:
+                      description: Status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      type: string
+                  type: object
+                type: array
+              observedGeneration:
+                description: The generation observed by the controller.
+                format: int64
+                type: integer
+              readyClusters:
+                description: Total number of clusters ready and connected.
+                format: int32
+                type: integer
+              totalClusters:
+                description: Total number of member clusters configured in the ClusterSet.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: false
+    subresources:
+      status: {}
+  - additionalPrinterColumns:
+    - description: The leader cluster Namespace for the ClusterSet
+      jsonPath: .spec.namespace
+      name: Leader Cluster Namespace
+      type: string
+    - description: Total number of clusters in the ClusterSet
+      jsonPath: .status.totalClusters
+      name: Total Clusters
+      type: string
+    - description: Number of ready clusters in the ClusterSet
+      jsonPath: .status.readyClusters
+      name: Ready Clusters
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha2
+    schema:
+      openAPIV3Schema:
+        description: ClusterSet represents a ClusterSet.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ClusterSetSpec defines the desired state of ClusterSet.
+            properties:
+              clusterID:
+                description: ClusterID identifies the local cluster.
+                type: string
+              leaders:
+                description: Leaders include leader clusters known to the member clusters.
+                items:
+                  description: LeaderClusterInfo specifies information of a leader
+                    cluster.
+                  properties:
+                    clusterID:
+                      description: Identify a leader cluster in the ClusterSet.
+                      type: string
+                    secret:
+                      description: |-
+                        Name of the Secret resource in the member cluster, which stores
+                        the token to access the leader cluster's API server.
+                      type: string
+                    server:
+                      description: |-
+                        API server endpoint of the leader cluster.
+                        E.g. "https://172.18.0.1:6443", "https://example.com:6443".
+                      type: string
+                  type: object
+                maxItems: 1
+                minItems: 1
+                type: array
+              namespace:
+                description: |-
+                  The leader cluster Namespace in which the ClusterSet is defined.
+                  Used in a member cluster.
+                type: string
+            required:
+            - clusterID
             - leaders
             type: object
           status:
@@ -344,8 +471,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.9.0
-  creationTimestamp: null
+    controller-gen.kubebuilder.io/version: v0.16.3
   labels:
     app: antrea
   name: gateways.multicluster.crd.antrea.io
@@ -376,9 +502,11 @@ spec:
         description: Gateway includes information of a Multi-cluster Gateway.
         properties:
           apiVersion:
-            description: 'APIVersion defines the versioned schema of this representation
-              of an object. Servers should convert recognized schemas to the latest
-              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources'
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
           gatewayIP:
             description: Cross-cluster tunnel IP of the Gateway.
@@ -387,17 +515,102 @@ spec:
             description: In-cluster tunnel IP of the Gateway.
             type: string
           kind:
-            description: 'Kind is a string value representing the REST resource this
-              object represents. Servers may infer this from the endpoint the client
-              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds'
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
           metadata:
+            type: object
+          serviceCIDR:
+            description: Service CIDR of the local member cluster.
+            type: string
+          wireGuard:
+            description: WireGuardInfo includes information of a WireGuard tunnel.
+            properties:
+              publicKey:
+                description: Public key of the WireGuard tunnel.
+                type: string
             type: object
         type: object
     served: true
     storage: true
     subresources:
       status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.3
+  labels:
+    app: antrea
+  name: labelidentities.multicluster.crd.antrea.io
+spec:
+  group: multicluster.crd.antrea.io
+  names:
+    kind: LabelIdentity
+    listKind: LabelIdentityList
+    plural: labelidentities
+    singular: labelidentity
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - description: Normalized string of a label identity
+      jsonPath: .spec.label
+      name: Label
+      type: string
+    - description: ID allocated for the label identity by the leader cluster
+      jsonPath: .spec.id
+      name: ID
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          LabelIdentity is an imported label identity from the ClusterSet.
+          For each unique label identity, a LabelIdentity will be created in the member cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              id:
+                description: ID is the ID allocated for the label identity by the
+                  leader cluster.
+                format: int32
+                type: integer
+              label:
+                description: |-
+                  Label is the normalized string of a label identity.
+                  The format of normalized label identity is `ns:(?P<nslabels>(.)*)&pod:(?P<podlabels>(.)*)`
+                  E.g., `ns:kubernetes.io/metadata.name=kube-system&pod:app=db`
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources: {}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -699,14 +912,11 @@ rules:
   - watch
 - apiGroups:
   - admissionregistration.k8s.io
-  resourceNames:
-  - antrea-mc-mutating-webhook-configuration
-  - antrea-mc-validating-webhook-configuration
   resources:
   - mutatingwebhookconfigurations
   - validatingwebhookconfigurations
   verbs:
-  - get
+  - list
   - update
 - apiGroups:
   - ""
@@ -739,6 +949,30 @@ rules:
   - list
   - patch
   - update
+  - watch
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - ""
@@ -777,27 +1011,9 @@ rules:
   resources:
   - clusterclaims
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - multicluster.crd.antrea.io
-  resources:
-  - clusterclaims/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - multicluster.crd.antrea.io
-  resources:
-  - clusterclaims/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - multicluster.crd.antrea.io
   resources:
@@ -893,6 +1109,18 @@ rules:
 - apiGroups:
   - multicluster.crd.antrea.io
   resources:
+  - labelidentities
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - multicluster.crd.antrea.io
+  resources:
   - gateways
   verbs:
   - create
@@ -940,18 +1168,20 @@ data:
     health:
       healthProbeBindAddress: :8080
     metrics:
-      bindAddress: 0
+      bindAddress: "0"
     webhook:
       port: 9443
-    leaderElection:
-      leaderElect: false
     serviceCIDR: ""
+    podCIDRs:
+      - ""
     gatewayIPPrecedence: "private"
+    endpointIPType: "ClusterIP"
+    enableStretchedNetworkPolicy: false
 kind: ConfigMap
 metadata:
   labels:
     app: antrea
-  name: antrea-mc-controller-config-hbdmg9b87m
+  name: antrea-mc-controller-config
   namespace: kube-system
 ---
 apiVersion: v1
@@ -985,6 +1215,8 @@ spec:
       component: antrea-mc-controller
   template:
     metadata:
+      annotations:
+        checksum/config: 81ec1a33aace39ae40ac2f5d909b5d1d0208bbe6a1e8d1d9ada232bcc583b76a
       labels:
         app: antrea
         component: antrea-mc-controller
@@ -1000,7 +1232,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        image: projects.registry.vmware.com/antrea/antrea-mc-controller:latest
+        image: antrea/antrea-mc-controller:latest
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -1033,7 +1265,7 @@ spec:
       terminationGracePeriodSeconds: 10
       volumes:
       - configMap:
-          name: antrea-mc-controller-config-hbdmg9b87m
+          name: antrea-mc-controller-config
         name: antrea-mc-controller-config
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -1041,6 +1273,8 @@ kind: MutatingWebhookConfiguration
 metadata:
   labels:
     app: antrea
+    role: member
+    served-by: antrea-mc-controller
   name: antrea-mc-mutating-webhook-configuration
 webhooks: []
 ---
@@ -1049,6 +1283,8 @@ kind: ValidatingWebhookConfiguration
 metadata:
   labels:
     app: antrea
+    role: member
+    served-by: antrea-mc-controller
   name: antrea-mc-validating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
@@ -1058,9 +1294,9 @@ webhooks:
     service:
       name: antrea-mc-webhook-service
       namespace: kube-system
-      path: /validate-multicluster-crd-antrea-io-v1alpha2-clusterclaim
+      path: /validate-multicluster-crd-antrea-io-v1alpha2-clusterset
   failurePolicy: Fail
-  name: vclusterclaim.kb.io
+  name: vclusterset.kb.io
   namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: kube-system
@@ -1074,7 +1310,7 @@ webhooks:
     - UPDATE
     - DELETE
     resources:
-    - clusterclaims
+    - clustersets
   sideEffects: None
 - admissionReviewVersions:
   - v1
@@ -1083,12 +1319,9 @@ webhooks:
     service:
       name: antrea-mc-webhook-service
       namespace: kube-system
-      path: /validate-multicluster-crd-antrea-io-v1alpha1-clusterset
+      path: /validate-multicluster-crd-antrea-io-v1alpha1-gateway
   failurePolicy: Fail
-  name: vclusterset.kb.io
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: kube-system
+  name: vgateway.kb.io
   rules:
   - apiGroups:
     - multicluster.crd.antrea.io
@@ -1098,5 +1331,5 @@ webhooks:
     - CREATE
     - UPDATE
     resources:
-    - clustersets
+    - gateways
   sideEffects: None

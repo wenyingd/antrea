@@ -15,19 +15,25 @@
 package exporter
 
 import (
+	"context"
+	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	ipfixentities "github.com/vmware/go-ipfix/pkg/entities"
 	ipfixentitiestesting "github.com/vmware/go-ipfix/pkg/entities/testing"
 	"github.com/vmware/go-ipfix/pkg/exporter"
-	"github.com/vmware/go-ipfix/pkg/registry"
 	ipfixregistry "github.com/vmware/go-ipfix/pkg/registry"
+	"go.uber.org/mock/gomock"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/component-base/metrics/legacyregistry"
 
 	"antrea.io/antrea/pkg/agent/flowexporter"
@@ -35,6 +41,7 @@ import (
 	connectionstest "antrea.io/antrea/pkg/agent/flowexporter/connections/testing"
 	"antrea.io/antrea/pkg/agent/metrics"
 	ipfixtest "antrea.io/antrea/pkg/ipfix/testing"
+	queriertest "antrea.io/antrea/pkg/querier/testing"
 )
 
 const (
@@ -45,7 +52,7 @@ const (
 )
 
 func init() {
-	registry.LoadRegistry()
+	ipfixregistry.LoadRegistry()
 }
 
 func TestFlowExporter_sendTemplateSet(t *testing.T) {
@@ -63,8 +70,6 @@ func TestFlowExporter_sendTemplateSet(t *testing.T) {
 
 func testSendTemplateSet(t *testing.T, v4Enabled bool, v6Enabled bool) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	mockIPFIXExpProc := ipfixtest.NewMockIPFIXExportingProcess(ctrl)
 	mockIPFIXRegistry := ipfixtest.NewMockIPFIXRegistry(ctrl)
 	flowExp := &FlowExporter{
@@ -121,7 +126,7 @@ func sendTemplateSet(t *testing.T, ctrl *gomock.Controller, mockIPFIXExpProc *ip
 	}
 	mockIPFIXExpProc.EXPECT().SendSet(mockTempSet).Return(0, nil)
 	_, err := flowExp.sendTemplateSet(isIPv6)
-	assert.NoError(t, err, "Error in sending template set")
+	assert.NoError(t, err, "Error when sending template set")
 
 	eL := flowExp.elementsListv4
 	if isIPv6 {
@@ -214,8 +219,6 @@ func TestFlowExporter_sendDataSet(t *testing.T) {
 
 func testSendDataSet(t *testing.T, v4Enabled bool, v6Enabled bool) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	mockIPFIXExpProc := ipfixtest.NewMockIPFIXExportingProcess(ctrl)
 	mockDataSet := ipfixentitiestesting.NewMockSet(ctrl)
 	mockIPFIXRegistry := ipfixtest.NewMockIPFIXRegistry(ctrl)
@@ -251,7 +254,7 @@ func testSendDataSet(t *testing.T, v4Enabled bool, v6Enabled bool) {
 		err := flowExp.addConnToSet(&conn)
 		assert.NoError(t, err, "Error when adding record to data set")
 		_, err = flowExp.sendDataSet()
-		assert.NoError(t, err, "Error in sending data set")
+		assert.NoError(t, err, "Error when sending data set")
 	}
 
 	if v4Enabled {
@@ -262,27 +265,136 @@ func testSendDataSet(t *testing.T, v4Enabled bool, v6Enabled bool) {
 	}
 }
 
+func TestFlowExporter_resolveCollectorAddress(t *testing.T) {
+	ctx := context.Background()
+
+	k8sClient := fake.NewSimpleClientset(
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "svc1",
+				Namespace: "ns",
+			},
+			Spec: corev1.ServiceSpec{
+				Type:       corev1.ServiceTypeClusterIP,
+				ClusterIP:  "10.96.1.201",
+				ClusterIPs: []string{"10.96.1.201"},
+			},
+		},
+		&corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "svc2",
+				Namespace: "ns",
+			},
+			Spec: corev1.ServiceSpec{
+				Type: corev1.ServiceTypeClusterIP,
+				// missing ClusterIP
+			},
+		},
+	)
+
+	testCases := []struct {
+		name               string
+		inputAddr          string
+		withTLS            bool
+		expectedAddr       string
+		expectedServerName string
+		expectedErr        string
+	}{
+		{
+			name:         "IP address",
+			inputAddr:    "10.96.1.100:4739",
+			expectedAddr: "10.96.1.100:4739",
+		},
+		{
+			name:         "Service name",
+			inputAddr:    "ns/svc1:4739",
+			expectedAddr: "10.96.1.201:4739",
+		},
+		{
+			name:               "Service name with TLS",
+			inputAddr:          "ns/svc1:4739",
+			withTLS:            true,
+			expectedAddr:       "10.96.1.201:4739",
+			expectedServerName: "svc1.ns.svc",
+		},
+		{
+			name:        "Service without ClusterIP",
+			inputAddr:   "ns/svc2:4739",
+			expectedErr: "ClusterIP is not available for FlowAggregator Service",
+		},
+		{
+			name:        "Missing Service",
+			inputAddr:   "ns/svc3:4739",
+			expectedErr: "failed to resolve FlowAggregator Service",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			exp := &FlowExporter{
+				collectorAddr: tc.inputAddr,
+				exporterInput: exporter.ExporterInput{
+					CollectorProtocol: "tcp",
+				},
+				k8sClient: k8sClient,
+			}
+			if tc.withTLS {
+				exp.exporterInput.TLSClientConfig = &exporter.ExporterTLSClientConfig{}
+			}
+
+			err := exp.resolveCollectorAddress(ctx)
+			if tc.expectedErr != "" {
+				assert.ErrorContains(t, err, tc.expectedErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.expectedAddr, exp.exporterInput.CollectorAddress)
+				if tc.withTLS {
+					assert.Equal(t, tc.expectedServerName, exp.exporterInput.TLSClientConfig.ServerName)
+				} else {
+					// should stay nil
+					assert.Nil(t, exp.exporterInput.TLSClientConfig)
+				}
+			}
+		})
+	}
+}
+
 func TestFlowExporter_initFlowExporter(t *testing.T) {
 	metrics.InitializeConnectionMetrics()
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("error when resolving UDP address: %v", err)
+	require.NoError(t, err, "Error when resolving UDP address")
+	conn1, err := net.ListenUDP("udp", udpAddr)
+	require.NoError(t, err, "Error when creating a local UDP server")
+	defer conn1.Close()
+	tcpAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
+	require.NoError(t, err, "Error when resolving TCP address")
+	conn2, err := net.ListenTCP("tcp", tcpAddr)
+	require.NoError(t, err, "Error when creating a local TCP server")
+	defer conn2.Close()
+
+	for _, tc := range []struct {
+		protocol string
+		address  string
+	}{
+		{conn1.LocalAddr().Network(), conn1.LocalAddr().String()},
+		{conn2.Addr().Network(), conn2.Addr().String()},
+	} {
+		exp := &FlowExporter{
+			collectorAddr: tc.address,
+			process:       nil,
+			exporterInput: exporter.ExporterInput{
+				CollectorProtocol: tc.protocol,
+			},
+		}
+		err = exp.initFlowExporter(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, tc.address, exp.exporterInput.CollectorAddress)
+		// exporter should use the default value as per the go-ipfix library.
+		assert.Equal(t, uint32(0), exp.exporterInput.TempRefTimeout)
+		checkTotalReconnectionsMetric(t)
+		metrics.ReconnectionsToFlowCollector.Dec()
 	}
-	conn, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		t.Fatalf("error when creating a local server: %v", err)
-	}
-	defer conn.Close()
-	exp := &FlowExporter{
-		process: nil,
-		exporterInput: exporter.ExporterInput{
-			CollectorProtocol: conn.LocalAddr().Network(),
-			CollectorAddress:  conn.LocalAddr().String(),
-		},
-	}
-	err = exp.initFlowExporter()
-	assert.NoError(t, err)
-	checkTotalReconnectionsMetric(t)
 }
 
 func checkTotalReconnectionsMetric(t *testing.T) {
@@ -346,10 +458,10 @@ func getElemList(ianaIE []string, antreaIE []string) []ipfixentities.InfoElement
 func getConnection(isIPv6 bool, isPresent bool, statusFlag uint32, protoID uint8, tcpState string) *flowexporter.Connection {
 	var tuple flowexporter.Tuple
 	if !isIPv6 {
-		tuple = flowexporter.Tuple{SourceAddress: net.IP{1, 2, 3, 4}, DestinationAddress: net.IP{4, 3, 2, 1}, Protocol: 6, SourcePort: 65280, DestinationPort: 255}
+		tuple = flowexporter.Tuple{SourceAddress: netip.MustParseAddr("1.2.3.4"), DestinationAddress: netip.MustParseAddr("4.3.2.1"), Protocol: 6, SourcePort: 65280, DestinationPort: 255}
 	} else {
-		srcIP := net.ParseIP("2001:0:3238:dfe1:63::fefb")
-		dstIP := net.ParseIP("2001:0:3238:dfe1:63::fefc")
+		srcIP := netip.MustParseAddr("2001:0:3238:dfe1:63::fefb")
+		dstIP := netip.MustParseAddr("2001:0:3238:dfe1:63::fefc")
 		tuple = flowexporter.Tuple{SourceAddress: srcIP, DestinationAddress: dstIP, Protocol: protoID, SourcePort: 65280, DestinationPort: 255}
 	}
 	conn := &flowexporter.Connection{
@@ -368,11 +480,11 @@ func getConnection(isIPv6 bool, isPresent bool, statusFlag uint32, protoID uint8
 		DestinationPodName:            "",
 		IngressNetworkPolicyName:      "",
 		IngressNetworkPolicyNamespace: "",
-		IngressNetworkPolicyType:      registry.PolicyTypeK8sNetworkPolicy,
+		IngressNetworkPolicyType:      ipfixregistry.PolicyTypeK8sNetworkPolicy,
 		IngressNetworkPolicyRuleName:  "",
 		EgressNetworkPolicyName:       "np",
 		EgressNetworkPolicyNamespace:  "np-ns",
-		EgressNetworkPolicyType:       registry.PolicyTypeK8sNetworkPolicy,
+		EgressNetworkPolicyType:       ipfixregistry.PolicyTypeK8sNetworkPolicy,
 		EgressNetworkPolicyRuleName:   "",
 		DestinationServicePortName:    "service",
 		TCPState:                      tcpState,
@@ -383,14 +495,15 @@ func getConnection(isIPv6 bool, isPresent bool, statusFlag uint32, protoID uint8
 func getDenyConnection(isIPv6 bool, protoID uint8) *flowexporter.Connection {
 	var tuple, _ flowexporter.Tuple
 	if !isIPv6 {
-		tuple = flowexporter.Tuple{SourceAddress: net.IP{1, 2, 3, 4}, DestinationAddress: net.IP{4, 3, 2, 1}, Protocol: 6, SourcePort: 65280, DestinationPort: 255}
+		tuple = flowexporter.Tuple{SourceAddress: netip.MustParseAddr("1.2.3.4"), DestinationAddress: netip.MustParseAddr("4.3.2.1"), Protocol: 6, SourcePort: 65280, DestinationPort: 255}
 	} else {
-		srcIP := net.ParseIP("2001:0:3238:dfe1:63::fefb")
-		dstIP := net.ParseIP("2001:0:3238:dfe1:63::fefc")
+		srcIP := netip.MustParseAddr("2001:0:3238:dfe1:63::fefb")
+		dstIP := netip.MustParseAddr("2001:0:3238:dfe1:63::fefc")
 		tuple = flowexporter.Tuple{SourceAddress: srcIP, DestinationAddress: dstIP, Protocol: protoID, SourcePort: 65280, DestinationPort: 255}
 	}
 	conn := &flowexporter.Connection{
-		FlowKey: tuple,
+		FlowKey:       tuple,
+		SourcePodName: "pod",
 	}
 	return conn
 }
@@ -422,7 +535,8 @@ func testSendFlowRecords(t *testing.T, v4Enabled bool, v6Enabled bool) {
 		elementsListv6: elemListv6,
 		templateIDv4:   testTemplateIDv4,
 		templateIDv6:   testTemplateIDv6,
-		v4Enabled:      true}
+		v4Enabled:      v4Enabled,
+		v6Enabled:      v6Enabled}
 
 	if v4Enabled {
 		runSendFlowRecordTests(t, flowExp, false)
@@ -434,8 +548,6 @@ func testSendFlowRecords(t *testing.T, v4Enabled bool, v6Enabled bool) {
 
 func runSendFlowRecordTests(t *testing.T, flowExp *FlowExporter, isIPv6 bool) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	mockIPFIXExpProc := ipfixtest.NewMockIPFIXExportingProcess(ctrl)
 	mockDataSet := ipfixentitiestesting.NewMockSet(ctrl)
 	flowExp.process = mockIPFIXExpProc
@@ -551,7 +663,7 @@ func runSendFlowRecordTests(t *testing.T, flowExp *FlowExporter, isIPv6 bool) {
 				IdleFlowTimeout:        testIdleFlowTimeout,
 				StaleConnectionTimeout: 1,
 				PollInterval:           1}
-			flowExp.conntrackConnStore = connections.NewConntrackConnectionStore(mockConnDumper, !isIPv6, isIPv6, nil, nil, nil, o)
+			flowExp.conntrackConnStore = connections.NewConntrackConnectionStore(mockConnDumper, !isIPv6, isIPv6, nil, nil, nil, nil, o)
 			flowExp.denyConnStore = connections.NewDenyConnectionStore(nil, nil, o)
 			flowExp.conntrackPriorityQueue = flowExp.conntrackConnStore.GetPriorityQueue()
 			flowExp.denyPriorityQueue = flowExp.denyConnStore.GetPriorityQueue()
@@ -650,4 +762,96 @@ func createElement(name string, enterpriseID uint32) ipfixentities.InfoElementWi
 	element, _ := ipfixregistry.GetInfoElement(name, enterpriseID)
 	ieWithValue, _ := ipfixentities.DecodeAndCreateInfoElementWithValue(element, nil)
 	return ieWithValue
+}
+
+func TestFlowExporter_prepareExporterInputArgs(t *testing.T) {
+	for _, tc := range []struct {
+		collectorProto              string
+		nodeName                    string
+		expectedObservationDomainID uint32
+		expectedIsEncrypted         bool
+		expectedProto               string
+	}{
+		{"tls", "kind-worker", 801257890, true, "tcp"},
+		{"tcp", "kind-worker", 801257890, false, "tcp"},
+		{"udp", "kind-worker", 801257890, false, "udp"},
+	} {
+		expInput := prepareExporterInputArgs(tc.collectorProto, tc.nodeName)
+		assert.Equal(t, tc.expectedObservationDomainID, expInput.ObservationDomainID)
+		assert.Equal(t, tc.expectedIsEncrypted, expInput.TLSClientConfig != nil)
+		assert.Equal(t, tc.expectedProto, expInput.CollectorProtocol)
+	}
+}
+
+func TestFlowExporter_findFlowType(t *testing.T) {
+	conn1 := flowexporter.Connection{SourcePodName: "podA", DestinationPodName: "podB"}
+	conn2 := flowexporter.Connection{SourcePodName: "podA", DestinationPodName: ""}
+	for _, tc := range []struct {
+		isNetworkPolicyOnly bool
+		conn                flowexporter.Connection
+		expectedFlowType    uint8
+	}{
+		{true, conn1, 1},
+		{true, conn2, 2},
+		{false, conn1, 0},
+	} {
+		flowExp := &FlowExporter{
+			isNetworkPolicyOnly: tc.isNetworkPolicyOnly,
+		}
+		flowType := flowExp.findFlowType(tc.conn)
+		assert.Equal(t, tc.expectedFlowType, flowType)
+	}
+}
+
+func TestFlowExporter_fillEgressInfo(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	testCases := []struct {
+		name                   string
+		sourcePodNamespace     string
+		sourcePodName          string
+		expectedEgressName     string
+		expectedEgressIP       string
+		expectedEgressNodeName string
+		expectedErr            string
+	}{
+		{
+			name:                   "EgressName, EgressIP and EgressNodeName filled",
+			sourcePodNamespace:     "namespaceA",
+			sourcePodName:          "podA",
+			expectedEgressName:     "test-egress",
+			expectedEgressIP:       "172.18.0.1",
+			expectedEgressNodeName: "test-egress-node",
+		},
+		{
+			name:                   "No Egress Information filled",
+			sourcePodNamespace:     "namespaceA",
+			sourcePodName:          "podC",
+			expectedEgressName:     "",
+			expectedEgressIP:       "",
+			expectedEgressNodeName: "",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			egressQuerier := queriertest.NewMockEgressQuerier(ctrl)
+			exp := &FlowExporter{
+				egressQuerier: egressQuerier,
+			}
+			conn := flowexporter.Connection{
+				SourcePodNamespace: tc.sourcePodNamespace,
+				SourcePodName:      tc.sourcePodName,
+			}
+			if tc.expectedEgressName != "" {
+				egressQuerier.EXPECT().GetEgress(conn.SourcePodNamespace, conn.SourcePodName).Return(tc.expectedEgressName, tc.expectedEgressIP, tc.expectedEgressNodeName, nil)
+			} else {
+				egressQuerier.EXPECT().GetEgress(conn.SourcePodNamespace, conn.SourcePodName).Return("", "", "", fmt.Errorf("no Egress applied to Pod %s", conn.SourcePodName))
+			}
+			exp.fillEgressInfo(&conn)
+			assert.Equal(t, tc.expectedEgressName, conn.EgressName)
+			assert.Equal(t, tc.expectedEgressIP, conn.EgressIP)
+			assert.Equal(t, tc.expectedEgressNodeName, conn.EgressNodeName)
+		})
+	}
 }

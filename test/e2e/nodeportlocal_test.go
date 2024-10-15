@@ -1,6 +1,3 @@
-//go:build !windows
-// +build !windows
-
 // Copyright 2021 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,6 +16,7 @@ package e2e
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -35,14 +33,13 @@ import (
 	npltesting "antrea.io/antrea/pkg/agent/nodeportlocal/testing"
 	"antrea.io/antrea/pkg/agent/nodeportlocal/types"
 	agentconfig "antrea.io/antrea/pkg/config/agent"
-	"antrea.io/antrea/pkg/features"
 )
 
 const (
-	defaultStartPort  = 61000
-	defaultEndPort    = 62000
-	updatedStartPort  = 63000
-	updatedEndPort    = 64000
+	defaultStartPort  = 26000
+	defaultEndPort    = 27000
+	updatedStartPort  = 28000
+	updatedEndPort    = 29000
 	defaultTargetPort = 80
 )
 
@@ -58,8 +55,14 @@ func newExpectedNPLAnnotations(nplStartPort, nplEndPort int) *npltesting.Expecte
 	return npltesting.NewExpectedNPLAnnotations(nil, nplStartPort, nplEndPort)
 }
 
-func skipIfNodePortLocalDisabled(tb testing.TB) {
-	skipIfFeatureDisabled(tb, features.NodePortLocal, true, false)
+func skipIfNodePortLocalDisabled(tb testing.TB, data *TestData) {
+	agentConf, err := data.GetAntreaAgentConf()
+	if err != nil {
+		tb.Fatalf("Error getting Antrea Agent configuration: %v:", err)
+	}
+	if !agentConf.NodePortLocal.Enable {
+		tb.Skipf("Skipping test because NodePortLocal is not enabled")
+	}
 }
 
 func configureNPLForAgent(t *testing.T, data *TestData, startPort, endPort int) {
@@ -77,7 +80,6 @@ func configureNPLForAgent(t *testing.T, data *TestData, startPort, endPort int) 
 // NodePortLocal related test cases so they can share setup, teardown.
 func TestNodePortLocal(t *testing.T) {
 	skipIfNotIPv4Cluster(t)
-	skipIfNodePortLocalDisabled(t)
 
 	data, err := setupTest(t)
 	if err != nil {
@@ -85,16 +87,17 @@ func TestNodePortLocal(t *testing.T) {
 	}
 	defer teardownTest(t, data)
 
+	skipIfNodePortLocalDisabled(t, data)
+
 	configureNPLForAgent(t, data, defaultStartPort, defaultEndPort)
 	t.Run("testNPLAddPod", func(t *testing.T) { testNPLAddPod(t, data) })
 	t.Run("testNPLMultiplePodsAgentRestart", func(t *testing.T) { testNPLMultiplePodsAgentRestart(t, data) })
 	t.Run("testNPLChangePortRangeAgentRestart", func(t *testing.T) { testNPLChangePortRangeAgentRestart(t, data) })
 }
 
-func getNPLAnnotation(t *testing.T, data *TestData, r *require.Assertions, testPodName string) (string, string) {
-	var nplAnn string
+func getNPLAnnotations(t *testing.T, data *TestData, r *require.Assertions, testPodName string, conditionFn func([]types.NPLAnnotation) bool) ([]types.NPLAnnotation, string) {
+	var nplAnnotations []types.NPLAnnotation
 	var testPodIP *PodIPs
-	var found bool
 
 	var err error
 	maxRetries := 0
@@ -112,7 +115,7 @@ func getNPLAnnotation(t *testing.T, data *TestData, r *require.Assertions, testP
 				return false, nil
 			}
 
-			podIPStrings := sets.NewString(pod.Status.PodIP)
+			podIPStrings := sets.New[string](pod.Status.PodIP)
 			for _, podIP := range pod.Status.PodIPs {
 				ipStr := strings.TrimSpace(podIP.IP)
 				if ipStr != "" {
@@ -121,13 +124,20 @@ func getNPLAnnotation(t *testing.T, data *TestData, r *require.Assertions, testP
 			}
 
 			testPodIP, err = parsePodIPs(podIPStrings)
-			if err != nil || testPodIP.ipv4 == nil {
+			if err != nil || testPodIP.IPv4 == nil {
 				return false, nil
 			}
 
 			ann := pod.GetAnnotations()
-			t.Logf("Got annotations %v for Pod with IP %v", ann, testPodIP.ipv4.String())
-			nplAnn, found = ann[types.NPLAnnotationKey]
+			t.Logf("Got annotations %v for Pod with IP %v", ann, testPodIP.IPv4.String())
+			nplAnn, found := ann[types.NPLAnnotationKey]
+			if !found {
+				return false, nil
+			}
+			json.Unmarshal([]byte(nplAnn), &nplAnnotations)
+			if conditionFn != nil && !conditionFn(nplAnnotations) {
+				return false, nil
+			}
 			return found, nil
 		})
 		if err == nil {
@@ -137,14 +147,7 @@ func getNPLAnnotation(t *testing.T, data *TestData, r *require.Assertions, testP
 		time.Sleep(time.Millisecond * 100)
 	}
 	r.NoError(err, "Poll for Pod check failed")
-	return nplAnn, testPodIP.ipv4.String()
-}
-
-func getNPLAnnotations(t *testing.T, data *TestData, r *require.Assertions, testPodName string) ([]types.NPLAnnotation, string) {
-	nplAnnotationString, testPodIP := getNPLAnnotation(t, data, r, testPodName)
-	var nplAnnotations []types.NPLAnnotation
-	json.Unmarshal([]byte(nplAnnotationString), &nplAnnotations)
-	return nplAnnotations, testPodIP
+	return nplAnnotations, testPodIP.IPv4.String()
 }
 
 func checkNPLRules(t *testing.T, data *TestData, r *require.Assertions, nplAnnotations []types.NPLAnnotation, antreaPod, podIP string, nodeName string, present bool) {
@@ -158,16 +161,14 @@ func checkNPLRules(t *testing.T, data *TestData, r *require.Assertions, nplAnnot
 func checkNPLRulesForPod(t *testing.T, data *TestData, r *require.Assertions, nplAnnotations []types.NPLAnnotation, antreaPod, podIP string, present bool) {
 	var rules []nplRuleData
 	for _, ann := range nplAnnotations {
-		for _, protocol := range ann.Protocols {
-			rule := nplRuleData{
-				nodeIP:   ann.NodeIP,
-				nodePort: ann.NodePort,
-				podIP:    podIP,
-				podPort:  ann.PodPort,
-				protocol: protocol,
-			}
-			rules = append(rules, rule)
+		rule := nplRuleData{
+			nodeIP:   ann.NodeIP,
+			nodePort: ann.NodePort,
+			podIP:    podIP,
+			podPort:  ann.PodPort,
+			protocol: ann.Protocol,
 		}
+		rules = append(rules, rule)
 	}
 	checkForNPLRuleInIPTables(t, data, r, antreaPod, rules, present)
 	checkForNPLListeningSockets(t, data, r, antreaPod, rules, present)
@@ -176,16 +177,14 @@ func checkNPLRulesForPod(t *testing.T, data *TestData, r *require.Assertions, np
 func checkNPLRulesForWindowsPod(t *testing.T, data *TestData, r *require.Assertions, nplAnnotations []types.NPLAnnotation, antreaPod, podIP string, nodeName string, present bool) {
 	var rules []nplRuleData
 	for _, ann := range nplAnnotations {
-		for _, protocol := range ann.Protocols {
-			rule := nplRuleData{
-				nodeIP:   ann.NodeIP,
-				nodePort: ann.NodePort,
-				podIP:    podIP,
-				podPort:  ann.PodPort,
-				protocol: protocol,
-			}
-			rules = append(rules, rule)
+		rule := nplRuleData{
+			nodeIP:   ann.NodeIP,
+			nodePort: ann.NodePort,
+			podIP:    podIP,
+			podPort:  ann.PodPort,
+			protocol: ann.Protocol,
 		}
+		rules = append(rules, rule)
 	}
 	checkForNPLRuleInNetNat(t, data, r, antreaPod, nodeName, rules, present)
 }
@@ -204,8 +203,8 @@ func protocolToString(p corev1.Protocol) string {
 func checkForNPLRuleInIPTables(t *testing.T, data *TestData, r *require.Assertions, antreaPod string, rules []nplRuleData, present bool) {
 	cmd := []string{"iptables", "-t", "nat", "-S"}
 	t.Logf("Verifying iptables rules %v, present: %v", rules, present)
-	const timeout = 30 * time.Second
-	err := wait.Poll(time.Second, timeout, func() (bool, error) {
+	const timeout = 60 * time.Second
+	err := wait.PollUntilContextTimeout(context.Background(), time.Second, timeout, false, func(ctx context.Context) (bool, error) {
 		stdout, _, err := data.RunCommandFromPod(antreaNamespace, antreaPod, agentContainerName, cmd)
 		if err != nil {
 			t.Logf("Error while checking rules in iptables: %v", err)
@@ -249,7 +248,7 @@ func checkForNPLRuleInNetNat(t *testing.T, data *TestData, r *require.Assertions
 	defaultnodeIP := "0.0.0.0"
 	t.Logf("Verifying NetNat rules %v, present: %v", rules, present)
 	const timeout = 60 * time.Second
-	err := wait.Poll(time.Second, timeout, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.Background(), time.Second, timeout, false, func(ctx context.Context) (bool, error) {
 		_, _, _, err := data.RunCommandOnNode(nodeName, "Get-NetNatStaticMapping")
 		if err != nil {
 			t.Logf("Error while checking NPL rules on Windows Node: %v", err)
@@ -292,7 +291,7 @@ func checkForNPLRuleInNetNat(t *testing.T, data *TestData, r *require.Assertions
 func checkForNPLListeningSockets(t *testing.T, data *TestData, r *require.Assertions, antreaPod string, rules []nplRuleData, present bool) {
 	t.Logf("Verifying NPL listening sockets")
 	const timeout = 30 * time.Second
-	err := wait.Poll(time.Second, timeout, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.Background(), time.Second, timeout, false, func(ctx context.Context) (bool, error) {
 		for _, rule := range rules {
 			protocolOption := "--" + rule.protocol
 			cmd := []string{"ss", "--listening", protocolOption, "-H", "-n"}
@@ -327,7 +326,6 @@ func checkForNPLListeningSockets(t *testing.T, data *TestData, r *require.Assert
 func deleteNPLRuleFromIPTables(t *testing.T, data *TestData, r *require.Assertions, antreaPod string, rule nplRuleData) {
 	cmd := append([]string{"iptables", "-w", "10", "-t", "nat", "-D", "ANTREA-NODE-PORT-LOCAL"}, buildRuleForPod(rule)...)
 	t.Logf("Deleting iptables rule for %v", rule)
-	const timeout = 30 * time.Second
 	_, _, err := data.RunCommandFromPod(antreaNamespace, antreaPod, agentContainerName, cmd)
 	r.NoError(err, "Error when deleting iptables rule")
 }
@@ -340,11 +338,22 @@ func deleteNPLRuleFromNetNat(t *testing.T, data *TestData, r *require.Assertions
 
 func checkTrafficForNPL(data *TestData, r *require.Assertions, nplAnnotations []types.NPLAnnotation, clientName string) {
 	for i := range nplAnnotations {
-		for j := range nplAnnotations[i].Protocols {
-			err := data.runNetcatCommandFromTestPodWithProtocol(clientName, data.testNamespace, "agnhost", nplAnnotations[i].NodeIP, int32(nplAnnotations[i].NodePort), nplAnnotations[i].Protocols[j])
-			r.NoError(err, "Traffic test failed for NodeIP: %s, NodePort: %d, Protocol: %s", nplAnnotations[i].NodeIP, nplAnnotations[i].NodePort, nplAnnotations[i].Protocols[j])
-		}
+		err := data.runNetcatCommandFromTestPodWithProtocol(clientName, data.testNamespace, "agnhost", nplAnnotations[i].NodeIP, int32(nplAnnotations[i].NodePort), nplAnnotations[i].Protocol)
+		r.NoError(err, "Traffic test failed for NodeIP: %s, NodePort: %d, Protocol: %s", nplAnnotations[i].NodeIP, nplAnnotations[i].NodePort, nplAnnotations[i].Protocol)
 	}
+}
+
+func getTwoNodes() (string, string) {
+	clientNode := nodeName(0)
+	serverNode := nodeName(1)
+
+	if len(clusterInfo.windowsNodes) > 1 {
+		// Same test topology on Windows and Linux testbeds.
+		clientNode = workerNodeName(clusterInfo.windowsNodes[0])
+		serverNode = workerNodeName(clusterInfo.windowsNodes[1])
+	}
+
+	return clientNode, serverNode
 }
 
 func testNPLAddPod(t *testing.T, data *TestData) {
@@ -366,41 +375,37 @@ func NPLTestMultiplePods(t *testing.T, data *TestData) {
 	annotation := make(map[string]string)
 	annotation[types.NPLEnabledAnnotationKey] = "true"
 	ipFamily := corev1.IPv4Protocol
-	node := nodeName(0)
-	workerNode := node
-	if len(clusterInfo.windowsNodes) != 0 {
-		workerNode = workerNodeName(clusterInfo.windowsNodes[0])
-	}
-	testData.createNginxClusterIPServiceWithAnnotations(workerNode, false, &ipFamily, annotation)
+	clientNode, serverNode := getTwoNodes()
+	testData.createNginxClusterIPServiceWithAnnotations(serverNode, false, &ipFamily, annotation)
 	var testPods []string
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 3; i++ {
 		testPodName := randName("test-pod-")
 		testPods = append(testPods, testPodName)
-		err := testData.createNginxPodOnNode(testPodName, data.testNamespace, workerNode, false)
+		err := testData.createNginxPodOnNode(testPodName, data.testNamespace, serverNode, false)
 		r.NoError(err, "Error creating test Pod: %v", err)
 	}
 
 	clientName := randName("test-client-")
-	err := testData.createAgnhostPodOnNode(clientName, data.testNamespace, workerNode, false)
+	err := testData.createAgnhostPodOnNode(clientName, data.testNamespace, clientNode, false)
 	r.NoError(err, "Error creating AgnhostPod %s: %v", clientName)
 
 	err = testData.podWaitForRunning(defaultTimeout, clientName, data.testNamespace)
 	r.NoError(err, "Error when waiting for Pod %s to be running", clientName)
 
-	antreaPod, err := testData.getAntreaPodOnNode(workerNode)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", workerNode)
+	antreaPod, err := testData.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
 	expectedAnnotations := newExpectedNPLAnnotations(defaultStartPort, defaultEndPort).Add(nil, defaultTargetPort, "tcp")
 	for _, testPodName := range testPods {
-		nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName)
+		nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName, nil)
 
-		checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, workerNode, true)
+		checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 		expectedAnnotations.Check(t, nplAnnotations)
 		checkTrafficForNPL(testData, r, nplAnnotations, clientName)
 
 		testData.DeletePod(data.testNamespace, testPodName)
-		checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, workerNode, false)
+		checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, false)
 	}
 	testData.DeletePod(data.testNamespace, clientName)
 }
@@ -409,10 +414,7 @@ func NPLTestMultiplePods(t *testing.T, data *TestData) {
 func NPLTestPodAddMultiPort(t *testing.T, data *TestData) {
 	r := require.New(t)
 
-	node := nodeName(0)
-	if len(clusterInfo.windowsNodes) != 0 {
-		node = workerNodeName(clusterInfo.windowsNodes[0])
-	}
+	clientNode, serverNode := getTwoNodes()
 	testPodName := randName("test-pod-")
 
 	annotation := make(map[string]string)
@@ -427,7 +429,7 @@ func NPLTestPodAddMultiPort(t *testing.T, data *TestData) {
 
 	podCmd := "porter"
 	// Creating a Pod using agnhost image to support multiple ports, instead of nginx.
-	err := NewPodBuilder(testPodName, data.testNamespace, agnhostImage).OnNode(node).WithArgs([]string{podCmd}).WithEnv([]corev1.EnvVar{
+	err := NewPodBuilder(testPodName, data.testNamespace, agnhostImage).OnNode(serverNode).WithArgs([]string{podCmd}).WithEnv([]corev1.EnvVar{
 		{
 			Name: fmt.Sprintf("SERVE_PORT_%d", 80), Value: "foo",
 		},
@@ -448,19 +450,19 @@ func NPLTestPodAddMultiPort(t *testing.T, data *TestData) {
 	}).Create(data)
 	r.NoError(err, "Error creating test Pod: %v", err)
 
-	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName)
+	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName, nil)
 
 	clientName := randName("test-client-")
-	err = testData.createAgnhostPodOnNode(clientName, data.testNamespace, node, false)
+	err = testData.createAgnhostPodOnNode(clientName, data.testNamespace, clientNode, false)
 	r.NoError(err, "Error when creating AgnhostPod %s", clientName)
 
 	err = testData.podWaitForRunning(defaultTimeout, clientName, data.testNamespace)
 	r.NoError(err, "Error when waiting for Pod %s to be running", clientName)
 
-	antreaPod, err := testData.getAntreaPodOnNode(node)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", node)
+	antreaPod, err := testData.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, true)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 	expectedAnnotations.Check(t, nplAnnotations)
 	checkTrafficForNPL(testData, r, nplAnnotations, clientName)
 
@@ -468,17 +470,14 @@ func NPLTestPodAddMultiPort(t *testing.T, data *TestData) {
 	testData.DeletePod(data.testNamespace, testPodName)
 	testData.DeleteService(data.testNamespace, "agnhost1")
 	testData.DeleteService(data.testNamespace, "agnhost2")
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, false)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, false)
 }
 
 // NPLTestPodAddMultiProtocol tests NodePortLocal functionalities for a Pod using a single port with multiple protocols.
 func NPLTestPodAddMultiProtocol(t *testing.T, data *TestData) {
 	r := require.New(t)
 
-	node := nodeName(0)
-	if len(clusterInfo.windowsNodes) != 0 {
-		node = workerNodeName(clusterInfo.windowsNodes[0])
-	}
+	clientNode, serverNode := getTwoNodes()
 	testPodName := randName("test-pod-")
 
 	annotation := make(map[string]string)
@@ -492,37 +491,47 @@ func NPLTestPodAddMultiProtocol(t *testing.T, data *TestData) {
 		Add(nil, 8080, "tcp").Add(nil, 8080, "udp")
 
 	// Creating a Pod using agnhost image to support multiple protocols, instead of nginx.
-	cmd := []string{"/bin/bash", "-c"}
-	args := []string{
-		fmt.Sprintf("/agnhost serve-hostname --udp --http=false --port %d & /agnhost serve-hostname --tcp --http=false --port %d", 8080, 8080),
-	}
+
+	args := []string{"serve-hostname", "--tcp", "--udp", "--http=false", "--port=8080"}
 	port := corev1.ContainerPort{ContainerPort: 8080}
 	containerName := fmt.Sprintf("c%v", 8080)
-	err := NewPodBuilder(testPodName, data.testNamespace, agnhostImage).OnNode(node).WithContainerName(containerName).WithCommand(cmd).WithArgs(args).WithPorts([]corev1.ContainerPort{port}).WithLabels(selector).Create(testData)
+	err := NewPodBuilder(testPodName, data.testNamespace, agnhostImage).OnNode(serverNode).WithContainerName(containerName).WithArgs(args).WithPorts([]corev1.ContainerPort{port}).WithLabels(selector).Create(testData)
 	r.NoError(err, "Error creating test Pod: %v", err)
 
-	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName)
+	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName, nil)
 
 	clientName := randName("test-client-")
-	err = testData.createAgnhostPodOnNode(clientName, data.testNamespace, node, false)
+	err = testData.createAgnhostPodOnNode(clientName, data.testNamespace, clientNode, false)
 	r.NoError(err, "Error when creating AgnhostPod %s", clientName)
 
 	err = testData.podWaitForRunning(defaultTimeout, clientName, data.testNamespace)
 	r.NoError(err, "Error when waiting for Pod %s to be running", clientName)
 
-	antreaPod, err := testData.getAntreaPodOnNode(node)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", node)
+	antreaPod, err := testData.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, true)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
+	expectedAnnotations.Check(t, nplAnnotations)
+	checkTrafficForNPL(testData, r, nplAnnotations, clientName)
 
+	// We now delete one of the Services, and we expect the corresponding NPL rule to be deleted.
+	testData.DeleteService(data.testNamespace, "agnhost2")
+	expectedAnnotations = newExpectedNPLAnnotations(defaultStartPort, defaultEndPort).
+		Add(nil, 8080, "tcp")
+	// Wait until we have only one NPL rule annotation.
+	conditionFn := func(annotations []types.NPLAnnotation) bool {
+		return len(annotations) == 1
+	}
+	nplAnnotations, testPodIP = getNPLAnnotations(t, testData, r, testPodName, conditionFn)
+
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 	expectedAnnotations.Check(t, nplAnnotations)
 	checkTrafficForNPL(testData, r, nplAnnotations, clientName)
 
 	testData.DeletePod(data.testNamespace, clientName)
 	testData.DeletePod(data.testNamespace, testPodName)
 	testData.DeleteService(data.testNamespace, "agnhost1")
-	testData.DeleteService(data.testNamespace, "agnhost2")
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, false)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, false)
 }
 
 // NPLTestLocalAccess validates that a NodePortLocal Pod can be accessed locally
@@ -534,36 +543,33 @@ func NPLTestLocalAccess(t *testing.T, data *TestData) {
 	annotation[types.NPLEnabledAnnotationKey] = "true"
 	ipFamily := corev1.IPv4Protocol
 
-	node := nodeName(0)
-	if len(clusterInfo.windowsNodes) != 0 {
-		node = workerNodeName(clusterInfo.windowsNodes[0])
-	}
+	clientNode, serverNode := getTwoNodes()
 
-	testData.createNginxClusterIPServiceWithAnnotations(node, false, &ipFamily, annotation)
+	testData.createNginxClusterIPServiceWithAnnotations(serverNode, false, &ipFamily, annotation)
 	expectedAnnotations := newExpectedNPLAnnotations(defaultStartPort, defaultEndPort).Add(nil, defaultTargetPort, "tcp")
 
 	testPodName := randName("test-pod-")
-	err := testData.createNginxPodOnNode(testPodName, data.testNamespace, node, false)
+	err := testData.createNginxPodOnNode(testPodName, data.testNamespace, serverNode, false)
 	r.NoError(err, "Error creating test Pod: %v", err)
 
 	clientName := randName("test-client-")
-	err = testData.createAgnhostPodOnNode(clientName, data.testNamespace, node, false)
+	err = testData.createAgnhostPodOnNode(clientName, data.testNamespace, clientNode, false)
 	r.NoError(err, "Error when creating AgnhostPod %s", clientName)
 
 	err = testData.podWaitForRunning(defaultTimeout, clientName, data.testNamespace)
 	r.NoError(err, "Error when waiting for Pod %s to be running", clientName)
 
-	antreaPod, err := testData.getAntreaPodOnNode(node)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", node)
+	antreaPod, err := testData.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
-	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName)
+	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPodName, nil)
 
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, true)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 	expectedAnnotations.Check(t, nplAnnotations)
 	checkTrafficForNPL(testData, r, nplAnnotations, clientName)
 
 	testData.DeletePod(data.testNamespace, testPodName)
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, false)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, false)
 	testData.DeletePod(data.testNamespace, clientName)
 }
 
@@ -579,63 +585,58 @@ func testNPLMultiplePodsAgentRestart(t *testing.T, data *TestData) {
 	annotation[types.NPLEnabledAnnotationKey] = "true"
 	ipFamily := corev1.IPv4Protocol
 
-	node := nodeName(0)
-	winenv := false
-	if len(clusterInfo.windowsNodes) != 0 {
-		node = workerNodeName(clusterInfo.windowsNodes[0])
-		winenv = true
-	}
-	data.createNginxClusterIPServiceWithAnnotations(node, false, &ipFamily, annotation)
+	clientNode, serverNode := getTwoNodes()
+	data.createNginxClusterIPServiceWithAnnotations(serverNode, false, &ipFamily, annotation)
 	var testPods []string
 	var err error
 	for i := 0; i < 4; i++ {
 		testPodName := randName("test-pod-")
 		testPods = append(testPods, testPodName)
-		err = data.createNginxPodOnNode(testPodName, data.testNamespace, node, false)
+		err = data.createNginxPodOnNode(testPodName, data.testNamespace, serverNode, false)
 		r.NoError(err, "Error creating test Pod: %v", err)
 	}
 
 	clientName := randName("test-client-")
-	err = data.createAgnhostPodOnNode(clientName, data.testNamespace, node, false)
+	err = data.createAgnhostPodOnNode(clientName, data.testNamespace, clientNode, false)
 	r.NoError(err, "Error when creating AgnhostPod %s", clientName)
 
 	err = data.podWaitForRunning(defaultTimeout, clientName, data.testNamespace)
 	r.NoError(err, "Error when waiting for Pod %s to be running", clientName)
 
-	antreaPod, err := data.getAntreaPodOnNode(node)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", node)
+	antreaPod, err := data.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
 	// Delete one iptables rule to ensure it gets re-installed correctly on restart.
-	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPods[0])
+	nplAnnotations, testPodIP := getNPLAnnotations(t, testData, r, testPods[0], nil)
 	r.Len(nplAnnotations, 1)
 	// Make sure the rule is present first. It should always be the case if the Pod was already
 	// annotated.
 
-	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, true)
+	checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 	ruleToDelete := nplRuleData{
-		nodeIP:   node,
+		nodeIP:   serverNode,
 		nodePort: nplAnnotations[0].NodePort,
 		podIP:    testPodIP,
 		podPort:  nplAnnotations[0].PodPort,
 		protocol: protocolToString(corev1.ProtocolTCP),
 	}
-	if !winenv {
-		deleteNPLRuleFromIPTables(t, data, r, antreaPod, ruleToDelete)
-	} else {
+	if len(clusterInfo.windowsNodes) > 1 {
 		deleteNPLRuleFromNetNat(t, data, r, antreaPod, ruleToDelete)
+	} else {
+		deleteNPLRuleFromIPTables(t, data, r, antreaPod, ruleToDelete)
 	}
 
-	err = data.restartAntreaAgentPods(defaultTimeout)
+	err = data.RestartAntreaAgentPods(defaultTimeout)
 	r.NoError(err, "Error when restarting Antrea Agent Pods")
 
-	antreaPod, err = data.getAntreaPodOnNode(node)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", node)
+	antreaPod, err = data.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
 	expectedAnnotations := newExpectedNPLAnnotations(defaultStartPort, defaultEndPort).Add(nil, defaultTargetPort, "tcp")
 	for _, testPodName := range testPods {
-		nplAnnotations, testPodIP := getNPLAnnotations(t, data, r, testPodName)
+		nplAnnotations, testPodIP := getNPLAnnotations(t, data, r, testPodName, nil)
 
-		checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, node, true)
+		checkNPLRules(t, testData, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 		expectedAnnotations.Check(t, nplAnnotations)
 		checkTrafficForNPL(data, r, nplAnnotations, clientName)
 		testData.DeletePod(data.testNamespace, testPodName)
@@ -645,7 +646,7 @@ func testNPLMultiplePodsAgentRestart(t *testing.T, data *TestData) {
 
 // testNPLChangePortRangeAgentRestart tests NodePortLocal functionalities after changing port range.
 // - Create multiple Nginx Pods.
-// - Change nplPortRange.
+// - Change the PortRange.
 // - Restart Antrea Agent Pods.
 // - Verify that updated port range is being used for NPL.
 func testNPLChangePortRangeAgentRestart(t *testing.T, data *TestData) {
@@ -655,22 +656,19 @@ func testNPLChangePortRangeAgentRestart(t *testing.T, data *TestData) {
 	annotation[types.NPLEnabledAnnotationKey] = "true"
 	ipFamily := corev1.IPv4Protocol
 
-	node := nodeName(0)
-	if len(clusterInfo.windowsNodes) != 0 {
-		node = workerNodeName(clusterInfo.windowsNodes[0])
-	}
-	data.createNginxClusterIPServiceWithAnnotations(node, false, &ipFamily, annotation)
+	clientNode, serverNode := getTwoNodes()
+	data.createNginxClusterIPServiceWithAnnotations(serverNode, false, &ipFamily, annotation)
 	var testPods []string
 	var err error
 	for i := 0; i < 4; i++ {
 		testPodName := randName("test-pod-")
 		testPods = append(testPods, testPodName)
-		err = data.createNginxPodOnNode(testPodName, data.testNamespace, node, false)
+		err = data.createNginxPodOnNode(testPodName, data.testNamespace, serverNode, false)
 		r.NoError(err, "Error Creating test Pod: %v", err)
 	}
 
 	clientName := randName("test-client-")
-	err = data.createAgnhostPodOnNode(clientName, data.testNamespace, node, false)
+	err = data.createAgnhostPodOnNode(clientName, data.testNamespace, clientNode, false)
 	r.NoError(err, "Error when creating AgnhostPod %s", clientName)
 
 	err = data.podWaitForRunning(defaultTimeout, clientName, data.testNamespace)
@@ -678,39 +676,42 @@ func testNPLChangePortRangeAgentRestart(t *testing.T, data *TestData) {
 
 	var rules []nplRuleData
 	for _, testPodName := range testPods {
-		nplAnnotations, testPodIP := getNPLAnnotations(t, data, r, testPodName)
+		nplAnnotations, testPodIP := getNPLAnnotations(t, data, r, testPodName, nil)
 		for i := range nplAnnotations {
-			for j := range nplAnnotations[i].Protocols {
-				rule := nplRuleData{
-					nodePort: nplAnnotations[i].NodePort,
-					podIP:    testPodIP,
-					podPort:  nplAnnotations[i].PodPort,
-					protocol: nplAnnotations[i].Protocols[j],
-				}
-				rules = append(rules, rule)
+			rule := nplRuleData{
+				nodePort: nplAnnotations[i].NodePort,
+				podIP:    testPodIP,
+				podPort:  nplAnnotations[i].PodPort,
+				protocol: nplAnnotations[i].Protocol,
 			}
+			rules = append(rules, rule)
 		}
 	}
-
 	configureNPLForAgent(t, data, updatedStartPort, updatedEndPort)
 
-	antreaPod, err := data.getAntreaPodOnNode(node)
-	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", node)
+	antreaPod, err := data.getAntreaPodOnNode(serverNode)
+	r.NoError(err, "Error when getting Antrea Agent Pod on Node '%s'", serverNode)
 
 	expectedAnnotations := newExpectedNPLAnnotations(updatedStartPort, updatedEndPort).Add(nil, defaultTargetPort, "tcp")
 
-	if clusterInfo.nodesOS[node] == "windows" {
+	if clusterInfo.nodesOS[serverNode] == "windows" {
 		time.Sleep(10 * time.Second)
-		checkForNPLRuleInNetNat(t, data, r, antreaPod, node, rules, false)
+		checkForNPLRuleInNetNat(t, data, r, antreaPod, serverNode, rules, false)
 	} else {
 		checkForNPLRuleInIPTables(t, data, r, antreaPod, rules, false)
 		checkForNPLListeningSockets(t, data, r, antreaPod, rules, false)
 	}
 
 	for _, testPodName := range testPods {
-		nplAnnotations, testPodIP := getNPLAnnotations(t, data, r, testPodName)
+		conditionFn := func(annotations []types.NPLAnnotation) bool {
+			for idx := range annotations {
+				return annotations[idx].NodePort >= updatedStartPort
+			}
+			return true
+		}
+		nplAnnotations, testPodIP := getNPLAnnotations(t, data, r, testPodName, conditionFn)
 
-		checkNPLRules(t, data, r, nplAnnotations, antreaPod, testPodIP, node, true)
+		checkNPLRules(t, data, r, nplAnnotations, antreaPod, testPodIP, serverNode, true)
 		expectedAnnotations.Check(t, nplAnnotations)
 		checkTrafficForNPL(data, r, nplAnnotations, clientName)
 		testData.DeletePod(data.testNamespace, testPodName)

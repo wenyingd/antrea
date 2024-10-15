@@ -31,10 +31,13 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	multiclusterv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
+	mcv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
+	mcv1alpha2 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha2"
 	"antrea.io/antrea/multicluster/controllers/multicluster/common"
 )
 
@@ -45,41 +48,6 @@ const (
 var (
 	ReasonDisconnected = "Disconnected"
 )
-
-// CommonArea is an interface that provides access to the Common Area of a ClusterSet.
-// Common Area of a ClusterSet is a Namespace in the leader cluster.
-type CommonArea interface {
-	// Client grants read/write to the Namespace of the cluster that is backing this CommonArea.
-	client.Client
-
-	// GetClusterID returns the clusterID of the leader cluster.
-	GetClusterID() common.ClusterID
-
-	// GetNamespace returns the Namespace backing this CommonArea.
-	GetNamespace() string
-}
-
-// RemoteCommonArea is an abstraction to connect to CommonArea of the leader cluster.
-type RemoteCommonArea interface {
-	CommonArea
-
-	Start() context.CancelFunc
-
-	Stop()
-
-	// IsConnected returns whether the RemoteCommonArea is accessible or not.
-	IsConnected() bool
-
-	// StartWatching sets up a Manager to reconcile resource crud operations from CommonArea of RemoteCommonArea.
-	StartWatching() error
-
-	// StopWatching stops the Manager so the crud operations in RemoteCommonArea no longer invoke the reconcilers.
-	StopWatching()
-
-	GetStatus() []multiclusterv1alpha1.ClusterCondition
-
-	GetLocalClusterID() string
-}
 
 // remoteCommonArea implements the CommonArea interface and allows local cluster to read/write into
 // the CommonArea of RemoteCommonArea.
@@ -112,11 +80,11 @@ type remoteCommonArea struct {
 	// connected is a state to know whether the remoteCommonArea is connected or not.
 	connected bool
 
-	clusterStatus multiclusterv1alpha1.ClusterCondition
-	leaderStatus  multiclusterv1alpha1.ClusterCondition
+	clusterStatus mcv1alpha2.ClusterCondition
+	leaderStatus  mcv1alpha2.ClusterCondition
 
 	// The ID of the local member cluster
-	localClusterID common.ClusterSetID
+	localClusterID common.ClusterID
 
 	// client that provides read/write access into the local cluster
 	localClusterClient client.Client
@@ -129,59 +97,41 @@ type remoteCommonArea struct {
 
 	// managerStopFunc to stop the manager when the RemoteCommonArea is stopped.
 	managerStopFunc context.CancelFunc
+
+	// Enable StretchedNetworkPolicy which will export and import labelIdentities in the
+	// ClusterSet and allow Antrea-native policies to select peers from other clusters
+	// in a ClusterSet.
+	enableStretchedNetworkPolicy bool
+
+	// A list of ImportReconcilers to reconcile ResourceImports.
+	importReconcilers []ImportReconciler
 }
 
 // NewRemoteCommonArea returns a RemoteCommonArea instance which will use access credentials from the Secret to
 // connect to the leader cluster's CommonArea.
-func NewRemoteCommonArea(clusterID common.ClusterID, clusterSetID common.ClusterSetID, localClusterID common.ClusterSetID, url string, secret *v1.Secret,
-	scheme *runtime.Scheme, localClusterClient client.Client, clusterSetNamespace string, localNamespace string) (RemoteCommonArea, error) {
+func NewRemoteCommonArea(clusterID common.ClusterID, clusterSetID common.ClusterSetID, localClusterID common.ClusterID, mgr manager.Manager, remoteClient client.Client,
+	scheme *runtime.Scheme, localClusterClient client.Client, clusterSetNamespace string, localNamespace string, config *rest.Config, enableStretchedNetworkPolicy bool) (RemoteCommonArea, error) {
 	klog.InfoS("Create a RemoteCommonArea", "cluster", clusterID)
 
-	crtData, token, err := GetSecretCACrtAndToken(secret)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create manager for the RemoteCommonArea
-	klog.InfoS("Connecting to RemoteCommonArea", "cluster", clusterID, "url", url)
-	config, err := clientcmd.BuildConfigFromFlags(url, "")
-	if err != nil {
-		return nil, err
-	}
-	config.BearerToken = string(token)
-	config.CAData = crtData
-	mgr, err := ctrl.NewManager(config, ctrl.Options{
-		Scheme:             scheme,
-		MetricsBindAddress: "0",
-		Namespace:          clusterSetNamespace,
-	})
-	if err != nil {
-		klog.ErrorS(err, "Error creating manager for RemoteCommonArea", "cluster", clusterID)
-		return nil, err
-	}
-
-	remoteClient, e := client.New(config, client.Options{Scheme: scheme})
-	if e != nil {
-		return nil, e
-	}
 	remote := &remoteCommonArea{
-		Client:             remoteClient,
-		ClusterManager:     mgr,
-		ClusterSetID:       clusterSetID,
-		ClusterID:          clusterID,
-		config:             config,
-		scheme:             scheme,
-		Namespace:          clusterSetNamespace,
-		connected:          false,
-		localClusterClient: localClusterClient,
-		localNamespace:     localNamespace,
-		localClusterID:     localClusterID,
+		Client:                       remoteClient,
+		ClusterManager:               mgr,
+		ClusterSetID:                 clusterSetID,
+		ClusterID:                    clusterID,
+		config:                       config,
+		scheme:                       scheme,
+		Namespace:                    clusterSetNamespace,
+		connected:                    false,
+		localClusterClient:           localClusterClient,
+		localNamespace:               localNamespace,
+		localClusterID:               localClusterID,
+		enableStretchedNetworkPolicy: enableStretchedNetworkPolicy,
 	}
-	remote.clusterStatus.Type = multiclusterv1alpha1.ClusterReady
+	remote.clusterStatus.Type = mcv1alpha2.ClusterReady
 	remote.clusterStatus.Status = v1.ConditionUnknown
 	remote.clusterStatus.Message = "Leader cluster added"
 	remote.clusterStatus.LastTransitionTime = metav1.Now()
-	remote.leaderStatus.Type = multiclusterv1alpha1.ClusterIsLeader
+	remote.leaderStatus.Type = mcv1alpha2.ClusterIsLeader
 	remote.leaderStatus.Status = v1.ConditionFalse
 	remote.leaderStatus.Message = "Leader cluster added"
 	remote.leaderStatus.LastTransitionTime = metav1.Now()
@@ -189,10 +139,48 @@ func NewRemoteCommonArea(clusterID common.ClusterID, clusterSetID common.Cluster
 	return remote, nil
 }
 
+func GetRemoteConfigAndClient(secretObj *v1.Secret, url string, clusterID common.ClusterID, clusterSet *mcv1alpha2.ClusterSet, scheme *runtime.Scheme) (*rest.Config,
+	manager.Manager, client.Client, error) {
+	crtData, token, err := getSecretCACrtAndToken(secretObj)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	config, err := clientcmd.BuildConfigFromFlags(url, "")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	config.BearerToken = string(token)
+	config.CAData = crtData
+
+	config.QPS = common.ResourceExchangeQPS
+	config.Burst = common.ResourceExchangeBurst
+	remoteCommonAreaMgr, err := ctrl.NewManager(config, ctrl.Options{
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: "0",
+		},
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{
+				clusterSet.Spec.Namespace: {},
+			},
+		},
+	})
+	if err != nil {
+		klog.ErrorS(err, "Error creating manager for RemoteCommonArea", "cluster", clusterID)
+		return nil, nil, nil, err
+	}
+
+	remoteClient, e := client.New(config, client.Options{Scheme: scheme})
+	if e != nil {
+		return nil, nil, nil, e
+	}
+	return config, remoteCommonAreaMgr, remoteClient, nil
+}
+
 /**
  * GetSecretCACrtAndToken returns the access credentials from Secret.
  */
-func GetSecretCACrtAndToken(secretObj *v1.Secret) ([]byte, []byte, error) {
+func getSecretCACrtAndToken(secretObj *v1.Secret) ([]byte, []byte, error) {
 	caData, found := secretObj.Data[v1.ServiceAccountRootCAKey]
 	if !found {
 		return nil, nil, fmt.Errorf("ca.crt data not found in Secret %v", secretObj.GetName())
@@ -209,7 +197,7 @@ func GetSecretCACrtAndToken(secretObj *v1.Secret) ([]byte, []byte, error) {
 func (r *remoteCommonArea) SendMemberAnnounce() error {
 	var err error
 	memberAnnounceName := "member-announce-from-" + r.GetLocalClusterID()
-	existingMemberAnnounce := &multiclusterv1alpha1.MemberClusterAnnounce{}
+	existingMemberAnnounce := &mcv1alpha1.MemberClusterAnnounce{}
 	if err = r.Get(context.TODO(), types.NamespacedName{
 		Namespace: r.GetNamespace(),
 		Name:      memberAnnounceName,
@@ -315,7 +303,7 @@ func (r *remoteCommonArea) Start() context.CancelFunc {
 	go func() {
 		klog.InfoS("Starting MemberAnnounce to RemoteCommonArea", "cluster", r.GetClusterID())
 		r.doMemberAnnounce()
-		startedImporter := false
+		startedImporters := false
 		for {
 			select {
 			case <-stopCtx.Done():
@@ -324,13 +312,13 @@ func (r *remoteCommonArea) Start() context.CancelFunc {
 				return
 			case <-ticker.C:
 				r.doMemberAnnounce()
-				if !startedImporter && r.connected {
+				if !startedImporters && r.connected {
 					if err := r.StartWatching(); err != nil {
 						// Will retry in next tick.
 						klog.ErrorS(err, "Failed to start watching events")
 						return
 					}
-					startedImporter = true
+					startedImporters = true
 				}
 			}
 		}
@@ -365,26 +353,22 @@ func (r *remoteCommonArea) IsConnected() bool {
 	return r.connected
 }
 
+func (r *remoteCommonArea) AddImportReconciler(reconciler ImportReconciler) {
+	r.importReconcilers = append(r.importReconcilers, reconciler)
+}
+
 func (r *remoteCommonArea) StartWatching() error {
 	if r.managerStopFunc != nil {
 		klog.InfoS("Manager already watching resources from RemoteCommonArea", "cluster", r.ClusterID)
 		return nil
 	}
 
-	klog.V(2).InfoS("Start monitoring ResourceImport from RemoteCommonArea", "cluster", r.ClusterID)
+	klog.V(2).InfoS("Start watching ResourceImports from RemoteCommonArea", "cluster", r.ClusterID)
 
-	resImportReconciler := NewResourceImportReconciler(
-		r.ClusterManager.GetClient(),
-		r.ClusterManager.GetScheme(),
-		r.localClusterClient,
-		string(r.GetLocalClusterID()),
-		r.localNamespace,
-		r,
-	)
-
-	if err := resImportReconciler.SetupWithManager(r.ClusterManager); err != nil {
-		klog.V(2).ErrorS(err, "Error creating ResourceImport controller for RemoteCommonArea", "cluster", r.ClusterID)
-		return fmt.Errorf("error creating ResourceImport controller for RemoteCommonArea: %v", err)
+	for _, rc := range r.importReconcilers {
+		if err := rc.SetupWithManager(r.ClusterManager); err != nil {
+			return fmt.Errorf("error setting up ResourceImport controller for RemoteCommonArea: %v", err)
+		}
 	}
 
 	go func() {
@@ -412,11 +396,11 @@ func (r *remoteCommonArea) StopWatching() {
 	r.managerStopFunc = nil
 }
 
-func (r *remoteCommonArea) GetStatus() []multiclusterv1alpha1.ClusterCondition {
+func (r *remoteCommonArea) GetStatus() []mcv1alpha2.ClusterCondition {
 	defer r.mutex.Unlock()
 	r.mutex.Lock()
 
-	statues := make([]multiclusterv1alpha1.ClusterCondition, 0, 2)
+	statues := make([]mcv1alpha2.ClusterCondition, 0, 2)
 	statues = append(statues, r.clusterStatus) // This will be a copy
 	statues = append(statues, r.leaderStatus)  // This will be a copy
 	return statues

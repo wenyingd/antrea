@@ -20,20 +20,28 @@ package e2e
 
 import (
 	"flag"
-	"io/ioutil"
 	"log"
-	"math/rand"
 	"os"
 	"path"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
+
+	agentconfig "antrea.io/antrea/pkg/config/agent"
+)
+
+const (
+	antreaAgentConfigName string = "antrea-config"
+	antreaAgentNamespace  string = "kube-system"
+	antreaAgentConfName   string = "antrea-agent.conf"
 )
 
 // setupLogging creates a temporary directory to export the test logs if necessary. If a directory
 // was provided by the user, it checks that the directory exists.
 func (tOptions *TestOptions) setupLogging() func() {
 	if tOptions.logsExportDir == "" {
-		name, err := ioutil.TempDir("", "antrea-multicluster-test-")
+		name, err := os.MkdirTemp("", "antrea-multicluster-test-")
 		if err != nil {
 			log.Fatalf("Error when creating temporary directory to export logs: %v", err)
 		}
@@ -81,10 +89,47 @@ func testMain(m *testing.M) int {
 	if err := testData.initProviders(); err != nil {
 		log.Fatalf("Error when initializing providers for ClusterSet: %v", err)
 	}
-	rand.Seed(time.Now().UnixNano())
 
 	ret := m.Run()
+	if ret != 0 {
+		log.Println("Failed to run default Multi-cluster E2E tests")
+		return ret
+	}
+
+	log.Println("Starting E2E test with WireGuard")
+	for _, clusterName := range testData.clusters {
+		if clusterName == leaderCluster {
+			continue
+		}
+		if err := enableWireGuard(clusterName); err != nil {
+			log.Fatalf("Error when enabling WireGuard encryption, error: %v", err)
+		}
+	}
+
+	ret = m.Run()
 	return ret
+}
+
+func enableWireGuard(clusterName string) error {
+	data := testData.clusterTestDataMap[clusterName]
+	configMap, err := data.GetConfigMap(antreaAgentNamespace, antreaAgentConfigName)
+	if err != nil {
+		return err
+	}
+	antreaAgentConfig := &agentconfig.AgentConfig{}
+	if err := yaml.Unmarshal([]byte(configMap.Data[antreaAgentConfName]), antreaAgentConfig); err != nil {
+		return err
+	}
+	antreaAgentConfig.Multicluster.TrafficEncryptionMode = "wireGuard"
+	conf, err := yaml.Marshal(antreaAgentConfig)
+	if err != nil {
+		return err
+	}
+	configMap.Data[antreaAgentConfigName] = string(conf)
+	if err := data.UpdateConfigMap(configMap); err != nil {
+		return err
+	}
+	return data.RestartAntreaAgentPods(defaultTimeout)
 }
 
 func TestMain(m *testing.M) {
@@ -107,19 +152,26 @@ func TestConnectivity(t *testing.T) {
 		time.Sleep(5 * time.Second)
 	}
 
-	t.Run("TestMCServiceExport", func(t *testing.T) {
+	t.Run("TestMCService", func(t *testing.T) {
 		defer tearDownForServiceExportsTest(t, data)
 		initializeForServiceExportsTest(t, data)
 		t.Run("Case=MCServiceConnectivity", func(t *testing.T) { testMCServiceConnectivity(t, data) })
-		t.Run("Case=ANPToServices", func(t *testing.T) { testANPToServices(t, data) })
+		t.Run("Case=ScaleDownMCServiceEndpoints", func(t *testing.T) { testScaleDownMCServiceEndpoints(t, data) })
+		t.Run("Case=ANNPToServices", func(t *testing.T) { testANNPToServices(t, data) })
+		t.Run("Case=StretchedNetworkPolicy", func(t *testing.T) { testStretchedNetworkPolicy(t, data) })
+		t.Run("Case=StretchedNetworkPolicyReject", func(t *testing.T) { testStretchedNetworkPolicyReject(t, data) })
+		t.Run("Case=StretchedNetworkPolicyUpdatePod", func(t *testing.T) { testStretchedNetworkPolicyUpdatePod(t, data) })
+		t.Run("Case=StretchedNetworkPolicyUpdateNS", func(t *testing.T) { testStretchedNetworkPolicyUpdateNS(t, data) })
+		t.Run("Case=StretchedNetworkPolicyUpdatePolicy", func(t *testing.T) { testStretchedNetworkPolicyUpdatePolicy(t, data) })
 	})
 
 	t.Run("TestAntreaPolicy", func(t *testing.T) {
 		defer tearDownForPolicyTest()
 		initializeForPolicyTest(t, data)
-		testMCAntreaPolicy(t, data)
+		t.Run("Case=CopySpanNSIsolation", func(t *testing.T) { testAntreaPolicyCopySpanNSIsolation(t, data) })
+		t.Run("Case=CrossClusterNSIsolation", func(t *testing.T) { testAntreaPolicyCrossClusterNSIsolation(t, data) })
 	})
 	// Wait 5 seconds to let both member and leader controllers clean up all resources,
-	// otherwise, Namespace deletion may stuck into termininating status.
+	// otherwise, Namespace deletion may be stuck in terminating status.
 	time.Sleep(5 * time.Second)
 }

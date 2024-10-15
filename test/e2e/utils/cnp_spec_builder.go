@@ -18,31 +18,33 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 )
 
 type ClusterNetworkPolicySpecBuilder struct {
-	Spec crdv1alpha1.ClusterNetworkPolicySpec
+	Spec crdv1beta1.ClusterNetworkPolicySpec
 	Name string
 }
 
 type ACNPAppliedToSpec struct {
-	PodSelector         map[string]string
-	NSSelector          map[string]string
-	PodSelectorMatchExp []metav1.LabelSelectorRequirement
-	NSSelectorMatchExp  []metav1.LabelSelectorRequirement
-	Group               string
-	Service             *crdv1alpha1.NamespacedName
+	PodSelector          map[string]string
+	NodeSelector         map[string]string
+	NSSelector           map[string]string
+	PodSelectorMatchExp  []metav1.LabelSelectorRequirement
+	NodeSelectorMatchExp []metav1.LabelSelectorRequirement
+	NSSelectorMatchExp   []metav1.LabelSelectorRequirement
+	Group                string
+	Service              *crdv1beta1.NamespacedName
 }
 
-func (b *ClusterNetworkPolicySpecBuilder) Get() *crdv1alpha1.ClusterNetworkPolicy {
+func (b *ClusterNetworkPolicySpecBuilder) Get() *crdv1beta1.ClusterNetworkPolicy {
 	if b.Spec.Ingress == nil {
-		b.Spec.Ingress = []crdv1alpha1.Rule{}
+		b.Spec.Ingress = []crdv1beta1.Rule{}
 	}
 	if b.Spec.Egress == nil {
-		b.Spec.Egress = []crdv1alpha1.Rule{}
+		b.Spec.Egress = []crdv1beta1.Rule{}
 	}
-	return &crdv1alpha1.ClusterNetworkPolicy{
+	return &crdv1beta1.ClusterNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: b.Name,
 		},
@@ -67,37 +69,54 @@ func (b *ClusterNetworkPolicySpecBuilder) SetTier(tier string) *ClusterNetworkPo
 
 func (b *ClusterNetworkPolicySpecBuilder) SetAppliedToGroup(specs []ACNPAppliedToSpec) *ClusterNetworkPolicySpecBuilder {
 	for _, spec := range specs {
-		appliedToPeer := b.GetAppliedToPeer(spec.PodSelector, spec.NSSelector, spec.PodSelectorMatchExp, spec.NSSelectorMatchExp, spec.Group, spec.Service)
+		appliedToPeer := b.GetAppliedToPeer(spec.PodSelector,
+			spec.NodeSelector,
+			spec.NSSelector,
+			spec.PodSelectorMatchExp,
+			spec.NodeSelectorMatchExp,
+			spec.NSSelectorMatchExp,
+			spec.Group,
+			spec.Service)
 		b.Spec.AppliedTo = append(b.Spec.AppliedTo, appliedToPeer)
 	}
 	return b
 }
 
 func (b *ClusterNetworkPolicySpecBuilder) GetAppliedToPeer(podSelector map[string]string,
+	nodeSelector map[string]string,
 	nsSelector map[string]string,
 	podSelectorMatchExp []metav1.LabelSelectorRequirement,
+	nodeSelectorMatchExp []metav1.LabelSelectorRequirement,
 	nsSelectorMatchExp []metav1.LabelSelectorRequirement,
 	appliedToCG string,
-	service *crdv1alpha1.NamespacedName) crdv1alpha1.NetworkPolicyPeer {
+	service *crdv1beta1.NamespacedName) crdv1beta1.AppliedTo {
 
-	var ps *metav1.LabelSelector
-	var ns *metav1.LabelSelector
+	var podSel *metav1.LabelSelector
+	var nodeSel *metav1.LabelSelector
+	var nsSel *metav1.LabelSelector
 
 	if podSelector != nil || podSelectorMatchExp != nil {
-		ps = &metav1.LabelSelector{
+		podSel = &metav1.LabelSelector{
 			MatchLabels:      podSelector,
 			MatchExpressions: podSelectorMatchExp,
 		}
 	}
+	if nodeSelector != nil || nodeSelectorMatchExp != nil {
+		nodeSel = &metav1.LabelSelector{
+			MatchLabels:      nodeSelector,
+			MatchExpressions: nodeSelectorMatchExp,
+		}
+	}
 	if nsSelector != nil || nsSelectorMatchExp != nil {
-		ns = &metav1.LabelSelector{
+		nsSel = &metav1.LabelSelector{
 			MatchLabels:      nsSelector,
 			MatchExpressions: nsSelectorMatchExp,
 		}
 	}
-	peer := crdv1alpha1.NetworkPolicyPeer{
-		PodSelector:       ps,
-		NamespaceSelector: ns,
+	peer := crdv1beta1.AppliedTo{
+		PodSelector:       podSel,
+		NodeSelector:      nodeSel,
+		NamespaceSelector: nsSel,
 	}
 	if appliedToCG != "" {
 		peer.Group = appliedToCG
@@ -110,60 +129,141 @@ func (b *ClusterNetworkPolicySpecBuilder) GetAppliedToPeer(podSelector map[strin
 
 func (b *ClusterNetworkPolicySpecBuilder) AddIngress(protoc AntreaPolicyProtocol,
 	port *int32, portName *string, endPort, icmpType, icmpCode, igmpType *int32,
-	groupAddress, cidr *string, podSelector map[string]string, nsSelector map[string]string,
-	podSelectorMatchExp []metav1.LabelSelectorRequirement, nsSelectorMatchExp []metav1.LabelSelectorRequirement, selfNS bool,
-	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1alpha1.RuleAction, ruleClusterGroup, name string, serviceAccount *crdv1alpha1.NamespacedName) *ClusterNetworkPolicySpecBuilder {
+	groupAddress *string, ipBlock *crdv1beta1.IPBlock, podSelector map[string]string, nodeSelector map[string]string, nsSelector map[string]string,
+	podSelectorMatchExp []metav1.LabelSelectorRequirement, nodeSelectorMatchExp []metav1.LabelSelectorRequirement, nsSelectorMatchExp []metav1.LabelSelectorRequirement, namespaces *crdv1beta1.PeerNamespaces,
+	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction, ruleClusterGroup, name string, serviceAccount *crdv1beta1.NamespacedName) *ClusterNetworkPolicySpecBuilder {
 
-	var pSel *metav1.LabelSelector
-	var nSel *metav1.LabelSelector
-	var ns *crdv1alpha1.PeerNamespaces
-	var appliedTos []crdv1alpha1.NetworkPolicyPeer
-	matchSelf := crdv1alpha1.NamespaceMatchSelf
+	var podSel *metav1.LabelSelector
+	var nodeSel *metav1.LabelSelector
+	var nsSel *metav1.LabelSelector
+	var appliedTos []crdv1beta1.AppliedTo
 
 	if b.Spec.Ingress == nil {
-		b.Spec.Ingress = []crdv1alpha1.Rule{}
+		b.Spec.Ingress = []crdv1beta1.Rule{}
 	}
 
 	if podSelector != nil || podSelectorMatchExp != nil {
-		pSel = &metav1.LabelSelector{
+		podSel = &metav1.LabelSelector{
 			MatchLabels:      podSelector,
 			MatchExpressions: podSelectorMatchExp,
 		}
 	}
+	if nodeSelector != nil || nodeSelectorMatchExp != nil {
+		nodeSel = &metav1.LabelSelector{
+			MatchLabels:      nodeSelector,
+			MatchExpressions: nodeSelectorMatchExp,
+		}
+	}
 	if nsSelector != nil || nsSelectorMatchExp != nil {
-		nSel = &metav1.LabelSelector{
+		nsSel = &metav1.LabelSelector{
+			MatchLabels:      nsSelector,
+			MatchExpressions: nsSelectorMatchExp,
+		}
+	}
+	for _, at := range ruleAppliedToSpecs {
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector,
+			at.NodeSelector,
+			at.NSSelector,
+			at.PodSelectorMatchExp,
+			at.NodeSelectorMatchExp,
+			at.NSSelectorMatchExp,
+			at.Group,
+			at.Service))
+	}
+	// An empty From/To in ACNP rules evaluates to match all addresses.
+	policyPeer := make([]crdv1beta1.NetworkPolicyPeer, 0)
+	if podSel != nil || nodeSel != nil || nsSel != nil || namespaces != nil || ipBlock != nil || ruleClusterGroup != "" || serviceAccount != nil {
+		policyPeer = []crdv1beta1.NetworkPolicyPeer{{
+			PodSelector:       podSel,
+			NodeSelector:      nodeSel,
+			NamespaceSelector: nsSel,
+			Namespaces:        namespaces,
+			IPBlock:           ipBlock,
+			Group:             ruleClusterGroup,
+			ServiceAccount:    serviceAccount,
+		}}
+	}
+	ports, protocols := GenPortsOrProtocols(protoc, port, portName, endPort, nil, nil, icmpType, icmpCode, igmpType, groupAddress)
+	newRule := crdv1beta1.Rule{
+		From:      policyPeer,
+		Ports:     ports,
+		Protocols: protocols,
+		Action:    &action,
+		Name:      name,
+		AppliedTo: appliedTos,
+	}
+	b.Spec.Ingress = append(b.Spec.Ingress, newRule)
+	return b
+}
+
+// TODO: added new function to avoid merge conflicts. Unify this function with 'addIngress' when
+//
+//	all conflicting PRs are merged.
+func (b *ClusterNetworkPolicySpecBuilder) AddIngressForSrcPort(protoc AntreaPolicyProtocol,
+	port, endPort, srcPort, endSrcPort, icmpType, icmpCode, igmpType *int32,
+	groupAddress *string, ipBlock *crdv1beta1.IPBlock, podSelector map[string]string, nodeSelector map[string]string, nsSelector map[string]string,
+	podSelectorMatchExp []metav1.LabelSelectorRequirement, nodeSelectorMatchExp []metav1.LabelSelectorRequirement, nsSelectorMatchExp []metav1.LabelSelectorRequirement, selfNS bool,
+	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction, ruleClusterGroup, name string, serviceAccount *crdv1beta1.NamespacedName) *ClusterNetworkPolicySpecBuilder {
+
+	var podSel *metav1.LabelSelector
+	var nodeSel *metav1.LabelSelector
+	var nsSel *metav1.LabelSelector
+	var ns *crdv1beta1.PeerNamespaces
+	var appliedTos []crdv1beta1.AppliedTo
+	matchSelf := crdv1beta1.NamespaceMatchSelf
+
+	if b.Spec.Ingress == nil {
+		b.Spec.Ingress = []crdv1beta1.Rule{}
+	}
+
+	if podSelector != nil || podSelectorMatchExp != nil {
+		podSel = &metav1.LabelSelector{
+			MatchLabels:      podSelector,
+			MatchExpressions: podSelectorMatchExp,
+		}
+	}
+	if nodeSelector != nil || nodeSelectorMatchExp != nil {
+		nodeSel = &metav1.LabelSelector{
+			MatchLabels:      nodeSelector,
+			MatchExpressions: nodeSelectorMatchExp,
+		}
+	}
+	if nsSelector != nil || nsSelectorMatchExp != nil {
+		nsSel = &metav1.LabelSelector{
 			MatchLabels:      nsSelector,
 			MatchExpressions: nsSelectorMatchExp,
 		}
 	}
 	if selfNS == true {
-		ns = &crdv1alpha1.PeerNamespaces{
+		ns = &crdv1beta1.PeerNamespaces{
 			Match: matchSelf,
 		}
 	}
-	var ipBlock *crdv1alpha1.IPBlock
-	if cidr != nil {
-		ipBlock = &crdv1alpha1.IPBlock{
-			CIDR: *cidr,
-		}
-	}
 	for _, at := range ruleAppliedToSpecs {
-		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector, at.NSSelector, at.PodSelectorMatchExp, at.NSSelectorMatchExp, at.Group, at.Service))
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector,
+			at.NodeSelector,
+			at.NSSelector,
+			at.PodSelectorMatchExp,
+			at.NodeSelectorMatchExp,
+			at.NSSelectorMatchExp,
+			at.Group,
+			at.Service))
 	}
 	// An empty From/To in ACNP rules evaluates to match all addresses.
-	policyPeer := make([]crdv1alpha1.NetworkPolicyPeer, 0)
-	if pSel != nil || nSel != nil || ns != nil || ipBlock != nil || ruleClusterGroup != "" || serviceAccount != nil {
-		policyPeer = []crdv1alpha1.NetworkPolicyPeer{{
-			PodSelector:       pSel,
-			NamespaceSelector: nSel,
+	policyPeer := make([]crdv1beta1.NetworkPolicyPeer, 0)
+	if podSel != nil || nodeSel != nil || nsSel != nil || ns != nil || ipBlock != nil || ruleClusterGroup != "" || serviceAccount != nil {
+		policyPeer = []crdv1beta1.NetworkPolicyPeer{{
+			PodSelector:       podSel,
+			NodeSelector:      nodeSel,
+			NamespaceSelector: nsSel,
 			Namespaces:        ns,
 			IPBlock:           ipBlock,
 			Group:             ruleClusterGroup,
 			ServiceAccount:    serviceAccount,
 		}}
 	}
-	ports, protocols := GenPortsOrProtocols(protoc, port, portName, endPort, icmpType, icmpCode, igmpType, groupAddress)
-	newRule := crdv1alpha1.Rule{
+	ports, protocols := GenPortsOrProtocols(protoc, port, nil, endPort, srcPort, endSrcPort, icmpType, icmpCode, igmpType, groupAddress)
+	newRule := crdv1beta1.Rule{
 		From:      policyPeer,
 		Ports:     ports,
 		Protocols: protocols,
@@ -177,18 +277,18 @@ func (b *ClusterNetworkPolicySpecBuilder) AddIngress(protoc AntreaPolicyProtocol
 
 func (b *ClusterNetworkPolicySpecBuilder) AddEgress(protoc AntreaPolicyProtocol,
 	port *int32, portName *string, endPort, icmpType, icmpCode, igmpType *int32,
-	groupAddress, cidr *string, podSelector map[string]string, nsSelector map[string]string,
-	podSelectorMatchExp []metav1.LabelSelectorRequirement, nsSelectorMatchExp []metav1.LabelSelectorRequirement, selfNS bool,
-	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1alpha1.RuleAction, ruleClusterGroup, name string, serviceAccount *crdv1alpha1.NamespacedName) *ClusterNetworkPolicySpecBuilder {
+	groupAddress *string, ipBlock *crdv1beta1.IPBlock, podSelector map[string]string, nodeSelector map[string]string, nsSelector map[string]string,
+	podSelectorMatchExp []metav1.LabelSelectorRequirement, nodeSelectorMatchExp []metav1.LabelSelectorRequirement, nsSelectorMatchExp []metav1.LabelSelectorRequirement, namespaces *crdv1beta1.PeerNamespaces,
+	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction, ruleClusterGroup, name string, serviceAccount *crdv1beta1.NamespacedName) *ClusterNetworkPolicySpecBuilder {
 
 	// For simplicity, we just reuse the Ingress code here.  The underlying data model for ingress/egress is identical
 	// With the exception of calling the rule `To` vs. `From`.
 	c := &ClusterNetworkPolicySpecBuilder{}
-	c.AddIngress(protoc, port, portName, endPort, icmpType, icmpCode, igmpType, groupAddress, cidr, podSelector, nsSelector,
-		podSelectorMatchExp, nsSelectorMatchExp, selfNS, ruleAppliedToSpecs, action, ruleClusterGroup, name, serviceAccount)
+	c.AddIngress(protoc, port, portName, endPort, icmpType, icmpCode, igmpType, groupAddress, ipBlock, podSelector, nodeSelector, nsSelector,
+		podSelectorMatchExp, nodeSelectorMatchExp, nsSelectorMatchExp, namespaces, ruleAppliedToSpecs, action, ruleClusterGroup, name, serviceAccount)
 	theRule := c.Get().Spec.Ingress[0]
 
-	b.Spec.Egress = append(b.Spec.Egress, crdv1alpha1.Rule{
+	b.Spec.Egress = append(b.Spec.Egress, crdv1beta1.Rule{
 		To:        theRule.From,
 		Ports:     theRule.Ports,
 		Action:    theRule.Action,
@@ -199,15 +299,22 @@ func (b *ClusterNetworkPolicySpecBuilder) AddEgress(protoc AntreaPolicyProtocol,
 }
 
 func (b *ClusterNetworkPolicySpecBuilder) AddNodeSelectorRule(nodeSelector *metav1.LabelSelector, protoc AntreaPolicyProtocol, port *int32, name string,
-	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1alpha1.RuleAction, isEgress bool) *ClusterNetworkPolicySpecBuilder {
-	var appliedTos []crdv1alpha1.NetworkPolicyPeer
+	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction, isEgress bool) *ClusterNetworkPolicySpecBuilder {
+	var appliedTos []crdv1beta1.AppliedTo
 	for _, at := range ruleAppliedToSpecs {
-		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector, at.NSSelector, at.PodSelectorMatchExp, at.NSSelectorMatchExp, at.Group, at.Service))
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector,
+			at.NodeSelector,
+			at.NSSelector,
+			at.PodSelectorMatchExp,
+			at.NodeSelectorMatchExp,
+			at.NSSelectorMatchExp,
+			at.Group,
+			at.Service))
 	}
-	policyPeer := []crdv1alpha1.NetworkPolicyPeer{{NodeSelector: nodeSelector}}
+	policyPeer := []crdv1beta1.NetworkPolicyPeer{{NodeSelector: nodeSelector}}
 	k8sProtocol, _ := AntreaPolicyProtocolToK8sProtocol(protoc)
-	newRule := crdv1alpha1.Rule{
-		Ports: []crdv1alpha1.NetworkPolicyPort{
+	newRule := crdv1beta1.Rule{
+		Ports: []crdv1beta1.NetworkPolicyPort{
 			{Protocol: &k8sProtocol, Port: &intstr.IntOrString{IntVal: *port}},
 		},
 		Action:    &action,
@@ -226,14 +333,21 @@ func (b *ClusterNetworkPolicySpecBuilder) AddNodeSelectorRule(nodeSelector *meta
 
 func (b *ClusterNetworkPolicySpecBuilder) AddFQDNRule(fqdn string,
 	protoc AntreaPolicyProtocol, port *int32, portName *string, endPort *int32, name string,
-	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1alpha1.RuleAction) *ClusterNetworkPolicySpecBuilder {
-	var appliedTos []crdv1alpha1.NetworkPolicyPeer
+	ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction) *ClusterNetworkPolicySpecBuilder {
+	var appliedTos []crdv1beta1.AppliedTo
 	for _, at := range ruleAppliedToSpecs {
-		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector, at.NSSelector, at.PodSelectorMatchExp, at.NSSelectorMatchExp, at.Group, at.Service))
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector,
+			at.NodeSelector,
+			at.NSSelector,
+			at.PodSelectorMatchExp,
+			at.NodeSelectorMatchExp,
+			at.NSSelectorMatchExp,
+			at.Group,
+			at.Service))
 	}
-	policyPeer := []crdv1alpha1.NetworkPolicyPeer{{FQDN: fqdn}}
-	ports, _ := GenPortsOrProtocols(protoc, port, portName, endPort, nil, nil, nil, nil)
-	newRule := crdv1alpha1.Rule{
+	policyPeer := []crdv1beta1.NetworkPolicyPeer{{FQDN: fqdn}}
+	ports, _ := GenPortsOrProtocols(protoc, port, portName, endPort, nil, nil, nil, nil, nil, nil)
+	newRule := crdv1beta1.Rule{
 		To:        policyPeer,
 		Ports:     ports,
 		Action:    &action,
@@ -244,14 +358,21 @@ func (b *ClusterNetworkPolicySpecBuilder) AddFQDNRule(fqdn string,
 	return b
 }
 
-func (b *ClusterNetworkPolicySpecBuilder) AddToServicesRule(svcRefs []crdv1alpha1.NamespacedName,
-	name string, ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1alpha1.RuleAction) *ClusterNetworkPolicySpecBuilder {
-	var appliedTos []crdv1alpha1.NetworkPolicyPeer
+func (b *ClusterNetworkPolicySpecBuilder) AddToServicesRule(svcRefs []crdv1beta1.PeerService,
+	name string, ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction) *ClusterNetworkPolicySpecBuilder {
+	var appliedTos []crdv1beta1.AppliedTo
 	for _, at := range ruleAppliedToSpecs {
-		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector, at.NSSelector, at.PodSelectorMatchExp, at.NSSelectorMatchExp, at.Group, at.Service))
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector,
+			at.NodeSelector,
+			at.NSSelector,
+			at.PodSelectorMatchExp,
+			at.NodeSelectorMatchExp,
+			at.NSSelectorMatchExp,
+			at.Group,
+			at.Service))
 	}
-	newRule := crdv1alpha1.Rule{
-		To:         make([]crdv1alpha1.NetworkPolicyPeer, 0),
+	newRule := crdv1beta1.Rule{
+		To:         make([]crdv1beta1.NetworkPolicyPeer, 0),
 		ToServices: svcRefs,
 		Action:     &action,
 		Name:       name,
@@ -261,10 +382,40 @@ func (b *ClusterNetworkPolicySpecBuilder) AddToServicesRule(svcRefs []crdv1alpha
 	return b
 }
 
+func (b *ClusterNetworkPolicySpecBuilder) AddStretchedIngressRule(pSel, nsSel map[string]string,
+	name string, ruleAppliedToSpecs []ACNPAppliedToSpec, action crdv1beta1.RuleAction) *ClusterNetworkPolicySpecBuilder {
+
+	var appliedTos []crdv1beta1.AppliedTo
+	for _, at := range ruleAppliedToSpecs {
+		appliedTos = append(appliedTos, b.GetAppliedToPeer(at.PodSelector,
+			at.NodeSelector,
+			at.NSSelector,
+			at.PodSelectorMatchExp,
+			at.NodeSelectorMatchExp,
+			at.NSSelectorMatchExp,
+			at.Group,
+			at.Service))
+	}
+	newRule := crdv1beta1.Rule{
+		From:      []crdv1beta1.NetworkPolicyPeer{{Scope: "ClusterSet"}},
+		Action:    &action,
+		Name:      name,
+		AppliedTo: appliedTos,
+	}
+	if len(pSel) > 0 {
+		newRule.From[0].PodSelector = &metav1.LabelSelector{MatchLabels: pSel}
+	}
+	if len(nsSel) > 0 {
+		newRule.From[0].NamespaceSelector = &metav1.LabelSelector{MatchLabels: nsSel}
+	}
+	b.Spec.Ingress = append(b.Spec.Ingress, newRule)
+	return b
+}
+
 // AddEgressDNS mutates the nth policy rule to allow DNS, convenience method
 func (b *ClusterNetworkPolicySpecBuilder) WithEgressDNS() *ClusterNetworkPolicySpecBuilder {
 	protocolUDP, _ := AntreaPolicyProtocolToK8sProtocol(ProtocolUDP)
-	route53 := crdv1alpha1.NetworkPolicyPort{
+	route53 := crdv1beta1.NetworkPolicyPort{
 		Protocol: &protocolUDP,
 		Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
 	}
@@ -276,9 +427,10 @@ func (b *ClusterNetworkPolicySpecBuilder) WithEgressDNS() *ClusterNetworkPolicyS
 	return b
 }
 
-func (b *ClusterNetworkPolicySpecBuilder) AddEgressLogging() *ClusterNetworkPolicySpecBuilder {
+func (b *ClusterNetworkPolicySpecBuilder) AddEgressLogging(logLabel string) *ClusterNetworkPolicySpecBuilder {
 	for i, e := range b.Spec.Egress {
 		e.EnableLogging = true
+		e.LogLabel = logLabel
 		b.Spec.Egress[i] = e
 	}
 	return b

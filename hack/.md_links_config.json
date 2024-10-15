@@ -29,8 +29,17 @@
         },
         {
             "pattern": "https://avinetworks.com/*"
+        },
+        {
+            "pattern": "https://suricata.io/"
+        },
+        {
+            "pattern": "https://twitter.com/*"
+        },
+        {
+            "pattern": "https://www.wireguard.com*"
         }
     ],
     "retryOn429": false,
-    "aliveStatusCodes": [200, 206, 429]
+    "aliveStatusCodes": [200, 206, 429, 403, 503]
 }

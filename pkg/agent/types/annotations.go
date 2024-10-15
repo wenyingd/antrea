@@ -24,6 +24,21 @@ const (
 	// NodeWireGuardPublicAnnotationKey represents the key of the Node's WireGuard public key in the Annotations of the Node.
 	NodeWireGuardPublicAnnotationKey string = "node.antrea.io/wireguard-public-key"
 
+	// NodeMaxEgressIPsAnnotationKey represents the key of maximum Egress IP number in the Annotations of the Node.
+	NodeMaxEgressIPsAnnotationKey string = "node.antrea.io/max-egress-ips"
+
+	// NodeBGPRouterIDAnnotationKey represents the key of the Node's BGP router ID in the Annotations of the Node.
+	NodeBGPRouterIDAnnotationKey string = "node.antrea.io/bgp-router-id"
+
 	// ServiceExternalIPPoolAnnotationKey is the key of the Service annotation that specifies the Service's desired external IP pool.
 	ServiceExternalIPPoolAnnotationKey string = "service.antrea.io/external-ip-pool"
+
+	// ServiceAllowSharedIPAnnotationKey is the key of the Service annotation that specifies whether the Service is allowed to use a shared LoadBalancer IP.
+	ServiceAllowSharedIPAnnotationKey string = "service.antrea.io/allow-shared-load-balancer-ip"
+
+	// ServiceLoadBalancerModeAnnotationKey is the key of the Service annotation that specifies the Service's load balancer mode.
+	ServiceLoadBalancerModeAnnotationKey string = "service.antrea.io/load-balancer-mode"
+
+	// L7FlowExporterAnnotationKey is the key of the L7 network flow export annotation that enables L7 network flow export for annotated Pod or Namespace based on the value of annotation which is direction of traffic.
+	L7FlowExporterAnnotationKey string = "visibility.antrea.io/l7-export"
 )

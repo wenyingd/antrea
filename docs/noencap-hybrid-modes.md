@@ -9,12 +9,13 @@ are in different subnets, but does not encapsulate when the source and the
 destination Nodes are in the same subnet. This document describes how to
 configure Antrea with the `NoEncap` and `Hybrid` modes.
 
-The NoEncap and Hybrid traffic modes require AntreaProxy to support correct
-NetworkPolicy enforcement, which is why trying to disable AntreaProxy in these
+The NoEncap and Hybrid traffic modes require Antrea Proxy to support correct
+NetworkPolicy enforcement, which is why trying to disable Antrea Proxy in these
 modes will normally cause the Antrea Agent to fail. It is possible to override
-this behavior and force AntreaProxy to be disabled by setting the
+this behavior and force Antrea Proxy to be disabled by setting the
 ALLOW_NO_ENCAP_WITHOUT_ANTREA_PROXY environment variable to true for the Antrea
-Agent. For example:
+Agent in the [Antrea deployment yaml](../build/yamls/antrea.yml).
+For example:
 
 ```yaml
 apiVersion: apps/v1
@@ -24,14 +25,21 @@ metadata:
   labels:
     component: antrea-agent
 spec:
-  containers:
-    - name: antrea-agent
-      ... ...
-      env:
-        - name: ALLOW_NO_ENCAP_WITHOUT_ANTREA_PROXY
-          value: "true"
-      ... ...
+  template:
+    spec:
+      containers:
+        - name: antrea-agent
+          env:
+            - name: ALLOW_NO_ENCAP_WITHOUT_ANTREA_PROXY
+              value: "true"
 ```
+
+Note that changing the traffic mode in an existing cluster, where Antrea is
+currently installed or was previously installed, may require restarting existing
+workloads. In particular, the choice of traffic mode has an impact on the MTU
+value used for Pod network interfaces. When changing the traffic mode from
+`NoEncap` to `Encap`, existing workloads should be restarted, so that new
+network interfaces with a lower MTU value can be created.
 
 ## Hybrid Mode
 
@@ -56,13 +64,11 @@ If the Node network does allow Pod IPs sent out from the Nodes, you can
 configure Antrea to run in the `Hybrid` mode by setting the `trafficEncapMode`
 config parameter of `antrea-agent` to `hybrid`. The `trafficEncapMode` config
 parameter is defined in `antrea-agent.conf` of the `antrea` ConfigMap in the
-[Antrea deployment yaml](https://github.com/antrea-io/antrea/blob/main/build/yamls/antrea.yml).
+[Antrea deployment yaml](../build/yamls/antrea.yml).
 
 ```yaml
   antrea-agent.conf: |
-    ... ...
     trafficEncapMode: hybrid
-    ... ...
 ```
 
 After changing the config parameter, you can deploy Antrea in `Hybrid` mode with
@@ -86,9 +92,9 @@ The Kubernetes Cloud Providers that implement Route Controller can add routes
 to the cloud network routers for the Pod CIDRs of Nodes, and then the cloud
 network is able to route Pod traffic between Nodes. This Route Controller
 functionality is supported by the Cloud Provider implementations of the major
-clouds, including: [AWS](https://github.com/kubernetes/kubernetes/tree/master/staging/src/k8s.io/legacy-cloud-providers/aws),
+clouds, including: [AWS](https://github.com/kubernetes/cloud-provider-aws),
 [Azure](https://github.com/kubernetes-sigs/cloud-provider-azure),
-[GCE](https://github.com/kubernetes/kubernetes/tree/master/staging/src/k8s.io/legacy-cloud-providers/gce),
+[GCP](https://github.com/kubernetes/cloud-provider-gcp),
 and [vSphere (with NSX-T)](https://github.com/kubernetes/cloud-provider-vsphere).
 
 * Run a routing protocol or even manually configure routers to add routes to
@@ -106,15 +112,18 @@ outside of the Pod network, using the Node's IP address as the SNAT IP. In the
 Antrea might be unnecessary. In this case, you can disable it by setting the
 `noSNAT` config parameter to `true`. The `trafficEncapMode` and `noSNAT` config
 parameters are defined in `antrea-agent.conf` of the `antrea` ConfigMap in the
-[Antrea deployment yaml](https://github.com/antrea-io/antrea/blob/main/build/yamls/antrea.yml).
+[Antrea deployment yaml](../build/yamls/antrea.yml).
 
 ```yaml
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: antrea-config
+  namespace: kube-system
+data:
   antrea-agent.conf: |
-    ... ...
     trafficEncapMode: noEncap
-
     noSNAT: false # Set to true to disable Antrea SNAT for external traffic
-    ... ...
 ```
 
 After changing the parameters, you can deploy Antrea in `noEncap` mode by applying

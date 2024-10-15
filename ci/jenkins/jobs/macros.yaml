@@ -3,17 +3,16 @@
     builders:
       - shell: |-
           cp /var/lib/jenkins/utils/defaults.yaml ci/jenkins/jobs
+          find ci/jenkins/jobs -name "projects-*" ! -name "projects-{jenkins_location}.yaml" | xargs rm
           jenkins-jobs update -r ci/jenkins/jobs
           rm ci/jenkins/jobs/defaults.yaml
 
 - builder:
-      name: builder-integration
-      builders:
-        - shell: |-
-            #!/bin/bash
-            set -e
-            DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
-            ./ci/jenkins/test-vmc.sh --testcase integration --coverage --codecov-token "${CODECOV_TOKEN}" --registry ${DOCKER_REGISTRY}
+    name: builder-jenkins-backup
+    builders:
+      - shell: |-
+          rdiff-backup ${{RDIFF_USERNAME}}@${{RDIFF_IP}}::${{RDIFF_PATH}} backup
+          rdiff-backup --remove-older-than 6M backup
 
 - builder:
     name: builder-eks-cluster-cleanup
@@ -21,7 +20,6 @@
       - shell: |-
           #!/bin/bash
           set -ex
-          source /home/ubuntu/.bashrc
           sudo ./ci/test-conformance-eks.sh --cluster-name "${CLUSTERNAME}" --cleanup-only
 
 - builder:
@@ -30,8 +28,7 @@
       - shell: |-
          #!/bin/bash
          set -ex
-         source /home/ubuntu/.bashrc
-         ./ci/test-conformance-gke.sh --gcloud-path "${GCLOUD_PATH}" --cluster-name "${CLUSTERNAME}" --cleanup-only
+         sudo ./ci/test-conformance-gke.sh --gcloud-sdk-path "${GCLOUD_SDK_PATH}" --cluster-name "${CLUSTERNAME}" --cleanup-only
 
 - builder:
     name: builder-aks-cluster-cleanup
@@ -39,8 +36,7 @@
       - shell: |-
          #!/bin/bash
          set -ex
-         source /home/ubuntu/.bashrc
-         ./ci/test-conformance-aks.sh --cluster-name "${CLUSTERNAME}" --cleanup-only
+         sudo ./ci/test-conformance-aks.sh --cluster-name "${CLUSTERNAME}" --cleanup-only
 
 - builder:
     name: builder-workload-cluster-garbage-collection
@@ -88,6 +84,10 @@
     builders:
       - shell: |-
           cp /var/lib/jenkins/utils/defaults.yaml ci/jenkins/jobs
+          mv ci/jenkins/jobs/projects-lab.yaml ci/jenkins/projects-lab.yaml
+          jenkins-jobs test -r ci/jenkins/jobs
+          mv ci/jenkins/projects-lab.yaml ci/jenkins/jobs/projects-lab.yaml
+          rm ci/jenkins/jobs/projects-cloud.yaml
           jenkins-jobs test -r ci/jenkins/jobs/
           rm ci/jenkins/jobs/defaults.yaml
 
@@ -103,7 +103,8 @@
           #!/bin/bash
           set -ex
           DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
-          ./ci/jenkins/test-vmc.sh --cluster-name "$BUILD_TAG" --testcase e2e --coverage --codecov-token "${CODECOV_TOKEN}" --registry ${DOCKER_REGISTRY} --username "${CAPVC_USERNAME}" --password "${CAPVC_PASSWORD}"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test-vmc.sh --cluster-name "$BUILD_TAG" --testcase e2e --coverage --codecov-token "${{CODECOV_TOKEN}}" --registry ${{DOCKER_REGISTRY}} --username "${{CAPVC_USERNAME}}" --password "${{CAPVC_PASSWORD}}"
 
 - builder:
     name: builder-conformance
@@ -112,7 +113,62 @@
           #!/bin/bash
           set -ex
           DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
           ./ci/jenkins/test-vmc.sh --cluster-name "$BUILD_TAG" --testcase '{conformance_type}' --coverage --codecov-token "${{CODECOV_TOKEN}}" --registry ${{DOCKER_REGISTRY}} --username "${{CAPVC_USERNAME}}" --password "${{CAPVC_PASSWORD}}"
+
+- builder:
+    name: builder-install-ovs
+    builders:
+      - shell: |-
+          #!/bin/bash
+          ./ci/jenkins/test.sh --testcase windows-install-ovs
+
+- builder:
+    name: builder-e2e-win
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test.sh --testcase '{e2e_type}' --registry ${{DOCKER_REGISTRY}} --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+
+- builder:
+    name: builder-conformance-win
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test.sh --testcase '{conformance_type}' --registry ${{DOCKER_REGISTRY}} --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+
+- builder:
+    name: builder-flexible-ipam-e2e
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -e
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test.sh --testcase e2e --registry ${{DOCKER_REGISTRY}} --workdir "/home/ubuntu" --kubeconfig "/home/ubuntu/kube.conf" --testbed-type "flexible-ipam"
+
+- builder:
+    name: builder-flow-visibility
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          ./ci/jenkins/test-vmc.sh --cluster-name "${JOB_NAME}-${BUILD_NUMBER}" --setup-only
+          ./ci/test-flow-visibility.sh --kubeconfig jenkins/out/kubeconfig
+          ./ci/jenkins/test-vmc.sh --cluster-name "${JOB_NAME}-${BUILD_NUMBER}" --cleanup-only
+
+          if !(test -f TEST_FAILURE); then
+            echo "=== SUCCESS !!! ==="
+            exit 0
+          fi
+          echo "=== FAILURE !!! ==="
+          exit 1
 
 - builder:
     name: builder-matrix
@@ -149,3 +205,130 @@
           set -e
           DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
           ./ci/jenkins/test-vm.sh  --registry ${DOCKER_REGISTRY} --kubeconfig /var/lib/jenkins/.kube/config
+
+- builder:
+    name: builder-conformance-kind
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          KIND_TIMEOUT=135
+          FULL_CLUSTER_NAME='{kind_cluster_name}'-"${{BUILD_NUMBER}}"
+          #  Delete all Kind clusters created more than 135 mins ago. 135 minutes is the timeout 
+          #  we have configured for running conformance and NetworkPolicy tests on Kind, 
+          #  so clusters older than that can de deleted safely.
+          ./ci/kind/kind-setup.sh destroy --all --until ${{KIND_TIMEOUT}}
+          ./ci/kind/kind-install.sh
+          ./ci/kind/kind-setup.sh --antrea-cni create "${{FULL_CLUSTER_NAME}}" --ip-family '{ip_version}'
+          kind export kubeconfig -n "${{FULL_CLUSTER_NAME}}" --kubeconfig ${{PWD}}/.kube/config
+          set +e
+          ./ci/jenkins/test.sh --testcase '{conformance_type}' --registry ${{DOCKER_REGISTRY}} --kubeconfig ${{PWD}}/.kube/config --testbed-type "kind" --kind-cluster-name "${{FULL_CLUSTER_NAME}}" --build-tag "${conformance_type}-${{BUILD_NUMBER}}"
+          return_code=$?
+          set -ex
+          ./ci/kind/kind-setup.sh destroy "${{FULL_CLUSTER_NAME}}"
+          exit $return_code
+
+- builder:
+    name: builder-e2e-kind
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          KIND_TIMEOUT=135
+          FULL_CLUSTER_NAME='{kind_cluster_name}'-"${{BUILD_NUMBER}}"
+          #  Delete all Kind clusters created more than 135 mins ago. 135 minutes is the timeout 
+          #  we have configured for running conformance, NetworkPolicy and e2e tests on Kind, 
+          #  so clusters older than that can de deleted safely.
+          ./ci/kind/kind-setup.sh destroy --all --until ${{KIND_TIMEOUT}}
+          ./ci/kind/kind-install.sh 
+          ./ci/kind/kind-setup.sh --antrea-cni create "${{FULL_CLUSTER_NAME}}" --ip-family '{ip_version}'
+          kind export kubeconfig -n "${{FULL_CLUSTER_NAME}}" --kubeconfig ${{PWD}}/.kube/config
+          set +e
+          ./ci/jenkins/test.sh --testcase e2e --registry ${{DOCKER_REGISTRY}} --kubeconfig ${{PWD}}/.kube/config --testbed-type "kind" --kind-cluster-name "${{FULL_CLUSTER_NAME}}" --build-tag "e2e-${{BUILD_NUMBER}}"
+          return_code=$?
+          set -ex
+          ./ci/kind/kind-setup.sh destroy "${{FULL_CLUSTER_NAME}}"
+          exit $return_code
+                   
+- builder:
+    name: builder-kind-flexible-ipam-e2e
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          KIND_TIMEOUT=135
+          FIRST_VLAN_SUBNET='11=192.168.241.1/24'
+          SECOND_VLAN_SUBNET='12=192.168.242.1/24'
+          FULL_CLUSTER_NAME='{kind_cluster_name}'-"${{BUILD_NUMBER}}"
+          ./ci/kind/kind-setup.sh destroy --all --until ${{KIND_TIMEOUT}}
+          ./ci/kind/kind-install.sh 
+          ./ci/kind/kind-setup.sh --flexible-ipam create "${{FULL_CLUSTER_NAME}}" --vlan-subnets $FIRST_VLAN_SUBNET --vlan-subnets $SECOND_VLAN_SUBNET
+          kind export kubeconfig -n "${{FULL_CLUSTER_NAME}}" --kubeconfig ${{PWD}}/.kube/config
+          set +e
+          ./ci/jenkins/test.sh --testcase e2e --registry ${{DOCKER_REGISTRY}} --kubeconfig ${{PWD}}/.kube/config --testbed-type "kind-flexible-ipam" --kind-cluster-name "${{FULL_CLUSTER_NAME}}"
+          return_code=$?
+          set -e
+          ./ci/kind/kind-setup.sh destroy "${{FULL_CLUSTER_NAME}}"
+          exit $return_code  
+
+- builder:
+    name: builder-rancher-e2e
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          chmod +x ./ci/jenkins/test-rancher.sh
+          ./ci/jenkins/test-rancher.sh --registry ${DOCKER_REGISTRY} --testcase e2e --cluster-name rancher-test
+
+- builder:
+    name: builder-rancher-conformance
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -ex
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          chmod +x ./ci/jenkins/test-rancher.sh
+          ./ci/jenkins/test-rancher.sh --cluster-name rancher-test --testcase '{conformance_type}' --registry ${{DOCKER_REGISTRY}}
+- builder:
+    name: builder-multicluster-e2e
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -e 
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test-mc.sh --testcase e2e --registry ${{DOCKER_REGISTRY}} --mc-gateway --codecov-token "${CODECOV_TOKEN}" --coverage --kind
+            
+- builder:
+    name: builder-e2e-jumper
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -e
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test.sh --testcase e2e --registry ${{DOCKER_REGISTRY}} --testbed-type jumper
+
+- builder:
+    name: builder-conformance-jumper
+    builders:
+      - shell: |-
+          #!/bin/bash
+          set -e
+          DOCKER_REGISTRY="$(head -n1 ci/docker-registry)"
+          [ "$DOCKER_REGISTRY" != "docker.io" ] || ./ci/jenkins/docker_login.sh --docker-user ${{DOCKER_USERNAME}} --docker-password ${{DOCKER_PASSWORD}}
+          ./ci/jenkins/test.sh --testcase '{conformance_type}' --registry ${{DOCKER_REGISTRY}} --testbed-type jumper
+
+- builder:
+     name: builder-stop-all
+     builders:
+       - shell: |-
+           #!/bin/bash
+           set -e
+           ./ci/jenkins/stop-stale-jobs.sh --pull-request "${ghprbPullId}" --jenkins "${JENKINS_URL}"

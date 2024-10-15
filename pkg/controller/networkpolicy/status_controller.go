@@ -16,6 +16,9 @@ package networkpolicy
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,11 +34,11 @@ import (
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/apis/controlplane"
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/pkg/apiserver/storage"
 	antreaclientset "antrea.io/antrea/pkg/client/clientset/versioned"
-	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha1"
-	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1alpha1"
+	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1beta1"
+	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1beta1"
 	"antrea.io/antrea/pkg/controller/metrics"
 	antreatypes "antrea.io/antrea/pkg/controller/types"
 )
@@ -44,13 +47,20 @@ const (
 	statusControllerName = "NetworkPolicyStatusController"
 )
 
+var (
+	// maxConditionMessageLength defines the max length of the message field in one Condition. If the actual message
+	// length is over size, truncate the string and use "..." in the end.
+	// Use a variable for test.
+	maxConditionMessageLength = 256
+)
+
 // StatusController is responsible for synchronizing the status of Antrea ClusterNetworkPolicy and Antrea NetworkPolicy.
 type StatusController struct {
 	// npControlInterface knows how to update Antrea NetworkPolicy status.
 	npControlInterface networkPolicyControlInterface
 
 	// queue maintains the keys of the NetworkPolicy objects that need to be synced.
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[string]
 
 	// internalNetworkPolicyStore is the storage where the populated internal Network Policy are stored.
 	internalNetworkPolicyStore storage.Interface
@@ -61,30 +71,29 @@ type StatusController struct {
 	statuses     map[string]map[string]*controlplane.NetworkPolicyNodeStatus
 	statusesLock sync.RWMutex
 
-	// cnpLister is able to list/get ClusterNetworkPolicies and is populated by the shared informer passed to
-	// NewClusterNetworkPolicyController.
-	cnpLister crdlisters.ClusterNetworkPolicyLister
-	// cnpListerSynced is a function which returns true if the ClusterNetworkPolicies shared informer has been synced at least once.
-	cnpListerSynced cache.InformerSynced
-	// anpLister is able to list/get AntreaNetworkPolicies and is populated by the shared informer passed to
-	// NewNetworkPolicyController.
-	anpLister crdlisters.NetworkPolicyLister
-	// anpListerSynced is a function which returns true if the AntreaNetworkPolicies shared informer has been synced at least once.
-	anpListerSynced cache.InformerSynced
+	// acnpListerSynced is a function which returns true if the ClusterNetworkPolicies shared informer has been synced at least once.
+	acnpListerSynced cache.InformerSynced
+	// annpListerSynced is a function which returns true if the AntreaNetworkPolicies shared informer has been synced at least once.
+	annpListerSynced cache.InformerSynced
 }
 
-func NewStatusController(antreaClient antreaclientset.Interface, internalNetworkPolicyStore storage.Interface, cnpInformer crdinformers.ClusterNetworkPolicyInformer, anpInformer crdinformers.NetworkPolicyInformer) *StatusController {
+func NewStatusController(antreaClient antreaclientset.Interface, internalNetworkPolicyStore storage.Interface, acnpInformer crdinformers.ClusterNetworkPolicyInformer, annpInformer crdinformers.NetworkPolicyInformer) *StatusController {
 	c := &StatusController{
 		npControlInterface: &networkPolicyControl{
 			antreaClient: antreaClient,
-			anpLister:    anpInformer.Lister(),
-			cnpLister:    cnpInformer.Lister(),
+			annpLister:   annpInformer.Lister(),
+			acnpLister:   acnpInformer.Lister(),
 		},
-		queue:                      workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "networkpolicy"),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "networkpolicy",
+			},
+		),
 		internalNetworkPolicyStore: internalNetworkPolicyStore,
 		statuses:                   map[string]map[string]*controlplane.NetworkPolicyNodeStatus{},
-		cnpListerSynced:            cnpInformer.Informer().HasSynced,
-		anpListerSynced:            anpInformer.Informer().HasSynced,
+		acnpListerSynced:           acnpInformer.Informer().HasSynced,
+		annpListerSynced:           annpInformer.Informer().HasSynced,
 	}
 	// To save a "GET" query before each update, UpdateAntreaClusterNetworkPolicyStatus treats the cache of Lister as
 	// the state of kube-apiserver. In some cases the cache may not be in sync, then we might skip updating a policy's
@@ -93,38 +102,38 @@ func NewStatusController(antreaClient antreaclientset.Interface, internalNetwork
 	// However, a normal update made by the controller itself will trigger resync as well, which could lead to duplicate
 	// computation.
 	// TODO: Evaluate if we can avoid the duplicate computation by comparing the updated status with some internal state.
-	cnpInformer.Informer().AddEventHandlerWithResyncPeriod(
+	acnpInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
-			UpdateFunc: c.updateCNP,
+			UpdateFunc: c.updateACNP,
 		},
 		resyncPeriod,
 	)
-	anpInformer.Informer().AddEventHandlerWithResyncPeriod(
+	annpInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
-			UpdateFunc: c.updateANP,
+			UpdateFunc: c.updateANNP,
 		},
 		resyncPeriod,
 	)
 	return c
 }
 
-func (c *StatusController) updateCNP(old, cur interface{}) {
-	curCNP := cur.(*crdv1alpha1.ClusterNetworkPolicy)
-	oldCNP := old.(*crdv1alpha1.ClusterNetworkPolicy)
-	if NetworkPolicyStatusEqual(oldCNP.Status, curCNP.Status) {
+func (c *StatusController) updateACNP(old, cur interface{}) {
+	curACNP := cur.(*crdv1beta1.ClusterNetworkPolicy)
+	oldACNP := old.(*crdv1beta1.ClusterNetworkPolicy)
+	if NetworkPolicyStatusEqual(oldACNP.Status, curACNP.Status) {
 		return
 	}
-	key := internalNetworkPolicyKeyFunc(oldCNP)
+	key := internalNetworkPolicyKeyFunc(oldACNP)
 	c.queue.Add(key)
 }
 
-func (c *StatusController) updateANP(old, cur interface{}) {
-	curANP := cur.(*crdv1alpha1.NetworkPolicy)
-	oldANP := old.(*crdv1alpha1.NetworkPolicy)
-	if NetworkPolicyStatusEqual(oldANP.Status, curANP.Status) {
+func (c *StatusController) updateANNP(old, cur interface{}) {
+	curANNP := cur.(*crdv1beta1.NetworkPolicy)
+	oldANNP := old.(*crdv1beta1.NetworkPolicy)
+	if NetworkPolicyStatusEqual(oldANNP.Status, curANNP.Status) {
 		return
 	}
-	key := internalNetworkPolicyKeyFunc(oldANP)
+	key := internalNetworkPolicyKeyFunc(oldANNP)
 	c.queue.Add(key)
 }
 
@@ -188,7 +197,7 @@ func (c *StatusController) Run(stopCh <-chan struct{}) {
 	klog.Infof("Starting %s", statusControllerName)
 	defer klog.Infof("Shutting down %s", statusControllerName)
 
-	if !cache.WaitForNamedCacheSync(statusControllerName, stopCh, c.cnpListerSynced, c.anpListerSynced) {
+	if !cache.WaitForNamedCacheSync(statusControllerName, stopCh, c.acnpListerSynced, c.annpListerSynced) {
 		return
 	}
 
@@ -219,7 +228,7 @@ func (c *StatusController) watchInternalNetworkPolicy() {
 				continue
 			}
 			np := event.Object.(*controlplane.NetworkPolicy)
-			if np.SourceRef.Type == controlplane.K8sNetworkPolicy {
+			if !controlplane.IsSourceAntreaNativePolicy(np.SourceRef) {
 				continue
 			}
 			c.queue.Add(np.Name)
@@ -240,7 +249,7 @@ func (c *StatusController) processNextWorkItem() bool {
 	}
 	defer c.queue.Done(key)
 
-	err := c.syncHandler(key.(string))
+	err := c.syncHandler(key)
 	if err == nil {
 		c.queue.Forget(key)
 		return true
@@ -268,37 +277,38 @@ func (c *StatusController) syncHandler(key string) error {
 	}
 	internalNP := internalNPObj.(*antreatypes.NetworkPolicy)
 
-	// It means the NetworkPolicy hasn't been processed once. Set it to Pending to differentiate from NetworkPolicies
-	// that spans 0 Node.
-	if internalNP.SpanMeta.NodeNames == nil {
-		status := &crdv1alpha1.NetworkPolicyStatus{
-			Phase:              crdv1alpha1.NetworkPolicyPending,
-			ObservedGeneration: internalNP.Generation,
-			Conditions:         GenerateNetworkPolicyCondition(nil),
+	updateStatus := func(phase crdv1beta1.NetworkPolicyPhase, currentNodes, desiredNodes int, conditions []crdv1beta1.NetworkPolicyCondition) error {
+		status := &crdv1beta1.NetworkPolicyStatus{
+			Phase:                phase,
+			ObservedGeneration:   internalNP.Generation,
+			CurrentNodesRealized: int32(currentNodes),
+			DesiredNodesRealized: int32(desiredNodes),
+			Conditions:           conditions,
 		}
+		klog.V(2).Infof("Updating NetworkPolicy %s status: %v", internalNP.SourceRef.ToString(), status)
 		if internalNP.SourceRef.Type == controlplane.AntreaNetworkPolicy {
 			return c.npControlInterface.UpdateAntreaNetworkPolicyStatus(internalNP.SourceRef.Namespace, internalNP.SourceRef.Name, status)
 		}
 		return c.npControlInterface.UpdateAntreaClusterNetworkPolicyStatus(internalNP.SourceRef.Name, status)
 	}
 
+	conditions := GenerateNetworkPolicyCondition(internalNP.SyncError)
 	// It means the NetworkPolicy has been processed, and marked as unrealizable. It will enter unrealizable phase
 	// instead of being further realized. Antrea-agents will not process further.
-	if internalNP.RealizationError != nil {
-		status := &crdv1alpha1.NetworkPolicyStatus{
-			Phase:              crdv1alpha1.NetworkPolicyPending,
-			ObservedGeneration: internalNP.Generation,
-			Conditions:         GenerateNetworkPolicyCondition(internalNP.RealizationError),
-		}
-		if internalNP.SourceRef.Type == controlplane.AntreaNetworkPolicy {
-			return c.npControlInterface.UpdateAntreaNetworkPolicyStatus(internalNP.SourceRef.Namespace, internalNP.SourceRef.Name, status)
-		}
-		return c.npControlInterface.UpdateAntreaClusterNetworkPolicyStatus(internalNP.SourceRef.Name, status)
+	if internalNP.SyncError != nil {
+		return updateStatus(crdv1beta1.NetworkPolicyPending, 0, 0, conditions)
+	}
+
+	// It means the NetworkPolicy hasn't been processed once. Set it to Pending to differentiate from NetworkPolicies
+	// that spans 0 Node.
+	if internalNP.SpanMeta.NodeNames == nil {
+		return updateStatus(crdv1beta1.NetworkPolicyPending, 0, 0, conditions)
 	}
 
 	desiredNodes := len(internalNP.SpanMeta.NodeNames)
 	currentNodes := 0
 	statuses := c.getNodeStatuses(key)
+	failedNodes := make([]string, 0)
 	for _, status := range statuses {
 		// The node is no longer in the span of this policy, delete its status.
 		if !internalNP.NodeNames.Has(status.NodeName) {
@@ -306,61 +316,70 @@ func (c *StatusController) syncHandler(key string) error {
 			continue
 		}
 		if status.Generation == internalNP.Generation {
-			currentNodes += 1
+			if !status.RealizationFailure {
+				currentNodes += 1
+			} else {
+				failedNodes = append(failedNodes, fmt.Sprintf(`"%s":"%s"`, status.NodeName, status.Message))
+			}
 		}
 	}
+	if len(failedNodes) > 0 {
+		sort.Strings(failedNodes)
+		failureMessage := fmt.Sprintf("Failed Nodes count %d: %s", len(failedNodes), strings.Join(failedNodes, ", "))
+		if len(failureMessage) > maxConditionMessageLength {
+			failureMessage = fmt.Sprintf("%s...", failureMessage[:maxConditionMessageLength])
+		}
+		conditions = append(conditions, crdv1beta1.NetworkPolicyCondition{
+			Type:               crdv1beta1.NetworkPolicyConditionRealizationFailure,
+			Status:             v1.ConditionTrue,
+			LastTransitionTime: v1.Now(),
+			Reason:             "NetworkPolicyRealizationFailedOnNode",
+			Message:            failureMessage,
+		})
+	}
 
-	phase := crdv1alpha1.NetworkPolicyRealizing
+	phase := crdv1beta1.NetworkPolicyRealizing
 	if currentNodes == desiredNodes {
-		phase = crdv1alpha1.NetworkPolicyRealized
+		phase = crdv1beta1.NetworkPolicyRealized
+	} else if currentNodes+len(failedNodes) == desiredNodes {
+		phase = crdv1beta1.NetworkPolicyFailed
 	}
 
-	status := &crdv1alpha1.NetworkPolicyStatus{
-		Phase:                phase,
-		ObservedGeneration:   internalNP.Generation,
-		CurrentNodesRealized: int32(currentNodes),
-		DesiredNodesRealized: int32(desiredNodes),
-		Conditions:           GenerateNetworkPolicyCondition(nil),
-	}
-	klog.V(2).Infof("Updating NetworkPolicy %s status: %v", internalNP.SourceRef.ToString(), status)
-	if internalNP.SourceRef.Type == controlplane.AntreaNetworkPolicy {
-		return c.npControlInterface.UpdateAntreaNetworkPolicyStatus(internalNP.SourceRef.Namespace, internalNP.SourceRef.Name, status)
-	}
-	return c.npControlInterface.UpdateAntreaClusterNetworkPolicyStatus(internalNP.SourceRef.Name, status)
+	return updateStatus(phase, currentNodes, desiredNodes, conditions)
 }
 
 // networkPolicyControlInterface is an interface that knows how to update Antrea NetworkPolicy status.
 // It's created as an interface to allow testing.
 type networkPolicyControlInterface interface {
-	UpdateAntreaNetworkPolicyStatus(namespace, name string, status *crdv1alpha1.NetworkPolicyStatus) error
-	UpdateAntreaClusterNetworkPolicyStatus(name string, status *crdv1alpha1.NetworkPolicyStatus) error
+	UpdateAntreaNetworkPolicyStatus(namespace, name string, status *crdv1beta1.NetworkPolicyStatus) error
+	UpdateAntreaClusterNetworkPolicyStatus(name string, status *crdv1beta1.NetworkPolicyStatus) error
 }
 
 type networkPolicyControl struct {
 	antreaClient antreaclientset.Interface
-	cnpLister    crdlisters.ClusterNetworkPolicyLister
-	anpLister    crdlisters.NetworkPolicyLister
+	acnpLister   crdlisters.ClusterNetworkPolicyLister
+	annpLister   crdlisters.NetworkPolicyLister
 }
 
-func (c *networkPolicyControl) UpdateAntreaNetworkPolicyStatus(namespace, name string, status *crdv1alpha1.NetworkPolicyStatus) error {
-	anp, err := c.anpLister.NetworkPolicies(namespace).Get(name)
+func (c *networkPolicyControl) UpdateAntreaNetworkPolicyStatus(namespace, name string, status *crdv1beta1.NetworkPolicyStatus) error {
+	annp, err := c.annpLister.NetworkPolicies(namespace).Get(name)
 	if err != nil {
 		klog.Infof("Didn't find the original Antrea NetworkPolicy %s/%s, skip updating status", namespace, name)
 		return nil
 	}
-	if NetworkPolicyStatusEqual(anp.Status, *status) {
+	if NetworkPolicyStatusEqual(annp.Status, *status) {
 		return nil
 	}
 
-	toUpdate := anp.DeepCopy()
+	toUpdate := annp.DeepCopy()
 
 	var updateErr, getErr error
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		toUpdate.Status = *status
 		klog.V(2).InfoS("Updating Antrea NetworkPolicy", "NetworkPolicy", klog.KObj(toUpdate))
-		_, updateErr := c.antreaClient.CrdV1alpha1().NetworkPolicies(namespace).UpdateStatus(context.TODO(), toUpdate, v1.UpdateOptions{})
+		_, updateErr := c.antreaClient.CrdV1beta1().NetworkPolicies(namespace).UpdateStatus(context.TODO(), toUpdate, v1.UpdateOptions{})
 		if updateErr != nil && errors.IsConflict(updateErr) {
-			if toUpdate, getErr = c.antreaClient.CrdV1alpha1().NetworkPolicies(namespace).Get(context.TODO(), name, v1.GetOptions{}); getErr != nil {
+			if toUpdate, getErr = c.antreaClient.CrdV1beta1().NetworkPolicies(namespace).Get(context.TODO(), name, v1.GetOptions{}); getErr != nil {
 				return getErr
 			}
 		}
@@ -374,26 +393,26 @@ func (c *networkPolicyControl) UpdateAntreaNetworkPolicyStatus(namespace, name s
 	return updateErr
 }
 
-func (c *networkPolicyControl) UpdateAntreaClusterNetworkPolicyStatus(name string, status *crdv1alpha1.NetworkPolicyStatus) error {
-	cnp, err := c.cnpLister.Get(name)
+func (c *networkPolicyControl) UpdateAntreaClusterNetworkPolicyStatus(name string, status *crdv1beta1.NetworkPolicyStatus) error {
+	acnp, err := c.acnpLister.Get(name)
 	if err != nil {
 		klog.Infof("Didn't find the original Antrea ClusterNetworkPolicy %s, skip updating status", name)
 		return nil
 	}
 	// If the current status equals to the desired status, no need to update.
-	if NetworkPolicyStatusEqual(cnp.Status, *status) {
+	if NetworkPolicyStatusEqual(acnp.Status, *status) {
 		return nil
 	}
 
-	toUpdate := cnp.DeepCopy()
+	toUpdate := acnp.DeepCopy()
 
 	var updateErr, getErr error
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		toUpdate.Status = *status
 		klog.V(2).InfoS("Updating Antrea ClusterNetworkPolicy", "ClusterNetworkPolicy", klog.KObj(toUpdate))
-		_, updateErr := c.antreaClient.CrdV1alpha1().ClusterNetworkPolicies().UpdateStatus(context.TODO(), toUpdate, v1.UpdateOptions{})
+		_, updateErr := c.antreaClient.CrdV1beta1().ClusterNetworkPolicies().UpdateStatus(context.TODO(), toUpdate, v1.UpdateOptions{})
 		if updateErr != nil && errors.IsConflict(updateErr) {
-			if toUpdate, getErr = c.antreaClient.CrdV1alpha1().ClusterNetworkPolicies().Get(context.TODO(), name, v1.GetOptions{}); getErr != nil {
+			if toUpdate, getErr = c.antreaClient.CrdV1beta1().ClusterNetworkPolicies().Get(context.TODO(), name, v1.GetOptions{}); getErr != nil {
 				return getErr
 			}
 		}
@@ -410,18 +429,18 @@ func (c *networkPolicyControl) UpdateAntreaClusterNetworkPolicyStatus(name strin
 // GenerateNetworkPolicyCondition generates conditions based on the given error type.
 // Error of nil type means the NetworkPolicyCondition status is True.
 // Supports ErrNetworkPolicyAppliedToUnsupportedGroup error.
-func GenerateNetworkPolicyCondition(err error) []crdv1alpha1.NetworkPolicyCondition {
-	var conditions []crdv1alpha1.NetworkPolicyCondition
+func GenerateNetworkPolicyCondition(err error) []crdv1beta1.NetworkPolicyCondition {
+	var conditions []crdv1beta1.NetworkPolicyCondition
 	switch err.(type) {
 	case nil:
-		conditions = append(conditions, crdv1alpha1.NetworkPolicyCondition{
-			Type:               crdv1alpha1.NetworkPolicyConditionRealizable,
+		conditions = append(conditions, crdv1beta1.NetworkPolicyCondition{
+			Type:               crdv1beta1.NetworkPolicyConditionRealizable,
 			Status:             v1.ConditionTrue,
 			LastTransitionTime: v1.Now(),
 		})
-	case ErrNetworkPolicyAppliedToUnsupportedGroup:
-		conditions = append(conditions, crdv1alpha1.NetworkPolicyCondition{
-			Type:               crdv1alpha1.NetworkPolicyConditionRealizable,
+	case *ErrNetworkPolicyAppliedToUnsupportedGroup:
+		conditions = append(conditions, crdv1beta1.NetworkPolicyCondition{
+			Type:               crdv1beta1.NetworkPolicyConditionRealizable,
 			Status:             v1.ConditionFalse,
 			LastTransitionTime: v1.Now(),
 			Reason:             "NetworkPolicyAppliedToUnsupportedGroup",

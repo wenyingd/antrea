@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/agent"
+	"antrea.io/antrea/pkg/agent/client"
 	"antrea.io/antrea/pkg/agent/multicast"
 	"antrea.io/antrea/pkg/agent/openflow"
 	agenttypes "antrea.io/antrea/pkg/agent/types"
@@ -57,7 +57,7 @@ type Collector struct {
 	nodeName string
 	// antreaClientProvider provides interfaces to get antreaClient, which will be used to report the statistics to the
 	// antrea-controller.
-	antreaClientProvider agent.AntreaClientProvider
+	antreaClientProvider client.AntreaClientProvider
 	// ofClient is the Openflow interface that can fetch the statistic of the Openflow entries.
 	ofClient             openflow.Client
 	networkPolicyQuerier querier.AgentNetworkPolicyInfoQuerier
@@ -68,7 +68,7 @@ type Collector struct {
 	multicastEnabled    bool
 }
 
-func NewCollector(antreaClientProvider agent.AntreaClientProvider, ofClient openflow.Client, npQuerier querier.AgentNetworkPolicyInfoQuerier, mcQuerier *multicast.Controller) *Collector {
+func NewCollector(antreaClientProvider client.AntreaClientProvider, ofClient openflow.Client, npQuerier querier.AgentNetworkPolicyInfoQuerier, mcQuerier *multicast.Controller) *Collector {
 	nodeName, _ := env.GetNodeName()
 	manager := &Collector{
 		nodeName:             nodeName,
@@ -115,7 +115,7 @@ func (m *Collector) collect() *statsCollection {
 	ruleStatsMap := m.ofClient.NetworkPolicyMetrics()
 	npStatsMap := map[types.UID]*statsv1alpha1.TrafficStats{}
 	acnpStatsMap := map[types.UID]map[string]*statsv1alpha1.TrafficStats{}
-	anpStatsMap := map[types.UID]map[string]*statsv1alpha1.TrafficStats{}
+	annpStatsMap := map[types.UID]map[string]*statsv1alpha1.TrafficStats{}
 
 	for ofID, ruleStats := range ruleStatsMap {
 		rule := m.networkPolicyQuerier.GetRuleByFlowID(ofID)
@@ -133,7 +133,7 @@ func (m *Collector) collect() *statsCollection {
 		case cpv1beta.AntreaClusterNetworkPolicy:
 			addRuleStatsUp(acnpStatsMap, ruleStats, rule)
 		case cpv1beta.AntreaNetworkPolicy:
-			addRuleStatsUp(anpStatsMap, ruleStats, rule)
+			addRuleStatsUp(annpStatsMap, ruleStats, rule)
 		}
 	}
 	var multicastGroupMap map[string][]cpv1beta.PodReference
@@ -143,7 +143,7 @@ func (m *Collector) collect() *statsCollection {
 	return &statsCollection{
 		networkPolicyStats:              npStatsMap,
 		antreaClusterNetworkPolicyStats: acnpStatsMap,
-		antreaNetworkPolicyStats:        anpStatsMap,
+		antreaNetworkPolicyStats:        annpStatsMap,
 		multicastGroups:                 multicastGroupMap,
 	}
 }
@@ -189,11 +189,11 @@ func isIdenticalMulticastGroupMap(a, b map[string][]cpv1beta.PodReference) bool 
 		if len(aValue) != len(bValue) {
 			return false
 		}
-		aValueSet := sets.NewString()
+		aValueSet := sets.New[string]()
 		for _, av := range aValue {
 			aValueSet.Insert(k8s.NamespacedName(av.Namespace, av.Name))
 		}
-		bValueSet := sets.NewString()
+		bValueSet := sets.New[string]()
 		for _, bv := range bValue {
 			bValueSet.Insert(k8s.NamespacedName(bv.Namespace, bv.Name))
 		}
@@ -204,68 +204,84 @@ func isIdenticalMulticastGroupMap(a, b map[string][]cpv1beta.PodReference) bool 
 	return true
 }
 
-// report calculates the delta of the stats and pushes it to the antrea-controller summary API.
-// If multicast feature gate is enabled, it also sends the full multicast group and IGMP report stats to the antrea-controller.
-func (m *Collector) report(curStatsCollection *statsCollection) error {
-	npStats := calculateDiff(curStatsCollection.networkPolicyStats, m.lastStatsCollection.networkPolicyStats)
-	acnpStats := calculateRuleDiff(curStatsCollection.antreaClusterNetworkPolicyStats, m.lastStatsCollection.antreaClusterNetworkPolicyStats)
-	anpStats := calculateRuleDiff(curStatsCollection.antreaNetworkPolicyStats, m.lastStatsCollection.antreaNetworkPolicyStats)
+func (m *Collector) calculateNPStats(curStatsCollection *statsCollection) (npStats, acnpStats, annpStats []cpv1beta.NetworkPolicyStats) {
+	npStats = calculateDiff(curStatsCollection.networkPolicyStats, m.lastStatsCollection.networkPolicyStats)
+	acnpStats = calculateRuleDiff(curStatsCollection.antreaClusterNetworkPolicyStats, m.lastStatsCollection.antreaClusterNetworkPolicyStats)
+	annpStats = calculateRuleDiff(curStatsCollection.antreaNetworkPolicyStats, m.lastStatsCollection.antreaNetworkPolicyStats)
+	return npStats, acnpStats, annpStats
+}
 
+func (m *Collector) calculateNodeStatsSummary(curStatsCollection *statsCollection) *cpv1beta.NodeStatsSummary {
 	var multicastGroups []cpv1beta.MulticastGroupInfo
 	multicastGroupsUpdated := false
+	npStats, acnpStats, annpStats := m.calculateNPStats(curStatsCollection)
 	if m.multicastEnabled {
-		// multicastGroups should be reported if the multicast group Pod membership has changed since the last collect.
-		if !isIdenticalMulticastGroupMap(m.lastStatsCollection.multicastGroups, curStatsCollection.multicastGroups) {
-			multicastGroupsUpdated = true
-			multicastGroups = make([]cpv1beta.MulticastGroupInfo, 0, len(curStatsCollection.multicastGroups))
-			for group, pods := range curStatsCollection.multicastGroups {
-				multicastGroups = append(multicastGroups, cpv1beta.MulticastGroupInfo{Group: group, Pods: pods})
-			}
-		}
-
-		// Collect statistics of IGMP report messages hit by ANP or ACNP, and merge them to anpStats and acnpStats.
-		// Note IGMP reports statistics may be lost if NodeStatsSummary is not reported successfully.
-		multicastANPStatsMap, multicastACNPStatsMap := m.multicastQuerier.CollectIGMPReportNPStats()
-		mergeReportStats := func(igmpReportStatsMap map[types.UID]map[string]*agenttypes.RuleMetric, originalStatsList []cpv1beta.NetworkPolicyStats) []cpv1beta.NetworkPolicyStats {
-			uidIndexMap := make(map[types.UID]int)
-			for i, stats := range originalStatsList {
-				uidIndexMap[stats.NetworkPolicy.UID] = i
-			}
-			for uid, npStats := range igmpReportStatsMap {
-				ruleStatsList := make([]statsv1alpha1.RuleTrafficStats, 0, len(npStats))
-				for ruleName, ruleStats := range npStats {
-					ruleStatsList = append(ruleStatsList, statsv1alpha1.RuleTrafficStats{Name: ruleName, TrafficStats: statsv1alpha1.TrafficStats{Packets: int64(ruleStats.Packets), Bytes: int64(ruleStats.Bytes)}})
-				}
-				index, exist := uidIndexMap[uid]
-				if !exist {
-					originalStatsList = append(originalStatsList, cpv1beta.NetworkPolicyStats{NetworkPolicy: cpv1beta.NetworkPolicyReference{UID: uid}, RuleTrafficStats: ruleStatsList})
-				} else {
-					originalStatsList[index].RuleTrafficStats = append(originalStatsList[index].RuleTrafficStats, ruleStatsList...)
-				}
-			}
-			return originalStatsList
-		}
-
-		acnpStats = mergeReportStats(multicastACNPStatsMap, acnpStats)
-		anpStats = mergeReportStats(multicastANPStatsMap, anpStats)
+		multicastGroupsUpdated = !isIdenticalMulticastGroupMap(curStatsCollection.multicastGroups, m.lastStatsCollection.multicastGroups)
+		acnpStats, annpStats = m.mergeStatsWithIGMPReports(acnpStats, annpStats)
+		multicastGroups = m.convertMulticastGroups(curStatsCollection.multicastGroups)
 	}
-
-	if len(npStats) == 0 && len(acnpStats) == 0 && len(anpStats) == 0 && !multicastGroupsUpdated {
-		klog.V(4).Info("No stats to report, skip reporting")
+	// Semantically, reporting networkpolicy statistics with zero length is equal to reporting the same multicastGroupInfo.
+	if len(npStats) == 0 && len(acnpStats) == 0 && len(annpStats) == 0 && !multicastGroupsUpdated {
 		return nil
 	}
-
-	summary := &cpv1beta.NodeStatsSummary{
+	return &cpv1beta.NodeStatsSummary{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: m.nodeName,
 		},
 		NetworkPolicies:              npStats,
 		AntreaClusterNetworkPolicies: acnpStats,
-		AntreaNetworkPolicies:        anpStats,
+		AntreaNetworkPolicies:        annpStats,
 		Multicast:                    multicastGroups,
 	}
-	klog.V(6).Infof("Reporting NodeStatsSummary: %v", summary)
+}
 
+// mergeStatsWithIGMPReports merges acnpStats or annpStats with IGMP report statistics.
+// Unlike other networkpolicystats collection process, IGMP report statistics is not collected from OVS flows. It was collected during IGMP packetIn process by a local cache.
+// IGMP report statistics collected for a rule should be merged into already defined networkpolicy statistics before reporting.
+func (m *Collector) mergeStatsWithIGMPReports(acnpStats, annpStats []cpv1beta.NetworkPolicyStats) ([]cpv1beta.NetworkPolicyStats, []cpv1beta.NetworkPolicyStats) {
+	multicastANNPStatsMap, multicastACNPStatsMap := m.multicastQuerier.CollectIGMPReportNPStats()
+	mergeReportStats := func(igmpReportStatsMap map[types.UID]map[string]*agenttypes.RuleMetric, originalStatsList []cpv1beta.NetworkPolicyStats) []cpv1beta.NetworkPolicyStats {
+		uidIndexMap := make(map[types.UID]int)
+		for i, stats := range originalStatsList {
+			uidIndexMap[stats.NetworkPolicy.UID] = i
+		}
+		for uid, npStats := range igmpReportStatsMap {
+			ruleStatsList := make([]statsv1alpha1.RuleTrafficStats, 0, len(npStats))
+			for ruleName, ruleStats := range npStats {
+				ruleStatsList = append(ruleStatsList, statsv1alpha1.RuleTrafficStats{Name: ruleName, TrafficStats: statsv1alpha1.TrafficStats{Packets: int64(ruleStats.Packets), Bytes: int64(ruleStats.Bytes)}})
+			}
+			index, exist := uidIndexMap[uid]
+			if !exist {
+				originalStatsList = append(originalStatsList, cpv1beta.NetworkPolicyStats{NetworkPolicy: cpv1beta.NetworkPolicyReference{UID: uid}, RuleTrafficStats: ruleStatsList})
+			} else {
+				originalStatsList[index].RuleTrafficStats = append(originalStatsList[index].RuleTrafficStats, ruleStatsList...)
+			}
+		}
+		return originalStatsList
+	}
+
+	return mergeReportStats(multicastACNPStatsMap, acnpStats), mergeReportStats(multicastANNPStatsMap, annpStats)
+}
+
+// convertMulticastGroups converts multicastGroupMap into a slice of multicastGroups.
+// Calculating diff is not needed because we report full multicast group of the local node.
+func (m *Collector) convertMulticastGroups(multicastGroupMap map[string][]cpv1beta.PodReference) []cpv1beta.MulticastGroupInfo {
+	multicastGroups := make([]cpv1beta.MulticastGroupInfo, 0, len(multicastGroupMap))
+	for group, pods := range multicastGroupMap {
+		multicastGroups = append(multicastGroups, cpv1beta.MulticastGroupInfo{Group: group, Pods: pods})
+	}
+	return multicastGroups
+}
+
+// report calculates the delta of the stats and pushes it to the antrea-controller summary API.
+// If multicast feature gate is enabled, it also sends the full multicast group and IGMP report stats to the antrea-controller.
+func (m *Collector) report(curStatsCollection *statsCollection) error {
+	summary := m.calculateNodeStatsSummary(curStatsCollection)
+	if summary == nil {
+		klog.V(4).Info("No stats to report, skip reporting")
+		return nil
+	}
+	klog.V(4).InfoS("Reporting NodeStatsSummary", "NodeStatsSummary", summary)
 	antreaClient, err := m.antreaClientProvider.GetAntreaClient()
 	if err != nil {
 		return err

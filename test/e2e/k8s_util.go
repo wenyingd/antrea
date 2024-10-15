@@ -16,24 +16,29 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
-	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	v1net "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
-	crdv1alpha2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
-	crdv1alpha3 "antrea.io/antrea/pkg/apis/crd/v1alpha3"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/test/e2e/utils"
 )
+
+var ErrPodNotFound = errors.New("pod not found")
 
 type KubernetesUtils struct {
 	*TestData
@@ -57,13 +62,16 @@ type TestCase struct {
 // TestStep is a single unit of testing spec. It includes the policy specs that need to be
 // applied for this test, the port to test traffic on and the expected Reachability matrix.
 type TestStep struct {
-	Name          string
-	Reachability  *Reachability
-	TestResources []metav1.Object
-	Ports         []int32
-	Protocol      utils.AntreaPolicyProtocol
-	Duration      time.Duration
-	CustomProbes  []*CustomProbe
+	Name           string
+	Reachability   *Reachability
+	NPEvaluation   *NPEvaluation
+	TestResources  []metav1.Object
+	Ports          []int32
+	Protocol       utils.AntreaPolicyProtocol
+	Duration       time.Duration
+	CustomProbes   []*CustomProbe
+	CustomSetup    func()
+	CustomTeardown func()
 }
 
 // CustomProbe will spin up (or update) SourcePod and DestPod such that Add event of Pods
@@ -79,11 +87,28 @@ type CustomProbe struct {
 	ExpectConnectivity PodConnectivityMark
 }
 
-// GetPodByLabel returns a Pod with the matching Namespace and "pod" label.
+type probeResult struct {
+	podFrom      Pod
+	podTo        Pod
+	connectivity PodConnectivityMark
+	err          error
+}
+
+// TestNamespaceMeta holds the relevant metadata of a test Namespace during initialization.
+type TestNamespaceMeta struct {
+	Name   string
+	Labels map[string]string
+}
+
+// GetPodByLabel returns a Pod with the matching Namespace and "pod" label if it's found.
+// If the pod is not found, GetPodByLabel returns "ErrPodNotFound".
 func (k *KubernetesUtils) GetPodByLabel(ns string, name string) (*v1.Pod, error) {
 	pods, err := k.getPodsUncached(ns, "pod", name)
-	if err != nil || len(pods) == 0 {
-		return nil, errors.WithMessagef(err, "unable to get Pod in Namespace %s with label pod=%s", ns, name)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get Pod in Namespace %s with label pod=%s: %w", ns, name, err)
+	}
+	if len(pods) == 0 {
+		return nil, ErrPodNotFound
 	}
 	return &pods[0], nil
 }
@@ -93,7 +118,7 @@ func (k *KubernetesUtils) getPodsUncached(ns string, key, val string) ([]v1.Pod,
 		LabelSelector: fmt.Sprintf("%v=%v", key, val),
 	})
 	if err != nil {
-		return nil, errors.WithMessage(err, "unable to list pods")
+		return nil, fmt.Errorf("unable to list pods: %w", err)
 	}
 	return v1PodList.Items, nil
 }
@@ -108,7 +133,7 @@ func (k *KubernetesUtils) GetPodsByLabel(ns string, key string, val string) ([]v
 
 	v1PodList, err := k.getPodsUncached(ns, key, val)
 	if err != nil {
-		return nil, errors.WithMessage(err, "unable to list pods")
+		return nil, fmt.Errorf("unable to list pods: %w", err)
 	}
 	k.podCache[fmt.Sprintf("%v_%v_%v", ns, key, val)] = v1PodList
 	return v1PodList, nil
@@ -123,6 +148,52 @@ func (k *KubernetesUtils) LabelPod(ns, name, key, value string) (*v1.Pod, error)
 	return k.clientset.CoreV1().Pods(ns).Update(context.TODO(), pod, metav1.UpdateOptions{})
 }
 
+func (k *KubernetesUtils) getTCPv4SourcePortRangeFromPod(podNamespace, podNameLabel string) (int32, int32, error) {
+	pod, err := k.GetPodByLabel(podNamespace, podNameLabel)
+	if err != nil {
+		return 0, 0, err
+	}
+	cmd := []string{
+		"/bin/sh",
+		"-c",
+		"cat /proc/sys/net/ipv4/ip_local_port_range",
+	}
+	stdout, stderr, err := k.RunCommandFromPod(pod.Namespace, pod.Name, "c80", cmd)
+	if err != nil || stderr != "" {
+		log.Errorf("Failed to retrieve TCP source port range for Pod %s/%s", podNamespace, podNameLabel)
+		return 0, 0, err
+	}
+	ports := strings.Fields(stdout)
+	if len(ports) < 2 {
+		log.Errorf("Failed to retrieve TCP source port range for Pod %s/%s", podNamespace, podNameLabel)
+		return 0, 0, err
+	}
+	startPort, _ := strconv.ParseInt(ports[0], 0, 32)
+	endPort, _ := strconv.ParseInt(ports[1], 0, 32)
+	return int32(startPort), int32(endPort), nil
+}
+
+// ProbeCommand generates a command to probe the provider url.
+// The executor parameter can be used to change where the prober will run. For example, it could be "ip netns exec NAME"
+// to run the prober in another namespace.
+// We try to connect 3 times. This dates back to when we were using the OVS netdev datapath for Kind clusters, as the
+// first packet sent on a tunnel was always dropped (https://github.com/antrea-io/antrea/issues/467). We may be able to
+// revisit this now that we use the OVS kernel datapath for Kind.
+// "agnhost connect" outputs nothing when it succeeds. We output "CONNECTED" in such case and prepend a sequence
+// number for each attempt, to make the result more informative. Example output:
+// 1: CONNECTED
+// 2: TIMEOUT
+// 3: TIMEOUT
+func ProbeCommand(url, protocol, executor string) []string {
+	cmd := []string{
+		"/bin/sh",
+		"-c",
+		fmt.Sprintf(`for i in $(seq 1 3); do echo -n "${i}: " >&2 && %s /agnhost connect %s --timeout=1s --protocol=%s && echo "CONNECTED" >&2; done; echo "FINISHED" >&2`,
+			executor, url, protocol),
+	}
+	return cmd
+}
+
 func (k *KubernetesUtils) probe(
 	pod *v1.Pod,
 	podName string,
@@ -131,42 +202,39 @@ func (k *KubernetesUtils) probe(
 	dstName string,
 	port int32,
 	protocol utils.AntreaPolicyProtocol,
+	expectedResult *PodConnectivityMark,
 ) PodConnectivityMark {
 	protocolStr := map[utils.AntreaPolicyProtocol]string{
 		utils.ProtocolTCP:  "tcp",
 		utils.ProtocolUDP:  "udp",
 		utils.ProtocolSCTP: "sctp",
 	}
-	// We try to connect 3 times. This dates back to when we were using the OVS netdev datapath
-	// for Kind clusters, as the first packet sent on a tunnel was always dropped
-	// (https://github.com/antrea-io/antrea/issues/467). We may be able to revisit this now that
-	// we use the OVS kernel datapath for Kind.
-	cmd := []string{
-		"/bin/sh",
-		"-c",
-		fmt.Sprintf("for i in $(seq 1 3); do /agnhost connect %s:%d --timeout=1s --protocol=%s; done;", dstAddr, port, protocolStr[protocol]),
-	}
+	cmd := ProbeCommand(fmt.Sprintf("%s:%d", dstAddr, port), protocolStr[protocol], "")
 	log.Tracef("Running: kubectl exec %s -c %s -n %s -- %s", pod.Name, containerName, pod.Namespace, strings.Join(cmd, " "))
 	stdout, stderr, err := k.RunCommandFromPod(pod.Namespace, pod.Name, containerName, cmd)
 	// It needs to check both err and stderr because:
 	// 1. The probe tried 3 times. If it checks err only, failure+failure+success would be considered connected.
 	// 2. There might be an issue in Pod exec API that it sometimes doesn't return error when the probe fails. See #2394.
+	var actualResult PodConnectivityMark
 	if err != nil || stderr != "" {
-		// log this error as trace since may be an expected failure
-		log.Tracef("%s -> %s: error when running command: err - %v /// stdout - %s /// stderr - %s", podName, dstName, err, stdout, stderr)
 		// If err != nil and stderr == "", then it means this probe failed because of
 		// the command instead of connectivity. For example, container name doesn't exist.
 		if stderr == "" {
-			return Error
+			actualResult = Error
 		}
-		return DecideProbeResult(stderr, 3)
+		actualResult = DecideProbeResult(stderr, 3)
+	} else {
+		actualResult = Connected
 	}
-	return Connected
+	if expectedResult != nil && *expectedResult != actualResult {
+		log.Infof("%s -> %s: expected %s but got %s: err - %v /// stdout - %s /// stderr - %s", podName, dstName, *expectedResult, actualResult, err, stdout, stderr)
+	}
+	return actualResult
 }
 
 // DecideProbeResult uses the probe stderr to decide the connectivity.
 func DecideProbeResult(stderr string, probeNum int) PodConnectivityMark {
-	countConnected := probeNum - strings.Count(stderr, "\n")
+	countConnected := strings.Count(stderr, "CONNECTED")
 	countDropped := strings.Count(stderr, "TIMEOUT")
 	// For our UDP rejection cases, agnhost will return:
 	//   For IPv4: 'UNKNOWN: read udp [src]->[dst]: read: no route to host'
@@ -176,13 +244,15 @@ func DecideProbeResult(stderr string, probeNum int) PodConnectivityMark {
 	// For our other protocols rejection cases, agnhost will return 'REFUSED'.
 	countRejected := strings.Count(stderr, "REFUSED") + strings.Count(stderr, "no route to host") + strings.Count(stderr, "permission denied")
 
+	countSCTPInProgress := strings.Count(stderr, "OTHER: operation already in progress")
+
 	if countRejected == 0 && countConnected > 0 {
 		return Connected
 	}
 	if countConnected == 0 && countRejected > 0 {
 		return Rejected
 	}
-	if countDropped == probeNum {
+	if countDropped+countSCTPInProgress == probeNum {
 		return Dropped
 	}
 	return Error
@@ -207,11 +277,11 @@ func (k *KubernetesUtils) pingProbe(
 	log.Tracef("Running: kubectl exec %s -c %s -n %s -- %s", pod.Name, containerName, pod.Namespace, strings.Join(cmd, " "))
 	stdout, stderr, err := k.RunCommandFromPod(pod.Namespace, pod.Name, containerName, cmd)
 	log.Tracef("%s -> %s: error when running command: err - %v /// stdout - %s /// stderr - %s", podName, dstName, err, stdout, stderr)
-	return DecidePingProbeResult(stdout, 3)
+	return decidePingProbeResult(stdout, 3)
 }
 
-// DecidePingProbeResult uses the pingProbe stdout to decide the connectivity.
-func DecidePingProbeResult(stdout string, probeNum int) PodConnectivityMark {
+// decidePingProbeResult uses the pingProbe stdout to decide the connectivity.
+func decidePingProbeResult(stdout string, probeNum int) PodConnectivityMark {
 	// Provide stdout example for different connectivity:
 	// ================== Connected stdout ==================
 	// PING 10.10.1.2 (10.10.1.2) 56(84) bytes of data.
@@ -263,11 +333,71 @@ func DecidePingProbeResult(stdout string, probeNum int) PodConnectivityMark {
 	return Error
 }
 
-// Probe execs into a Pod and checks its connectivity to another Pod. Of course it
-// assumes that the target Pod is serving on the input port, and also that agnhost
-// is installed. The connectivity from source Pod to all IPs of the target Pod
+func (k *KubernetesUtils) digDNS(
+	podName string,
+	podNamespace string,
+	dstAddr string,
+	useTCP bool,
+) (string, error) {
+	pod, err := k.GetPodByLabel(podNamespace, podName)
+	if err != nil {
+		return "", fmt.Errorf("Pod %s/%s dones't exist", podNamespace, podName)
+	}
+	digCmd := fmt.Sprintf("dig %s", dstAddr)
+	if useTCP {
+		digCmd += " +tcp"
+	}
+	cmd := []string{
+		"/bin/sh",
+		"-c",
+		digCmd,
+	}
+	log.Tracef("Running: kubectl exec %s -c %s -n %s -- %s", pod.Name, pod.Spec.Containers[0].Name, pod.Namespace, strings.Join(cmd, " "))
+	stdout, stderr, err := k.RunCommandFromPod(pod.Namespace, pod.Name, pod.Spec.Containers[0].Name, cmd)
+	log.Tracef("%s -> %s: error when running command: err - %v /// stdout - %s /// stderr - %s", podName, dstAddr, err, stdout, stderr)
+	//========DiG command stdout example========
+	//; <<>> DiG 9.16.6 <<>> github.com +tcp
+	//;; global options: +cmd
+	//;; Got answer:
+	//;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 21816
+	//;; flags: qr aa rd ra; QUERY: 1, ANSWER: 1, AUTHORITY: 0, ADDITIONAL: 1
+	//
+	//;; OPT PSEUDOSECTION:
+	//; EDNS: version: 0, flags:; udp: 4096
+	//; COOKIE: 2d7fe493ea37c430 (echoed)
+	//;; QUESTION SECTION:
+	//;github.com.			IN	A
+	//
+	//;; ANSWER SECTION:
+	//github.com.		6	IN	A	140.82.113.3
+	//
+	//;; Query time: 0 msec
+	//;; SERVER: 10.96.0.10#53(10.96.0.10)
+	//;; WHEN: Tue Feb 14 22:34:23 UTC 2023
+	//;; MSG SIZE  rcvd: 77
+	//==========================================
+	answerMarkIdx := strings.Index(stdout, ";; ANSWER SECTION:")
+	if answerMarkIdx == -1 {
+		return "", fmt.Errorf("failed to parse dig response")
+	}
+	splitResp := strings.Split(stdout[answerMarkIdx:], "\n")
+	if len(splitResp) < 2 {
+		return "", fmt.Errorf("failed to parse dig response")
+	}
+	ipLine := splitResp[1]
+	lastTab := strings.LastIndex(ipLine, "\t")
+	if lastTab == -1 {
+		return "", fmt.Errorf("failed to parse dig response")
+	}
+	return ipLine[lastTab:], nil
+}
+
+// Probe execs into a Pod and checks its connectivity to another Pod. It assumes
+// that the target Pod is serving on the input port, and also that agnhost is
+// installed. The connectivity from source Pod to all IPs of the target Pod
 // should be consistent. Otherwise, Error PodConnectivityMark will be returned.
-func (k *KubernetesUtils) Probe(ns1, pod1, ns2, pod2 string, port int32, protocol utils.AntreaPolicyProtocol) (PodConnectivityMark, error) {
+func (k *KubernetesUtils) Probe(ns1, pod1, ns2, pod2 string, port int32, protocol utils.AntreaPolicyProtocol,
+	remoteCluster *KubernetesUtils, expectedResult *PodConnectivityMark) (PodConnectivityMark, error) {
 	fromPods, err := k.GetPodsByLabel(ns1, "pod", pod1)
 	if err != nil {
 		return Error, fmt.Errorf("unable to get Pods from Namespace %s: %v", ns1, err)
@@ -277,26 +407,65 @@ func (k *KubernetesUtils) Probe(ns1, pod1, ns2, pod2 string, port int32, protoco
 	}
 	fromPod := fromPods[0]
 
-	toPods, err := k.GetPodsByLabel(ns2, "pod", pod2)
+	var toPods []v1.Pod
+	var clusterType string
+	if remoteCluster != nil {
+		toPods, err = remoteCluster.GetPodsByLabel(ns2, "pod", pod2)
+		clusterType = "remote"
+	} else {
+		toPods, err = k.GetPodsByLabel(ns2, "pod", pod2)
+		clusterType = "local"
+	}
 	if err != nil {
-		return Error, fmt.Errorf("unable to get Pods from Namespace %s: %v", ns2, err)
+		return Error, fmt.Errorf("unable to get Pods from Namespace %s in %s cluster: %v", ns2, clusterType, err)
 	}
 	if len(toPods) == 0 {
-		return Error, fmt.Errorf("no Pod of label pod=%s in Namespace %s found", pod2, ns2)
+		return Error, fmt.Errorf("no Pod of label pod=%s in Namespace %s found in %s cluster", pod2, ns2, clusterType)
 	}
 	toPod := toPods[0]
+	fromPodName, toPodName := fmt.Sprintf("%s/%s", ns1, pod1), fmt.Sprintf("%s/%s", ns2, pod2)
+	return k.probeAndDecideConnectivity(fromPod, toPod, fromPodName, toPodName, port, protocol, expectedResult)
+}
 
+func (k *KubernetesUtils) probeAndDecideConnectivity(fromPod, toPod v1.Pod,
+	fromPodName, toPodName string, port int32, protocol utils.AntreaPolicyProtocol, expectedResult *PodConnectivityMark) (PodConnectivityMark, error) {
 	// Both IPv4 and IPv6 address should be tested.
 	connectivity := Unknown
-	for _, eachIP := range toPod.Status.PodIPs {
-		toIP := eachIP.IP
-		// If it's an IPv6 address, add "[]" around it.
-		if strings.Contains(toIP, ":") {
-			toIP = fmt.Sprintf("[%s]", toIP)
+	var toIPs []string
+	if toPod.Spec.HostNetwork {
+		// When probing UDP or SCTP from a non-hostNetwork Pod to a hostNetwork Pod within the same Node, the local
+		// Antrea gateway IPs should be used as the destination IP, rather than the Node external IPs. If using the Node
+		// external IPs as destination IPs when probing, the UDP or SCTP reply traffic from hostNetwork Pod will choose
+		// a source IP address based on the routing decision or outgoing interface, which means that the local Antrea
+		// gateway IPs will be chosen as the source IP address. As a result, the probing will get a failure because the
+		// source IP address of reply traffic is unexpected. To accommodate with this case, when the target Pod is a
+		// hostNetwork Pod, the local Antrea gateway IPs are used.
+		nodeInfo := getNodeByName(toPod.Spec.NodeName)
+		if nodeInfo == nil {
+			return connectivity, fmt.Errorf("failed to get Node information by name %s", toPod.Spec.NodeName)
 		}
-		// HACK: inferring container name as c80, c81, etc, for simplicity.
+		gwIPv4, gwIPv6 := nodeGatewayIPs(nodeInfo.idx)
+		if gwIPv4 != "" {
+			toIPs = append(toIPs, gwIPv4)
+		}
+		if gwIPv6 != "" {
+			toIPs = append(toIPs, fmt.Sprintf("[%s]", gwIPv6))
+		}
+	} else {
+		for _, eachIP := range toPod.Status.PodIPs {
+			toIP := eachIP.IP
+			// If it's an IPv6 address, add "[]" around it.
+			if strings.Contains(toIP, ":") {
+				toIP = fmt.Sprintf("[%s]", toIP)
+			}
+			toIPs = append(toIPs, toIP)
+		}
+	}
+
+	for _, toIP := range toIPs {
+		// HACK: inferring container name as c80, c81 etc., for simplicity.
 		containerName := fmt.Sprintf("c%v", port)
-		curConnectivity := k.probe(&fromPod, fmt.Sprintf("%s/%s", ns1, pod1), containerName, toIP, fmt.Sprintf("%s/%s", ns2, pod2), port, protocol)
+		curConnectivity := k.probe(&fromPod, fromPodName, containerName, toIP, toPodName, port, protocol, expectedResult)
 		if connectivity == Unknown {
 			connectivity = curConnectivity
 		} else if connectivity != curConnectivity {
@@ -308,7 +477,7 @@ func (k *KubernetesUtils) Probe(ns1, pod1, ns2, pod2 string, port int32, protoco
 
 // ProbeAddr execs into a Pod and checks its connectivity to an arbitrary destination
 // address.
-func (k *KubernetesUtils) ProbeAddr(ns, podLabelKey, podLabelValue, dstAddr string, port int32, protocol utils.AntreaPolicyProtocol) (PodConnectivityMark, error) {
+func (k *KubernetesUtils) ProbeAddr(ns, podLabelKey, podLabelValue, dstAddr string, port int32, protocol utils.AntreaPolicyProtocol, expectedResult *PodConnectivityMark) (PodConnectivityMark, error) {
 	fromPods, err := k.GetPodsByLabel(ns, podLabelKey, podLabelValue)
 	if err != nil {
 		return Error, fmt.Errorf("unable to get Pods from Namespace %s: %v", ns, err)
@@ -326,7 +495,7 @@ func (k *KubernetesUtils) ProbeAddr(ns, podLabelKey, podLabelValue, dstAddr stri
 		if strings.Contains(dstAddr, ":") {
 			dstAddr = fmt.Sprintf("[%s]", dstAddr)
 		}
-		connectivity = k.probe(&fromPod, fmt.Sprintf("%s/%s", ns, podLabelValue), containerName, dstAddr, dstAddr, port, protocol)
+		connectivity = k.probe(&fromPod, fmt.Sprintf("%s/%s", ns, podLabelValue), containerName, dstAddr, dstAddr, port, protocol, expectedResult)
 	}
 	return connectivity, nil
 }
@@ -355,7 +524,12 @@ func (data *TestData) CreateOrUpdateNamespace(n string, labels map[string]string
 }
 
 // CreateOrUpdateDeployment is a convenience function for idempotent setup of deployments
-func (data *TestData) CreateOrUpdateDeployment(ns, deploymentName string, replicas int32, labels map[string]string) (*appsv1.Deployment, error) {
+func (data *TestData) CreateOrUpdateDeployment(ns string,
+	deploymentName string,
+	replicas int32,
+	labels map[string]string,
+	nodeName string,
+	hostNetwork bool) (*appsv1.Deployment, error) {
 	zero := int64(0)
 	log.Infof("Creating/updating Deployment '%s/%s'", ns, deploymentName)
 	makeContainerSpec := func(port int32, protocol v1.Protocol) v1.Container {
@@ -403,6 +577,8 @@ func (data *TestData) CreateOrUpdateDeployment(ns, deploymentName string, replic
 					Namespace: ns,
 				},
 				Spec: v1.PodSpec{
+					NodeName:                      nodeName,
+					HostNetwork:                   hostNetwork,
 					TerminationGracePeriodSeconds: &zero,
 					Containers: []v1.Container{
 						makeContainerSpec(80, "ALL"),
@@ -482,12 +658,21 @@ func (data *TestData) GetService(namespace, name string) (*v1.Service, error) {
 	return data.clientset.CoreV1().Services(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
+func (data *TestData) GetConfigMap(namespace, name string) (*v1.ConfigMap, error) {
+	return data.clientset.CoreV1().ConfigMaps(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+}
+
+func (data *TestData) UpdateConfigMap(configMap *v1.ConfigMap) error {
+	_, err := data.clientset.CoreV1().ConfigMaps(configMap.Namespace).Update(context.TODO(), configMap, metav1.UpdateOptions{})
+	return err
+}
+
 // DeleteService is a convenience function for deleting a Service by Namespace and name.
 func (data *TestData) DeleteService(ns, name string) error {
 	log.Infof("Deleting Service %s in ns %s", name, ns)
 	err := data.clientset.CoreV1().Services(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "unable to delete Service %s", name)
+		return fmt.Errorf("unable to delete Service %s: %w", name, err)
 	}
 	return nil
 }
@@ -497,7 +682,7 @@ func (data *TestData) CleanServices(namespaces map[string]string) error {
 	for _, ns := range namespaces {
 		l, err := data.clientset.CoreV1().Services(ns).List(context.TODO(), metav1.ListOptions{})
 		if err != nil {
-			return errors.Wrapf(err, "unable to list Services in ns %s", ns)
+			return fmt.Errorf("unable to list Services in ns %s: %w", ns, err)
 		}
 		for _, svc := range l.Items {
 			if err := data.DeleteService(svc.Namespace, svc.Name); err != nil {
@@ -548,7 +733,7 @@ func (data *TestData) DeleteServiceAccount(ns, name string) error {
 	log.Infof("Deleting ServiceAccount %s in ns %s", name, ns)
 	err := data.clientset.CoreV1().ServiceAccounts(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "unable to delete ServiceAccount %s in ns %s", name, ns)
+		return fmt.Errorf("unable to delete ServiceAccount %s in ns %s: %w", name, ns, err)
 	}
 	return nil
 }
@@ -580,76 +765,69 @@ func (data *TestData) DeleteNetworkPolicy(ns, name string) error {
 	log.Infof("Deleting NetworkPolicy '%s/%s'", ns, name)
 	err := data.clientset.NetworkingV1().NetworkPolicies(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
 	if err != nil {
-		return errors.Wrapf(err, "unable to delete NetworkPolicy '%s'", name)
+		return fmt.Errorf("unable to delete NetworkPolicy '%s': %w", name, err)
 	}
 	return nil
 }
 
 // CleanNetworkPolicies is a convenience function for deleting NetworkPolicies in the provided namespaces.
-func (data *TestData) CleanNetworkPolicies(namespaces map[string]string) error {
+func (data *TestData) CleanNetworkPolicies(namespaces map[string]TestNamespaceMeta) error {
 	for _, ns := range namespaces {
-		l, err := data.clientset.NetworkingV1().NetworkPolicies(ns).List(context.TODO(), metav1.ListOptions{})
-		if err != nil {
-			return errors.Wrapf(err, "unable to list NetworkPolicy in Namespace '%s'", ns)
-		}
-		for _, np := range l.Items {
-			if err = data.DeleteNetworkPolicy(np.Namespace, np.Name); err != nil {
-				return err
-			}
+		if err := data.clientset.NetworkingV1().NetworkPolicies(ns.Name).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{}); err != nil {
+			return fmt.Errorf("unable to delete NetworkPolicies in Namespace '%s': %w", ns, err)
 		}
 	}
 	return nil
 }
 
 // CreateTier is a convenience function for creating an Antrea Policy Tier by name and priority.
-func (data *TestData) CreateNewTier(name string, tierPriority int32) (*crdv1alpha1.Tier, error) {
+func (data *TestData) CreateTier(name string, tierPriority int32) (*crdv1beta1.Tier, error) {
 	log.Infof("Creating tier %s", name)
-	_, err := data.crdClient.CrdV1alpha1().Tiers().Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		tr := &crdv1alpha1.Tier{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec:       crdv1alpha1.TierSpec{Priority: tierPriority},
-		}
-		tr, err = data.crdClient.CrdV1alpha1().Tiers().Create(context.TODO(), tr, metav1.CreateOptions{})
-		if err != nil {
-			log.Debugf("Unable to create tier %s: %s", name, err)
-		}
-		return tr, err
+	tr := &crdv1beta1.Tier{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       crdv1beta1.TierSpec{Priority: tierPriority},
 	}
-	return nil, fmt.Errorf("tier with name %s already exists", name)
+	return data.crdClient.CrdV1beta1().Tiers().Create(context.TODO(), tr, metav1.CreateOptions{})
 }
 
 // GetTier is a convenience function for getting Tier.
-func (data *TestData) GetTier(name string) (*crdv1alpha1.Tier, error) {
-	return data.crdClient.CrdV1alpha1().Tiers().Get(context.TODO(), name, metav1.GetOptions{})
+func (data *TestData) GetTier(name string) (*crdv1beta1.Tier, error) {
+	return data.crdClient.CrdV1beta1().Tiers().Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 // UpdateTier is a convenience function for updating an Antrea Policy Tier.
-func (data *TestData) UpdateTier(tier *crdv1alpha1.Tier) (*crdv1alpha1.Tier, error) {
+func (data *TestData) UpdateTier(tier *crdv1beta1.Tier) (*crdv1beta1.Tier, error) {
 	log.Infof("Updating tier %s", tier.Name)
-	updatedTier, err := data.crdClient.CrdV1alpha1().Tiers().Update(context.TODO(), tier, metav1.UpdateOptions{})
-	return updatedTier, err
+	return data.crdClient.CrdV1beta1().Tiers().Update(context.TODO(), tier, metav1.UpdateOptions{})
+}
+
+func isReferencedError(err error) bool {
+	if status, ok := err.(apierrors.APIStatus); ok || errors.As(err, &status) {
+		// The message is set by deleteValidate of tierValidator when deleting a Tier that is referenced by any policies.
+		return strings.Contains(status.Status().Message, "is referenced by")
+	}
+	return false
 }
 
 // DeleteTier is a convenience function for deleting an Antrea Policy Tier with specific name.
+// To avoid flakes caused by antrea-controller not in sync with kube-apiserver, it retries a few times if the failure is
+// because the Tier is still referenced.
 func (data *TestData) DeleteTier(name string) error {
-	_, err := data.crdClient.CrdV1alpha1().Tiers().Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to get tier %s", name)
-	}
 	log.Infof("Deleting tier %s", name)
-	if err = data.crdClient.CrdV1alpha1().Tiers().Delete(context.TODO(), name, metav1.DeleteOptions{}); err != nil {
-		return errors.Wrapf(err, "unable to delete tier %s", name)
+	if err := retry.OnError(retry.DefaultRetry, isReferencedError, func() error {
+		return data.crdClient.CrdV1beta1().Tiers().Delete(context.TODO(), name, metav1.DeleteOptions{})
+	}); err != nil {
+		return fmt.Errorf("unable to delete tier %s: %w", name, err)
 	}
 	return nil
 }
 
-// CreateOrUpdateV1Alpha2CG is a convenience function for idempotent setup of crd/v1alpha2 ClusterGroups
-func (data *TestData) CreateOrUpdateV1Alpha2CG(cg *crdv1alpha2.ClusterGroup) (*crdv1alpha2.ClusterGroup, error) {
+// CreateOrUpdateCG is a convenience function for idempotent setup of crd/v1beta1 ClusterGroups
+func (data *TestData) CreateOrUpdateCG(cg *crdv1beta1.ClusterGroup) (*crdv1beta1.ClusterGroup, error) {
 	log.Infof("Creating/updating ClusterGroup %s", cg.Name)
-	cgReturned, err := data.crdClient.CrdV1alpha2().ClusterGroups().Get(context.TODO(), cg.Name, metav1.GetOptions{})
+	cgReturned, err := data.crdClient.CrdV1beta1().ClusterGroups().Get(context.TODO(), cg.Name, metav1.GetOptions{})
 	if err != nil {
-		cgr, err := data.crdClient.CrdV1alpha2().ClusterGroups().Create(context.TODO(), cg, metav1.CreateOptions{})
+		cgr, err := data.crdClient.CrdV1beta1().ClusterGroups().Create(context.TODO(), cg, metav1.CreateOptions{})
 		if err != nil {
 			log.Infof("Unable to create cluster group %s: %v", cg.Name, err)
 			return nil, err
@@ -658,42 +836,18 @@ func (data *TestData) CreateOrUpdateV1Alpha2CG(cg *crdv1alpha2.ClusterGroup) (*c
 	} else if cgReturned.Name != "" {
 		log.Debugf("ClusterGroup with name %s already exists, updating", cg.Name)
 		cgReturned.Spec = cg.Spec
-		cgr, err := data.crdClient.CrdV1alpha2().ClusterGroups().Update(context.TODO(), cgReturned, metav1.UpdateOptions{})
+		cgr, err := data.crdClient.CrdV1beta1().ClusterGroups().Update(context.TODO(), cgReturned, metav1.UpdateOptions{})
 		return cgr, err
 	}
 	return nil, fmt.Errorf("error occurred in creating/updating ClusterGroup %s", cg.Name)
 }
 
-// CreateOrUpdateV1Alpha3CG is a convenience function for idempotent setup of crd/v1alpha3 ClusterGroups
-func (data *TestData) CreateOrUpdateV1Alpha3CG(cg *crdv1alpha3.ClusterGroup) (*crdv1alpha3.ClusterGroup, error) {
-	log.Infof("Creating/updating ClusterGroup %s", cg.Name)
-	cgReturned, err := data.crdClient.CrdV1alpha3().ClusterGroups().Get(context.TODO(), cg.Name, metav1.GetOptions{})
-	if err != nil {
-		cgr, err := data.crdClient.CrdV1alpha3().ClusterGroups().Create(context.TODO(), cg, metav1.CreateOptions{})
-		if err != nil {
-			log.Infof("Unable to create cluster group %s: %v", cg.Name, err)
-			return nil, err
-		}
-		return cgr, nil
-	} else if cgReturned.Name != "" {
-		log.Debugf("ClusterGroup with name %s already exists, updating", cg.Name)
-		cgReturned.Spec = cg.Spec
-		cgr, err := data.crdClient.CrdV1alpha3().ClusterGroups().Update(context.TODO(), cgReturned, metav1.UpdateOptions{})
-		return cgr, err
-	}
-	return nil, fmt.Errorf("error occurred in creating/updating ClusterGroup %s", cg.Name)
-}
-
-func (data *TestData) GetV1Alpha2CG(cgName string) (*crdv1alpha2.ClusterGroup, error) {
-	return data.crdClient.CrdV1alpha2().ClusterGroups().Get(context.TODO(), cgName, metav1.GetOptions{})
-}
-
-// CreateOrUpdateV1Alpha3Group is a convenience function for idempotent setup of crd/v1alpha3 Groups
-func (k *KubernetesUtils) CreateOrUpdateV1Alpha3Group(g *crdv1alpha3.Group) (*crdv1alpha3.Group, error) {
+// CreateOrUpdateGroup is a convenience function for idempotent setup of crd/v1beta1 Groups
+func (k *KubernetesUtils) CreateOrUpdateGroup(g *crdv1beta1.Group) (*crdv1beta1.Group, error) {
 	log.Infof("Creating/updating Group %s/%s", g.Namespace, g.Name)
-	gReturned, err := k.crdClient.CrdV1alpha3().Groups(g.Namespace).Get(context.TODO(), g.Name, metav1.GetOptions{})
+	gReturned, err := k.crdClient.CrdV1beta1().Groups(g.Namespace).Get(context.TODO(), g.Name, metav1.GetOptions{})
 	if err != nil {
-		gr, err := k.crdClient.CrdV1alpha3().Groups(g.Namespace).Create(context.TODO(), g, metav1.CreateOptions{})
+		gr, err := k.crdClient.CrdV1beta1().Groups(g.Namespace).Create(context.TODO(), g, metav1.CreateOptions{})
 		if err != nil {
 			log.Infof("Unable to create group %s/%s: %v", g.Namespace, g.Name, err)
 			return nil, err
@@ -702,165 +856,51 @@ func (k *KubernetesUtils) CreateOrUpdateV1Alpha3Group(g *crdv1alpha3.Group) (*cr
 	} else if gReturned.Name != "" {
 		log.Debugf("Group %s/%s already exists, updating", g.Namespace, g.Name)
 		gReturned.Spec = g.Spec
-		gr, err := k.crdClient.CrdV1alpha3().Groups(g.Namespace).Update(context.TODO(), gReturned, metav1.UpdateOptions{})
+		gr, err := k.crdClient.CrdV1beta1().Groups(g.Namespace).Update(context.TODO(), gReturned, metav1.UpdateOptions{})
 		return gr, err
 	}
 	return nil, fmt.Errorf("error occurred in creating/updating Group %s/%s", g.Namespace, g.Name)
 }
 
-func (data *TestData) GetV1Alpha3CG(cgName string) (*crdv1alpha3.ClusterGroup, error) {
-	return data.crdClient.CrdV1alpha3().ClusterGroups().Get(context.TODO(), cgName, metav1.GetOptions{})
-}
-
-// CreateCG is a convenience function for creating an Antrea ClusterGroup by name and selector.
-func (data *TestData) CreateCG(name string, pSelector, nSelector *metav1.LabelSelector, ipBlocks []crdv1alpha1.IPBlock) (*crdv1alpha3.ClusterGroup, error) {
-	log.Infof("Creating clustergroup %s", name)
-	_, err := data.crdClient.CrdV1alpha3().ClusterGroups().Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		cg := &crdv1alpha3.ClusterGroup{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: name,
-			},
-		}
-		if pSelector != nil {
-			cg.Spec.PodSelector = pSelector
-		}
-		if nSelector != nil {
-			cg.Spec.NamespaceSelector = nSelector
-		}
-		if len(ipBlocks) > 0 {
-			cg.Spec.IPBlocks = ipBlocks
-		}
-		cg, err = data.crdClient.CrdV1alpha3().ClusterGroups().Create(context.TODO(), cg, metav1.CreateOptions{})
-		if err != nil {
-			log.Debugf("Unable to create clustergroup %s: %s", name, err)
-		}
-		return cg, err
-	}
-	return nil, fmt.Errorf("clustergroup with name %s already exists", name)
-}
-
 // GetCG is a convenience function for getting ClusterGroups
-func (k *KubernetesUtils) GetCG(name string) (*crdv1alpha2.ClusterGroup, error) {
-	res, err := k.crdClient.CrdV1alpha2().ClusterGroups().Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
-}
-
-// CreateGroup is a convenience function for creating an Antrea Group by namespace,  name and selector.
-func (k *KubernetesUtils) CreateGroup(namespace, name string, pSelector, nSelector *metav1.LabelSelector, ipBlocks []crdv1alpha1.IPBlock) (*crdv1alpha3.Group, error) {
-	log.Infof("Creating group %s/%s", namespace, name)
-	_, err := k.crdClient.CrdV1alpha3().Groups(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		g := &crdv1alpha3.Group{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: namespace,
-				Name:      name,
-			},
-		}
-		if pSelector != nil {
-			g.Spec.PodSelector = pSelector
-		}
-		if nSelector != nil {
-			g.Spec.NamespaceSelector = nSelector
-		}
-		if len(ipBlocks) > 0 {
-			g.Spec.IPBlocks = ipBlocks
-		}
-		g, err = k.crdClient.CrdV1alpha3().Groups(namespace).Create(context.TODO(), g, metav1.CreateOptions{})
-		if err != nil {
-			log.Debugf("Unable to create group %s/%s: %s", namespace, name, err)
-		}
-		return g, err
-	}
-	return nil, fmt.Errorf("group with name %s/%s already exists", namespace, name)
+func (k *KubernetesUtils) GetCG(name string) (*crdv1beta1.ClusterGroup, error) {
+	return k.crdClient.CrdV1beta1().ClusterGroups().Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 // GetGroup is a convenience function for getting Groups
-func (k *KubernetesUtils) GetGroup(namespace, name string) (*crdv1alpha3.Group, error) {
-	res, err := k.crdClient.CrdV1alpha3().Groups(namespace).Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
+func (k *KubernetesUtils) GetGroup(namespace, name string) (*crdv1beta1.Group, error) {
+	return k.crdClient.CrdV1beta1().Groups(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
-// DeleteV1Alpha2CG is a convenience function for deleting crd/v1alpha2 ClusterGroup by name.
-func (data *TestData) DeleteV1Alpha2CG(name string) error {
+// DeleteCG is a convenience function for deleting core/v1beta1 ClusterGroup by name.
+func (data *TestData) DeleteCG(name string) error {
 	log.Infof("Deleting ClusterGroup %s", name)
-	err := data.crdClient.CrdV1alpha2().ClusterGroups().Delete(context.TODO(), name, metav1.DeleteOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to delete ClusterGroup %s", name)
-	}
-	return nil
+	return data.crdClient.CrdV1beta1().ClusterGroups().Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
-// DeleteV1Alpha3CG is a convenience function for deleting core/v1alpha3 ClusterGroup by name.
-func (data *TestData) DeleteV1Alpha3CG(name string) error {
-	log.Infof("deleting ClusterGroup %s", name)
-	err := data.crdClient.CrdV1alpha3().ClusterGroups().Delete(context.TODO(), name, metav1.DeleteOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to delete ClusterGroup %s", name)
-	}
-	return nil
-}
-
-// DeleteV1Alpha3Group is a convenience function for deleting core/v1alpha3 Group by namespace and name.
-func (k *KubernetesUtils) DeleteV1Alpha3Group(namespace, name string) error {
-	log.Infof("deleting Group %s/%s", namespace, name)
-	err := k.crdClient.CrdV1alpha3().Groups(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to delete Group %s/%s", namespace, name)
-	}
-	return nil
+// DeleteGroup is a convenience function for deleting core/v1beta1 Group by namespace and name.
+func (k *KubernetesUtils) DeleteGroup(namespace, name string) error {
+	log.Infof("Deleting Group %s/%s", namespace, name)
+	return k.crdClient.CrdV1beta1().Groups(namespace).Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
 // CleanCGs is a convenience function for deleting all ClusterGroups in the cluster.
 func (data *TestData) CleanCGs() error {
-	l, err := data.crdClient.CrdV1alpha2().ClusterGroups().List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to list ClusterGroups in v1alpha2")
-	}
-	for _, cg := range l.Items {
-		if err := data.DeleteV1Alpha2CG(cg.Name); err != nil {
-			return err
-		}
-	}
-	l2, err := data.crdClient.CrdV1alpha3().ClusterGroups().List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to list ClusterGroups in v1alpha3")
-	}
-	for _, cg := range l2.Items {
-		if err := data.DeleteV1Alpha3CG(cg.Name); err != nil {
-			return err
-		}
-	}
-	return nil
+	return data.crdClient.CrdV1beta1().ClusterGroups().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
 }
 
 // CleanGroups is a convenience function for deleting all Groups in the namespace.
 func (k *KubernetesUtils) CleanGroups(namespace string) error {
-	l, err := k.crdClient.CrdV1alpha3().Groups(namespace).List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to list Groups in v1alpha3")
-	}
-	for _, g := range l.Items {
-		if err := k.DeleteV1Alpha3Group(namespace, g.Name); err != nil {
-			return err
-		}
-	}
-	return nil
+	return k.crdClient.CrdV1beta1().Groups(namespace).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
 }
 
 // CreateOrUpdateACNP is a convenience function for updating/creating AntreaClusterNetworkPolicies.
-func (data *TestData) CreateOrUpdateACNP(cnp *crdv1alpha1.ClusterNetworkPolicy) (*crdv1alpha1.ClusterNetworkPolicy, error) {
+func (data *TestData) CreateOrUpdateACNP(cnp *crdv1beta1.ClusterNetworkPolicy) (*crdv1beta1.ClusterNetworkPolicy, error) {
 	log.Infof("Creating/updating ClusterNetworkPolicy %s", cnp.Name)
-	cnpReturned, err := data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Get(context.TODO(), cnp.Name, metav1.GetOptions{})
+	cnpReturned, err := data.crdClient.CrdV1beta1().ClusterNetworkPolicies().Get(context.TODO(), cnp.Name, metav1.GetOptions{})
 	if err != nil {
 		log.Debugf("Creating ClusterNetworkPolicy %s", cnp.Name)
-		cnp, err = data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Create(context.TODO(), cnp, metav1.CreateOptions{})
+		cnp, err = data.crdClient.CrdV1beta1().ClusterNetworkPolicies().Create(context.TODO(), cnp, metav1.CreateOptions{})
 		if err != nil {
 			log.Debugf("Unable to create ClusterNetworkPolicy: %s", err)
 		}
@@ -868,91 +908,93 @@ func (data *TestData) CreateOrUpdateACNP(cnp *crdv1alpha1.ClusterNetworkPolicy) 
 	} else if cnpReturned.Name != "" {
 		log.Debugf("ClusterNetworkPolicy with name %s already exists, updating", cnp.Name)
 		cnpReturned.Spec = cnp.Spec
-		cnp, err = data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Update(context.TODO(), cnpReturned, metav1.UpdateOptions{})
+		cnp, err = data.crdClient.CrdV1beta1().ClusterNetworkPolicies().Update(context.TODO(), cnpReturned, metav1.UpdateOptions{})
 		return cnp, err
 	}
 	return nil, fmt.Errorf("error occurred in creating/updating ClusterNetworkPolicy %s", cnp.Name)
 }
 
 // GetACNP is a convenience function for getting AntreaClusterNetworkPolicies.
-func (data *TestData) GetACNP(name string) (*crdv1alpha1.ClusterNetworkPolicy, error) {
-	res, err := data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Get(context.TODO(), name, metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	return res, nil
+func (data *TestData) GetACNP(name string) (*crdv1beta1.ClusterNetworkPolicy, error) {
+	return data.crdClient.CrdV1beta1().ClusterNetworkPolicies().Get(context.TODO(), name, metav1.GetOptions{})
 }
 
 // DeleteACNP is a convenience function for deleting ACNP by name.
 func (data *TestData) DeleteACNP(name string) error {
 	log.Infof("Deleting AntreaClusterNetworkPolicies %s", name)
-	err := data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().Delete(context.TODO(), name, metav1.DeleteOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to delete ClusterNetworkPolicy %s", name)
-	}
-	return nil
+	return data.crdClient.CrdV1beta1().ClusterNetworkPolicies().Delete(context.TODO(), name, metav1.DeleteOptions{})
 }
 
 // CleanACNPs is a convenience function for deleting all Antrea ClusterNetworkPolicies in the cluster.
 func (data *TestData) CleanACNPs() error {
-	l, err := data.crdClient.CrdV1alpha1().ClusterNetworkPolicies().List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to list AntreaClusterNetworkPolicies")
-	}
-	for _, cnp := range l.Items {
-		if err = data.DeleteACNP(cnp.Name); err != nil {
-			return err
-		}
-	}
-	return nil
+	return data.crdClient.CrdV1beta1().ClusterNetworkPolicies().DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{})
 }
 
-// CreateOrUpdateANP is a convenience function for updating/creating Antrea NetworkPolicies.
-func (data *TestData) CreateOrUpdateANP(anp *crdv1alpha1.NetworkPolicy) (*crdv1alpha1.NetworkPolicy, error) {
-	log.Infof("Creating/updating Antrea NetworkPolicy %s/%s", anp.Namespace, anp.Name)
-	cnpReturned, err := data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Get(context.TODO(), anp.Name, metav1.GetOptions{})
+// CreateOrUpdateANNP is a convenience function for updating/creating Antrea NetworkPolicies.
+func (data *TestData) CreateOrUpdateANNP(annp *crdv1beta1.NetworkPolicy) (*crdv1beta1.NetworkPolicy, error) {
+	log.Infof("Creating/updating Antrea NetworkPolicy %s/%s", annp.Namespace, annp.Name)
+	npReturned, err := data.crdClient.CrdV1beta1().NetworkPolicies(annp.Namespace).Get(context.TODO(), annp.Name, metav1.GetOptions{})
 	if err != nil {
-		log.Debugf("Creating Antrea NetworkPolicy %s", anp.Name)
-		anp, err = data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Create(context.TODO(), anp, metav1.CreateOptions{})
+		log.Debugf("Creating Antrea NetworkPolicy %s", annp.Name)
+		annp, err = data.crdClient.CrdV1beta1().NetworkPolicies(annp.Namespace).Create(context.TODO(), annp, metav1.CreateOptions{})
 		if err != nil {
 			log.Debugf("Unable to create Antrea NetworkPolicy: %s", err)
 		}
-		return anp, err
-	} else if cnpReturned.Name != "" {
-		log.Debugf("Antrea NetworkPolicy with name %s already exists, updating", anp.Name)
-		anp, err = data.crdClient.CrdV1alpha1().NetworkPolicies(anp.Namespace).Update(context.TODO(), anp, metav1.UpdateOptions{})
-		return anp, err
+		return annp, err
+	} else if npReturned.Name != "" {
+		log.Debugf("Antrea NetworkPolicy with name %s already exists, updating", annp.Name)
+		npReturned.Spec = annp.Spec
+		annp, err = data.crdClient.CrdV1beta1().NetworkPolicies(annp.Namespace).Update(context.TODO(), npReturned, metav1.UpdateOptions{})
+		return annp, err
 	}
-	return nil, fmt.Errorf("error occurred in creating/updating Antrea NetworkPolicy %s", anp.Name)
+	return nil, fmt.Errorf("error occurred in creating/updating Antrea NetworkPolicy %s", annp.Name)
 }
 
-// GetANP is a convenience function for getting AntreaNetworkPolicies.
-func (data *TestData) GetANP(namespace, name string) (*crdv1alpha1.NetworkPolicy, error) {
-	return data.crdClient.CrdV1alpha1().NetworkPolicies(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+// GetANNP is a convenience function for getting AntreaNetworkPolicies.
+func (data *TestData) GetANNP(namespace, name string) (*crdv1beta1.NetworkPolicy, error) {
+	return data.crdClient.CrdV1beta1().NetworkPolicies(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 }
 
-// DeleteANP is a convenience function for deleting ANP by name and Namespace.
-func (data *TestData) DeleteANP(ns, name string) error {
+// DeleteANNP is a convenience function for deleting ANNP by name and Namespace.
+func (data *TestData) DeleteANNP(ns, name string) error {
 	log.Infof("Deleting Antrea NetworkPolicy '%s/%s'", ns, name)
-	err := data.crdClient.CrdV1alpha1().NetworkPolicies(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
-	if err != nil {
-		return errors.Wrapf(err, "unable to delete Antrea NetworkPolicy %s", name)
+	return data.crdClient.CrdV1beta1().NetworkPolicies(ns).Delete(context.TODO(), name, metav1.DeleteOptions{})
+}
+
+// CleanANNPs is a convenience function for deleting all Antrea NetworkPolicies in provided namespaces.
+func (data *TestData) CleanANNPs(namespaces []string) error {
+	for _, ns := range namespaces {
+		if err := data.crdClient.CrdV1beta1().NetworkPolicies(ns).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{}); err != nil {
+			return fmt.Errorf("unable to delete Antrea NetworkPolicies in ns %s: %w", ns, err)
+		}
 	}
 	return nil
 }
 
-// CleanANPs is a convenience function for deleting all Antrea NetworkPolicies in provided namespaces.
-func (data *TestData) CleanANPs(namespaces []string) error {
-	for _, ns := range namespaces {
-		l, err := data.crdClient.CrdV1alpha1().NetworkPolicies(ns).List(context.TODO(), metav1.ListOptions{})
+func (data *TestData) WaitForANNPCreationAndRealization(t *testing.T, namespace string, name string, timeout time.Duration) error {
+	t.Logf("Waiting for ANNP '%s/%s' to be realized", namespace, name)
+	if err := wait.PollUntilContextTimeout(context.TODO(), 100*time.Millisecond, timeout, false, func(ctx context.Context) (bool, error) {
+		annp, err := data.crdClient.CrdV1beta1().NetworkPolicies(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
-			return errors.Wrapf(err, "unable to list Antrea NetworkPolicies in ns %s", ns)
+			return false, nil
 		}
-		for _, anp := range l.Items {
-			if err = data.DeleteANP(anp.Namespace, anp.Name); err != nil {
-				return err
-			}
+		return annp.Status.ObservedGeneration == annp.Generation && annp.Status.Phase == crdv1beta1.NetworkPolicyRealized, nil
+	}); err != nil {
+		return fmt.Errorf("error when waiting for ANNP '%s/%s' to be realized: %v", namespace, name, err)
+	}
+	return nil
+}
+
+func (data *TestData) WaitForACNPCreationAndRealization(t *testing.T, name string, timeout time.Duration) error {
+	t.Logf("Waiting for ACNP '%s' to be created and realized", name)
+	if err := wait.PollUntilContextTimeout(context.TODO(), 100*time.Millisecond, timeout, false, func(ctx context.Context) (bool, error) {
+		acnp, err := data.crdClient.CrdV1beta1().ClusterNetworkPolicies().Get(context.TODO(), name, metav1.GetOptions{})
+		if err != nil {
+			return false, nil
 		}
+		return acnp.Status.ObservedGeneration == acnp.Generation && acnp.Status.Phase == crdv1beta1.NetworkPolicyRealized, nil
+	}); err != nil {
+		return fmt.Errorf("error when waiting for ACNP '%s' to be realized: %v", name, err)
 	}
 	return nil
 }
@@ -961,13 +1003,13 @@ func (k *KubernetesUtils) waitForPodInNamespace(ns string, pod string) ([]string
 	log.Infof("Waiting for Pod '%s/%s'", ns, pod)
 	for {
 		k8sPod, err := k.GetPodByLabel(ns, pod)
-		if err != nil {
-			return nil, errors.WithMessagef(err, "unable to get Pod '%s/%s'", ns, pod)
+		if err != nil && err != ErrPodNotFound {
+			return nil, fmt.Errorf("unable to get Pod '%s/%s': %w", ns, pod, err)
 		}
 
 		if k8sPod != nil && k8sPod.Status.Phase == v1.PodRunning {
 			if k8sPod.Status.PodIP == "" {
-				return nil, errors.WithMessagef(err, "unable to get IP of Pod '%s/%s'", ns, pod)
+				return nil, fmt.Errorf("unable to get IP of Pod '%s/%s': %w", ns, pod, err)
 			}
 			var podIPs []string
 			for _, podIP := range k8sPod.Status.PodIPs {
@@ -1012,22 +1054,17 @@ func (k *KubernetesUtils) waitForHTTPServers(allPods []Pod) error {
 		}
 		time.Sleep(defaultInterval)
 	}
-	return errors.Errorf("after %d tries, HTTP servers are not ready", maxTries)
+	return fmt.Errorf("after %d tries, HTTP servers are not ready", maxTries)
 }
 
 func (k *KubernetesUtils) validateOnePort(allPods []Pod, reachability *Reachability, port int32, protocol utils.AntreaPolicyProtocol) {
-	type probeResult struct {
-		podFrom      Pod
-		podTo        Pod
-		connectivity PodConnectivityMark
-		err          error
-	}
 	numProbes := len(allPods) * len(allPods)
 	resultsCh := make(chan *probeResult, numProbes)
 	// TODO: find better metrics, this is only for POC.
 	oneProbe := func(podFrom, podTo Pod, port int32) {
 		log.Tracef("Probing: %s -> %s", podFrom, podTo)
-		connectivity, err := k.Probe(podFrom.Namespace(), podFrom.PodName(), podTo.Namespace(), podTo.PodName(), port, protocol)
+		expectedResult := reachability.Expected.Get(podFrom.String(), podTo.String())
+		connectivity, err := k.Probe(podFrom.Namespace(), podFrom.PodName(), podTo.Namespace(), podTo.PodName(), port, protocol, nil, &expectedResult)
 		resultsCh <- &probeResult{podFrom, podTo, connectivity, err}
 	}
 	for _, pod1 := range allPods {
@@ -1054,10 +1091,6 @@ func (k *KubernetesUtils) validateOnePort(allPods []Pod, reachability *Reachabil
 		} else if prevConn != r.connectivity {
 			reachability.Observe(r.podFrom, r.podTo, Error)
 		}
-
-		if r.connectivity != Connected && reachability.Expected.Get(r.podFrom.String(), r.podTo.String()) == Connected {
-			log.Warnf("FAILED CONNECTION FOR ALLOWED PODS %s -> %s:%d:%s !!!! ", r.podFrom, r.podTo, port, protocol)
-		}
 	}
 }
 
@@ -1077,32 +1110,72 @@ func (k *KubernetesUtils) Validate(allPods []Pod, reachability *Reachability, po
 	}
 }
 
-func (k *KubernetesUtils) Bootstrap(namespaces map[string]string, pods []string) (*map[string][]string, error) {
-	for _, ns := range namespaces {
-		_, err := k.CreateOrUpdateNamespace(ns, map[string]string{"ns": ns})
-		if err != nil {
-			return nil, errors.WithMessagef(err, "unable to create/update ns %s", ns)
+func (k *KubernetesUtils) ValidateRemoteCluster(remoteCluster *KubernetesUtils, allPods []Pod, reachability *Reachability, port int32, protocol utils.AntreaPolicyProtocol) {
+	numProbes := len(allPods) * len(allPods)
+	resultsCh := make(chan *probeResult, numProbes)
+	oneProbe := func(podFrom, podTo Pod, port int32) {
+		log.Tracef("Probing: %s -> %s", podFrom, podTo)
+		expectedResult := reachability.Expected.Get(podFrom.String(), podTo.String())
+		connectivity, err := k.Probe(podFrom.Namespace(), podFrom.PodName(), podTo.Namespace(), podTo.PodName(), port, protocol, remoteCluster, &expectedResult)
+		resultsCh <- &probeResult{podFrom, podTo, connectivity, err}
+	}
+	for _, pod1 := range allPods {
+		for _, pod2 := range allPods {
+			go oneProbe(pod1, pod2, port)
 		}
-		for _, pod := range pods {
+	}
+	for i := 0; i < numProbes; i++ {
+		r := <-resultsCh
+		if r.err != nil {
+			log.Errorf("unable to perform probe %s -> %s in %s: %v", r.podFrom, r.podTo, k.ClusterName, r.err)
+		}
+		prevConn := reachability.Observed.Get(r.podFrom.String(), r.podTo.String())
+		if prevConn == Unknown {
+			reachability.Observe(r.podFrom, r.podTo, r.connectivity)
+		}
+	}
+}
+
+func (k *KubernetesUtils) Bootstrap(namespaces map[string]TestNamespaceMeta, podsPerNamespace []string, createNamespaces bool, nodeNames map[string]string, hostNetworks map[string]bool) (map[string][]string, error) {
+	for key, ns := range namespaces {
+		if createNamespaces {
+			if ns.Labels == nil {
+				ns.Labels = make(map[string]string)
+			}
+			// convenience label for testing
+			ns.Labels["ns"] = ns.Name
+			if _, err := k.CreateOrUpdateNamespace(ns.Name, ns.Labels); err != nil {
+				return nil, fmt.Errorf("unable to create/update ns %s: %w", ns, err)
+			}
+		}
+		var nodeName string
+		var hostNetwork bool
+		if nodeNames != nil {
+			nodeName = nodeNames[key]
+		}
+		if hostNetworks != nil {
+			hostNetwork = hostNetworks[key]
+		}
+		for _, pod := range podsPerNamespace {
 			log.Infof("Creating/updating Pod '%s/%s'", ns, pod)
-			deployment := ns + pod
-			_, err := k.CreateOrUpdateDeployment(ns, deployment, 1, map[string]string{"pod": pod, "app": pod})
+			deployment := ns.Name + pod
+			_, err := k.CreateOrUpdateDeployment(ns.Name, deployment, 1, map[string]string{"pod": pod, "app": pod}, nodeName, hostNetwork)
 			if err != nil {
-				return nil, errors.WithMessagef(err, "unable to create/update Deployment '%s/%s'", ns, pod)
+				return nil, fmt.Errorf("unable to create/update Deployment '%s/%s': %w", ns, pod, err)
 			}
 		}
 	}
 	var allPods []Pod
-	podIPs := make(map[string][]string, len(pods)*len(namespaces))
-	for _, podName := range pods {
+	podIPs := make(map[string][]string, len(podsPerNamespace)*len(namespaces))
+	for _, podName := range podsPerNamespace {
 		for _, ns := range namespaces {
-			allPods = append(allPods, NewPod(ns, podName))
+			allPods = append(allPods, NewPod(ns.Name, podName))
 		}
 	}
 	for _, pod := range allPods {
 		ips, err := k.waitForPodInNamespace(pod.Namespace(), pod.PodName())
 		if ips == nil || err != nil {
-			return nil, errors.WithMessagef(err, "unable to wait for Pod '%s/%s'", pod.Namespace(), pod.PodName())
+			return nil, fmt.Errorf("unable to wait for Pod '%s/%s': %w", pod.Namespace(), pod.PodName(), err)
 		}
 		podIPs[pod.String()] = ips
 	}
@@ -1113,10 +1186,10 @@ func (k *KubernetesUtils) Bootstrap(namespaces map[string]string, pods []string)
 		return nil, err
 	}
 
-	return &podIPs, nil
+	return podIPs, nil
 }
 
-func (k *KubernetesUtils) Cleanup(namespaces map[string]string) {
+func (k *KubernetesUtils) Cleanup(namespaces map[string]TestNamespaceMeta) {
 	// Cleanup any cluster-scoped resources.
 	if err := k.CleanACNPs(); err != nil {
 		log.Errorf("Error when cleaning up ACNPs: %v", err)
@@ -1127,7 +1200,7 @@ func (k *KubernetesUtils) Cleanup(namespaces map[string]string) {
 
 	for _, ns := range namespaces {
 		log.Infof("Deleting test Namespace %s", ns)
-		if err := k.DeleteNamespace(ns, defaultTimeout); err != nil {
+		if err := k.DeleteNamespace(ns.Name, defaultTimeout); err != nil {
 			log.Errorf("Error when deleting Namespace '%s': %v", ns, err)
 		}
 	}

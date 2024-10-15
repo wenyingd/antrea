@@ -18,8 +18,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -32,7 +32,10 @@ import (
 	queriertest "antrea.io/antrea/pkg/querier/testing"
 )
 
-const ovsVersion = "2.10.0"
+const (
+	ovsVersion          = "2.10.0"
+	defaultNPLPortRange = "61000-62001"
+)
 
 func getIPNet(ip string) *net.IPNet {
 	_, ipNet, _ := net.ParseCIDR(ip)
@@ -41,8 +44,6 @@ func getIPNet(ip string) *net.IPNet {
 
 func TestAgentQuerierGetAgentInfo(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	interfaceStore := interfacestoretest.NewMockInterfaceStore(ctrl)
 	interfaceStore.EXPECT().GetContainerInterfaceNum().Return(2).AnyTimes()
 
@@ -114,8 +115,9 @@ func TestAgentQuerierGetAgentInfo(t *testing.T) {
 						Status: corev1.ConditionTrue,
 					},
 				},
-				APIPort: 10350,
-				Version: "UNKNOWN",
+				APIPort:                10350,
+				NodePortLocalPortRange: defaultNPLPortRange,
+				Version:                "UNKNOWN",
 			},
 		},
 		{
@@ -162,8 +164,9 @@ func TestAgentQuerierGetAgentInfo(t *testing.T) {
 						Status: corev1.ConditionTrue,
 					},
 				},
-				APIPort: 10350,
-				Version: "UNKNOWN",
+				APIPort:                10350,
+				NodePortLocalPortRange: defaultNPLPortRange,
+				Version:                "UNKNOWN",
 			},
 		},
 	}
@@ -176,6 +179,7 @@ func TestAgentQuerierGetAgentInfo(t *testing.T) {
 				ovsBridgeClient:          ovsBridgeClient,
 				networkPolicyInfoQuerier: networkPolicyInfoQuerier,
 				apiPort:                  tt.apiPort,
+				nplRange:                 defaultNPLPortRange,
 			}
 			agentInfo := &v1beta1.AntreaAgentInfo{}
 			aq.GetAgentInfo(agentInfo, tt.partial)

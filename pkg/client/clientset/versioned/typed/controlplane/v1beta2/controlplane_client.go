@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,8 +31,12 @@ type ControlplaneV1beta2Interface interface {
 	ClusterGroupMembersGetter
 	EgressGroupsGetter
 	GroupAssociationsGetter
+	GroupMembersGetter
+	IPGroupAssociationsGetter
 	NetworkPoliciesGetter
+	NetworkPolicyEvaluationsGetter
 	NodeStatsSummariesGetter
+	SupportBundleCollectionsGetter
 }
 
 // ControlplaneV1beta2Client is used to interact with features provided by the controlplane.antrea.io group.
@@ -60,12 +64,28 @@ func (c *ControlplaneV1beta2Client) GroupAssociations(namespace string) GroupAss
 	return newGroupAssociations(c, namespace)
 }
 
+func (c *ControlplaneV1beta2Client) GroupMembers(namespace string) GroupMembersInterface {
+	return newGroupMembers(c, namespace)
+}
+
+func (c *ControlplaneV1beta2Client) IPGroupAssociations() IPGroupAssociationInterface {
+	return newIPGroupAssociations(c)
+}
+
 func (c *ControlplaneV1beta2Client) NetworkPolicies() NetworkPolicyInterface {
 	return newNetworkPolicies(c)
 }
 
+func (c *ControlplaneV1beta2Client) NetworkPolicyEvaluations() NetworkPolicyEvaluationInterface {
+	return newNetworkPolicyEvaluations(c)
+}
+
 func (c *ControlplaneV1beta2Client) NodeStatsSummaries() NodeStatsSummaryInterface {
 	return newNodeStatsSummaries(c)
+}
+
+func (c *ControlplaneV1beta2Client) SupportBundleCollections() SupportBundleCollectionInterface {
+	return newSupportBundleCollections(c)
 }
 
 // NewForConfig creates a new ControlplaneV1beta2Client for the given config.

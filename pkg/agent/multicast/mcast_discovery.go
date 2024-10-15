@@ -21,7 +21,6 @@ import (
 	"sync"
 	"time"
 
-	"antrea.io/libOpenflow/openflow15"
 	"antrea.io/libOpenflow/protocol"
 	"antrea.io/libOpenflow/util"
 	"antrea.io/ofnet/ofctrl"
@@ -32,16 +31,12 @@ import (
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
-	"antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	"antrea.io/antrea/pkg/apis/crd/v1beta1"
+	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
 const (
 	IGMPProtocolNumber = 2
-)
-
-const (
-	openflowKeyTunnelSrc = "NXM_NX_TUN_IPV4_SRC"
-	openflowKeyInPort    = "OXM_OF_IN_PORT"
 )
 
 var (
@@ -61,46 +56,21 @@ type IGMPSnooper struct {
 	eventCh       chan *mcastGroupEvent
 	validator     types.McastNetworkPolicyController
 	queryInterval time.Duration
-	// igmpReportANPStats is a map that saves AntreaNetworkPolicyStats of IGMP report packets.
+	queryVersions []uint8
+	// igmpReportANNPStats is a map that saves AntreaNetworkPolicyStats of IGMP report packets.
 	// The map can be interpreted as
 	// map[UID of the AntreaNetworkPolicy]map[name of AntreaNetworkPolicy rule]statistics of rule.
-	igmpReportANPStats      map[apitypes.UID]map[string]*types.RuleMetric
-	igmpReportANPStatsMutex sync.Mutex
-	// Similar to igmpReportANPStats, it stores ACNP stats for IGMP reports.
+	igmpReportANNPStats      map[apitypes.UID]map[string]*types.RuleMetric
+	igmpReportANNPStatsMutex sync.Mutex
+	// Similar to igmpReportANNPStats, it stores ACNP stats for IGMP reports.
 	igmpReportACNPStats      map[apitypes.UID]map[string]*types.RuleMetric
 	igmpReportACNPStatsMutex sync.Mutex
 	encapEnabled             bool
 }
 
-func (s *IGMPSnooper) HandlePacketIn(pktIn *ofctrl.PacketIn) error {
-	matchers := pktIn.GetMatches()
-	// Get custom reasons in this packet-in.
-	match := openflow.GetMatchFieldByRegID(matchers, openflow.CustomReasonField.GetRegID())
-	customReasons, err := getInfoInReg(match, openflow.CustomReasonField.GetRange().ToNXRange())
-	if err != nil {
-		klog.ErrorS(err, "Received error while unloading customReason from OVS reg", "regField", openflow.CustomReasonField.GetName())
-		return err
-	}
-	if customReasons&openflow.CustomReasonIGMP == openflow.CustomReasonIGMP {
-		return s.processPacketIn(pktIn)
-	}
-	return nil
-}
-
-func getInfoInReg(regMatch *ofctrl.MatchField, rng *openflow15.NXRange) (uint32, error) {
-	regValue, ok := regMatch.GetValue().(*ofctrl.NXRegister)
-	if !ok {
-		return 0, errors.New("register value cannot be retrieved")
-	}
-	if rng != nil {
-		return ofctrl.GetUint32ValueWithRange(regValue.Data, rng), nil
-	}
-	return regValue.Data, nil
-}
-
 func (s *IGMPSnooper) parseSrcInterface(pktIn *ofctrl.PacketIn) (*interfacestore.InterfaceConfig, error) {
 	matches := pktIn.GetMatches()
-	ofPortField := matches.GetMatchByName(openflowKeyInPort)
+	ofPortField := matches.GetMatchByName(binding.OxmFieldInPort)
 	if ofPortField == nil {
 		return nil, errors.New("in_port field not found")
 	}
@@ -112,8 +82,8 @@ func (s *IGMPSnooper) parseSrcInterface(pktIn *ofctrl.PacketIn) (*interfacestore
 	return ifaceConfig, nil
 }
 
-func (s *IGMPSnooper) queryIGMP(group net.IP, versions []uint8) error {
-	for _, version := range versions {
+func (s *IGMPSnooper) queryIGMP(group net.IP) error {
+	for _, version := range s.queryVersions {
 		igmp, err := generateIGMPQueryPacket(group, version, s.queryInterval)
 		if err != nil {
 			return err
@@ -154,7 +124,7 @@ func (s *IGMPSnooper) validate(event *mcastGroupEvent, igmpType uint8, packetInD
 	if ruleInfo != nil {
 		klog.V(2).InfoS("Got NetworkPolicy action for IGMP report", "RuleAction", ruleInfo.RuleAction, "uuid", ruleInfo.UUID, "Name", ruleInfo.Name)
 		s.addToIGMPReportNPStatsMap(*ruleInfo, uint64(packetInData.Len()))
-		if ruleInfo.RuleAction == v1alpha1.RuleActionDrop {
+		if ruleInfo.RuleAction == v1beta1.RuleActionDrop {
 			return false, nil
 		}
 	}
@@ -191,9 +161,9 @@ func (s *IGMPSnooper) addToIGMPReportNPStatsMap(item types.IGMPNPRuleInfo, packe
 	}
 	ruleType := *item.NPType
 	if ruleType == v1beta2.AntreaNetworkPolicy {
-		s.igmpReportANPStatsMutex.Lock()
-		updateRuleStats(s.igmpReportANPStats, item.UUID, item.Name)
-		s.igmpReportANPStatsMutex.Unlock()
+		s.igmpReportANNPStatsMutex.Lock()
+		updateRuleStats(s.igmpReportANNPStats, item.UUID, item.Name)
+		s.igmpReportANNPStatsMutex.Unlock()
 	} else if ruleType == v1beta2.AntreaClusterNetworkPolicy {
 		s.igmpReportACNPStatsMutex.Lock()
 		updateRuleStats(s.igmpReportACNPStats, item.UUID, item.Name)
@@ -202,16 +172,16 @@ func (s *IGMPSnooper) addToIGMPReportNPStatsMap(item types.IGMPNPRuleInfo, packe
 }
 
 // WARNING: This func will reset the saved stats.
-func (s *IGMPSnooper) collectStats() (igmpANPStats, igmpACNPStats map[apitypes.UID]map[string]*types.RuleMetric) {
-	s.igmpReportANPStatsMutex.Lock()
-	igmpANPStats = s.igmpReportANPStats
-	s.igmpReportANPStats = make(map[apitypes.UID]map[string]*types.RuleMetric)
-	s.igmpReportANPStatsMutex.Unlock()
+func (s *IGMPSnooper) collectStats() (igmpANNPStats, igmpACNPStats map[apitypes.UID]map[string]*types.RuleMetric) {
+	s.igmpReportANNPStatsMutex.Lock()
+	igmpANNPStats = s.igmpReportANNPStats
+	s.igmpReportANNPStats = make(map[apitypes.UID]map[string]*types.RuleMetric)
+	s.igmpReportANNPStatsMutex.Unlock()
 	s.igmpReportACNPStatsMutex.Lock()
 	igmpACNPStats = s.igmpReportACNPStats
 	s.igmpReportACNPStats = make(map[apitypes.UID]map[string]*types.RuleMetric)
 	s.igmpReportACNPStatsMutex.Unlock()
-	return igmpANPStats, igmpACNPStats
+	return igmpANNPStats, igmpACNPStats
 }
 
 func (s *IGMPSnooper) sendIGMPReport(groupRecordType uint8, groups []net.IP) error {
@@ -250,7 +220,7 @@ func (s *IGMPSnooper) sendIGMPLeaveReport(groups []net.IP) error {
 	return s.sendIGMPReport(protocol.IGMPToIn, groups)
 }
 
-func (s *IGMPSnooper) processPacketIn(pktIn *ofctrl.PacketIn) error {
+func (s *IGMPSnooper) HandlePacketIn(pktIn *ofctrl.PacketIn) error {
 	now := time.Now()
 	iface, err := s.parseSrcInterface(pktIn)
 	if err != nil {
@@ -324,7 +294,7 @@ func (s *IGMPSnooper) processPacketIn(pktIn *ofctrl.PacketIn) error {
 
 func (s *IGMPSnooper) parseSrcNode(pktIn *ofctrl.PacketIn) (net.IP, error) {
 	matches := pktIn.GetMatches()
-	tunSrcField := matches.GetMatchByName(openflowKeyTunnelSrc)
+	tunSrcField := matches.GetMatchByName(binding.NxmFieldTunIPv4Src)
 	if tunSrcField == nil {
 		return nil, errors.New("in_port field not found")
 	}
@@ -399,14 +369,14 @@ func parseIGMPPacket(pkt protocol.Ethernet) (protocol.IGMPMessage, error) {
 		}
 		return igmp, nil
 	default:
-		return nil, errors.New("unknown igmp packet")
+		return nil, errors.New("unknown IGMP packet")
 	}
 }
 
-func newSnooper(ofClient openflow.Client, ifaceStore interfacestore.InterfaceStore, eventCh chan *mcastGroupEvent, queryInterval time.Duration, multicastValidator types.McastNetworkPolicyController, encapEnabled bool) *IGMPSnooper {
-	snooper := &IGMPSnooper{ofClient: ofClient, ifaceStore: ifaceStore, eventCh: eventCh, validator: multicastValidator, queryInterval: queryInterval, encapEnabled: encapEnabled}
+func newSnooper(ofClient openflow.Client, ifaceStore interfacestore.InterfaceStore, eventCh chan *mcastGroupEvent, queryInterval time.Duration, igmpQueryVersions []uint8, multicastValidator types.McastNetworkPolicyController, encapEnabled bool) *IGMPSnooper {
+	snooper := &IGMPSnooper{ofClient: ofClient, ifaceStore: ifaceStore, eventCh: eventCh, validator: multicastValidator, queryInterval: queryInterval, queryVersions: igmpQueryVersions, encapEnabled: encapEnabled}
 	snooper.igmpReportACNPStats = make(map[apitypes.UID]map[string]*types.RuleMetric)
-	snooper.igmpReportANPStats = make(map[apitypes.UID]map[string]*types.RuleMetric)
-	ofClient.RegisterPacketInHandler(uint8(openflow.PacketInReasonMC), "MulticastGroupDiscovery", snooper)
+	snooper.igmpReportANNPStats = make(map[apitypes.UID]map[string]*types.RuleMetric)
+	ofClient.RegisterPacketInHandler(uint8(openflow.PacketInCategoryIGMP), snooper)
 	return snooper
 }

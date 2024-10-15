@@ -16,9 +16,12 @@ package openflow
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"antrea.io/libOpenflow/openflow15"
+	"antrea.io/libOpenflow/protocol"
+	"antrea.io/libOpenflow/util"
 	"antrea.io/ofnet/ofctrl"
 	"golang.org/x/time/rate"
 	"k8s.io/klog/v2"
@@ -26,7 +29,7 @@ import (
 	"antrea.io/antrea/pkg/ovs/openflow"
 )
 
-type ofpPacketInReason uint8
+type ofpPacketInCategory uint8
 
 type PacketInHandler interface {
 	// HandlePacketIn should not modify the input pktIn and should not
@@ -36,78 +39,91 @@ type PacketInHandler interface {
 }
 
 const (
-	// We use OpenFlow Meter for packet-in rate limiting on OVS side.
-	// Meter Entry ID.
-	PacketInMeterIDNP = 1
-	PacketInMeterIDTF = 2
-	// Meter Entry Rate. It is represented as number of events per second.
-	// Packets which exceed the rate will be dropped.
-	PacketInMeterRateNP = 100
-	PacketInMeterRateTF = 100
+	// PacketIn categories below are used to distribute packetIn to specific handlers.
+	// PacketIn category should be loaded in the first byte of packetIn2 userData.
+	// PacketInCategoryTF is used for traceflow.
+	PacketInCategoryTF ofpPacketInCategory = iota
+	// PacketInCategoryNP is used for packetIn messages related to Network Policy,
+	// including: Logging, Reject, Deny.
+	PacketInCategoryNP
+	// PacketInCategoryDNS is used for DNS response packetIn messages.
+	PacketInCategoryDNS
+	// PacketInCategoryIGMP is used for IGMP packetIn messages.
+	PacketInCategoryIGMP
+	// PacketInCategorySvcReject is used to process the Service packets not matching any
+	// Endpoints within packetIn message.
+	PacketInCategorySvcReject
 
-	// PacketIn reasons
-	PacketInReasonTF ofpPacketInReason = 1
-	// PacketInReasonNP is used for the custom packetIn reasons for Network Policy, including: Logging, Reject, Deny.
-	// It is also used to mark the DNS Response packet.
-	PacketInReasonNP ofpPacketInReason = 0
-	// PacketInReasonMC shares PacketInReasonNP for IGMP packet_in message. This is because OVS "controller" action
-	// only correctly supports reason 0 or 1. Change to another value after the OVS action is corrected.
-	PacketInReasonMC = PacketInReasonNP
-	// PacketInQueueSize defines the size of PacketInQueue.
-	// When PacketInQueue reaches PacketInQueueSize, new packet-in will be dropped.
-	PacketInQueueSize = 200
-	// PacketInQueueRate defines the maximum frequency of getting items from PacketInQueue.
-	// PacketInQueueRate is represented as number of events per second.
-	PacketInQueueRate = 100
+	// PacketIn operations below are used to decide which operation(s) should be
+	// executed by a handler. It(they) should be loaded in the second byte of the
+	// packetIn2 userData. Operations for different handlers could share the value.
+	// If there is only one operation for a handler, then there is no need to provide an
+	// operation.
+	// For example, if a packetIn2 needs Reject and Logging, the userData of the
+	// packetIn2 will be []byte{1, 0b11}. The first byte indicate that this packetIn2
+	// should be sent to NetworkPolicy packetIn handler(PacketInCategoryNP). And the
+	// second byte, which is 0b1 & 0b10 indicating that it needs
+	// PacketInNPLoggingOperation and PacketInNPRejectOperation.
+	// PacketInNPLoggingOperation is used when sending packetIn to NetworkPolicy
+	// handler indicating this packet needs logging.
+	PacketInNPLoggingOperation = 0b1
+	// PacketInNPRejectOperation is used when sending packetIn to controller
+	// indicating that this packet should be rejected.
+	PacketInNPRejectOperation = 0b10
+	// PacketInNPStoreDenyOperation is used when sending packetIn message to controller
+	// indicating that the corresponding connection has been dropped or rejected. It
+	// can be consumed by the Flow Exporter to export flow records for connections
+	// denied by network policy rules.
+	PacketInNPStoreDenyOperation = 0b100
+
+	// We use OpenFlow Meter for packetIn rate limiting on OVS side.
+	// Meter Entry ID.
+	// 1-255 are reserved for Egress QoS. The Egress QoS meterID leverage the same
+	// value as the mark allocated to the EgressIP and Antrea limits the number of
+	// Egress IPs per Node to 255, hence the reserved meter ID range is 1-255.
+	PacketInMeterIDNP  = 256
+	PacketInMeterIDTF  = 257
+	PacketInMeterIDDNS = 258
 )
 
-// RegisterPacketInHandler stores controller handler in a map of map with reason and name as keys.
-func (c *client) RegisterPacketInHandler(packetHandlerReason uint8, packetHandlerName string, packetInHandler interface{}) {
-	handler, ok := packetInHandler.(PacketInHandler)
-	if !ok {
-		klog.Errorf("Invalid controller to handle packetin.")
-		return
-	}
-	if c.packetInHandlers[packetHandlerReason] == nil {
-		c.packetInHandlers[packetHandlerReason] = map[string]PacketInHandler{}
-	}
-	c.packetInHandlers[packetHandlerReason][packetHandlerName] = handler
+// RegisterPacketInHandler stores controller handler in a map with category as keys.
+func (c *client) RegisterPacketInHandler(packetHandlerCategory uint8, packetInHandler PacketInHandler) {
+	c.packetInHandlers[packetHandlerCategory] = packetInHandler
 }
 
-// featureStartPacketIn contains packetin resources specifically for each feature that uses packetin.
+// featureStartPacketIn contains packetIn resources specifically for each feature that uses packetIn.
 type featureStartPacketIn struct {
-	reason        uint8
+	category      uint8
 	stopCh        <-chan struct{}
 	packetInQueue *openflow.PacketInQueue
 }
 
-func newfeatureStartPacketIn(reason uint8, stopCh <-chan struct{}) *featureStartPacketIn {
-	featurePacketIn := featureStartPacketIn{reason: reason, stopCh: stopCh}
-	featurePacketIn.packetInQueue = openflow.NewPacketInQueue(PacketInQueueSize, rate.Limit(PacketInQueueRate))
+func newFeatureStartPacketIn(category uint8, stopCh <-chan struct{}, queueSize, queueRate int) *featureStartPacketIn {
+	featurePacketIn := featureStartPacketIn{category: category, stopCh: stopCh}
+	featurePacketIn.packetInQueue = openflow.NewPacketInQueue(queueSize, rate.Limit(queueRate))
 
 	return &featurePacketIn
 }
 
-// StartPacketInHandler is the starting point for processing feature packetin requests.
+// StartPacketInHandler is the starting point for processing feature packetIn requests.
 func (c *client) StartPacketInHandler(stopCh <-chan struct{}) {
 	if len(c.packetInHandlers) == 0 {
 		return
 	}
-
-	// Iterate through each feature that starts packetin. Subscribe with their specified reason.
-	for reason := range c.packetInHandlers {
-		featurePacketIn := newfeatureStartPacketIn(reason, stopCh)
+	// Iterate through each feature that starts packetIn. Subscribe with their specified category.
+	for category := range c.packetInHandlers {
+		featurePacketIn := newFeatureStartPacketIn(category, stopCh, c.packetInRate*2, c.packetInRate)
 		err := c.subscribeFeaturePacketIn(featurePacketIn)
 		if err != nil {
-			klog.Errorf("received error %+v while subscribing packetin for each feature", err)
+			klog.Errorf("received error %+v while subscribing packetIn for each feature", err)
 		}
 	}
 }
 
 func (c *client) subscribeFeaturePacketIn(featurePacketIn *featureStartPacketIn) error {
-	err := c.SubscribePacketIn(featurePacketIn.reason, featurePacketIn.packetInQueue)
+	err := c.SubscribePacketIn(featurePacketIn.category, featurePacketIn.packetInQueue)
 	if err != nil {
-		return fmt.Errorf("subscribe %d PacketIn failed %+v", featurePacketIn.reason, err)
+		return fmt.Errorf("subscribe %d packetIn failed %+v", featurePacketIn.category, err)
 	}
 	go c.parsePacketIn(featurePacketIn)
 	return nil
@@ -119,12 +135,11 @@ func (c *client) parsePacketIn(featurePacketIn *featureStartPacketIn) {
 		if pktIn == nil {
 			return
 		}
-		// Use corresponding handlers subscribed to the reason to handle PacketIn
-		for name, handler := range c.packetInHandlers[featurePacketIn.reason] {
-			klog.V(2).InfoS("Received packetIn", "reason", featurePacketIn.reason, "handler", name)
-			err := handler.HandlePacketIn(pktIn)
-			if err != nil {
-				klog.Errorf("PacketIn handler %s failed to process packet: %+v", name, err)
+		// Use corresponding handler subscribed to the category to handle packetIn
+		if handler, ok := c.packetInHandlers[featurePacketIn.category]; ok {
+			klog.V(2).InfoS("Received packetIn", "category", featurePacketIn.category)
+			if err := handler.HandlePacketIn(pktIn); err != nil {
+				klog.ErrorS(err, "PacketIn handler failed to process packet", "category", featurePacketIn.category)
 			}
 		}
 	}
@@ -148,4 +163,23 @@ func GetMatchFieldByRegID(matchers *ofctrl.Matchers, regID int) *ofctrl.MatchFie
 		return nil
 	}
 	return &ofctrl.MatchField{MatchField: openflow15.NewRegMatchFieldWithMask(regID, data, mask)}
+}
+
+func GetInfoInReg(regMatch *ofctrl.MatchField, rng *openflow15.NXRange) (uint32, error) {
+	regValue, ok := regMatch.GetValue().(*ofctrl.NXRegister)
+	if !ok {
+		return 0, errors.New("register value cannot be retrieved")
+	}
+	if rng != nil {
+		return ofctrl.GetUint32ValueWithRange(regValue.Data, rng), nil
+	}
+	return regValue.Data, nil
+}
+
+func GetEthernetPacket(pktIn *ofctrl.PacketIn) (*protocol.Ethernet, error) {
+	ethernetPkt := new(protocol.Ethernet)
+	if err := ethernetPkt.UnmarshalBinary(pktIn.Data.(*util.Buffer).Bytes()); err != nil {
+		return nil, fmt.Errorf("failed to parse ethernet packet from packetIn message: %v", err)
+	}
+	return ethernetPkt, nil
 }

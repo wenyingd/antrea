@@ -23,18 +23,19 @@ release. We use `<TAG>` as a placeholder for the release tag (e.g. `v1.4.0`).
      message must be *exactly* `"Update CHANGELOG for <TAG> release"`, as a bot
      will look for this commit and cherry-pick it to update the main branch
      (starting with Antrea v1.0). The
-     [process-changelog.go](../../hack/release/process-changelog.go) script may
+     [prepare-changelog.sh](../../hack/release/prepare-changelog.sh) script may
      be used to easily generate links to PRs and the Github profiles of PR
-     authors.
+     authors. Use `prepare-changelog.sh -h` to get the usage.
    - a commit to update [VERSION](../../VERSION) as needed, using the following
-     commit message: `"Set VERSION to <TAG>"`.
+     commit message: `"Set VERSION to <TAG>"`. Before committing, ensure that
+     you run `make -C build/charts/ helm-docs` and include the changes.
 
 3. Run all the tests for the PR, investigating test failures and re-triggering
    the tests as needed.
    - Github worfklows are run automatically whenever the head branch is updated.
    - Jenkins tests need to be [triggered manually](../../CONTRIBUTING.md#getting-your-pr-verified-by-ci).
    - Cloud tests need to be triggered manually through the
-     [Jenkins web UI](https://jenkins.antrea-ci.rocks/). Admin access is
+     [Jenkins web UI](https://jenkins.antrea.io/). Admin access is
      required. For each job (AKS, EKS, GKE), click on `Build with Parameters`,
      and enter the name of your fork as `ANTREA_REPO` and the name of your
      branch as `ANTREA_GIT_REVISION`. Test starting times need to be staggered:
@@ -55,11 +56,17 @@ release. We use `<TAG>` as a placeholder for the release tag (e.g. `v1.4.0`).
 
 5. Make the release on Github **with the release branch as the target** and copy
    the relevant section of the CHANGELOG as the release description (make sure
-   all the markdown links work). You typically should **not** be checking the
-   `pre-release` box. This would only be necessary for a release candidate
-   (e.g., `<TAG>` is `1.4.0-rc.1`), which we do not have at the moment. There is
-   no need to upload any assets as this will be done automatically by a Github
-   workflow, after you create the release.
+   all the markdown links work). The
+   [draft-release.sh](../../hack/release/draft-release.sh) script can
+   be used to create the release draft. Use `draft-release.sh -h` to get the
+   usage. You typically should **not** be checking the `Set as a pre-release`
+   box. This would only be necessary for a release candidate (e.g., `<TAG>` is
+   `1.4.0-rc.1`), which we do not have at the moment. There is no need to upload
+   any assets as this will be done automatically by a Github workflow, after you
+   create the release.
+   - the `Set as the latest release` box is checked by default. **If you are
+     creating a patch release for an older minor version of Antrea, you should
+     uncheck the box.**
 
 6. After a while (time for the relevant Github workflows to complete), check that:
    - the Docker image has been pushed to
@@ -80,5 +87,7 @@ release. We use `<TAG>` as a placeholder for the release tag (e.g. `v1.4.0`).
 8. *For a minor release* Finally, open a PR against the main branch with a
    single commit, to update [VERSION](../../VERSION) to the next minor version
    (with `-dev` suffix). For example, if the release was for `v1.4.0`, the
-   VERSION file should be updated to `v1.5.0-dev`. After a patch release, the
-   VERSION file in the main branch is never updated.
+   VERSION file should be updated to `v1.5.0-dev`. Before committing, ensure
+   that you run `make -C build/charts/ helm-docs` and include the changes. Note
+   that after a patch release, the VERSION file in the main branch is never
+   updated, so no additional commit is needed.

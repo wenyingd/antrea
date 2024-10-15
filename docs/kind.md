@@ -15,9 +15,7 @@
 <!-- /toc -->
 
 We support running Antrea inside of Kind clusters on both Linux and macOS
-hosts. On macOS, support for Kind requires the use of Docker Desktop, instead of
-the legacy [Docker
-Toolbox](https://docs.docker.com/docker-for-mac/docker-toolbox/).
+hosts.
 
 To deploy a released version of Antrea on an existing Kind cluster, you can
 simply use the same command as for other types of clusters:
@@ -58,9 +56,14 @@ If you want to pre-load the Antrea image in each Node (to avoid having each Node
 pull from the registry), you can use:
 
 ```bash
-docker pull projects.registry.vmware.com/antrea/antrea-ubuntu:<TAG>
-./ci/kind/kind-setup.sh --images projects.registry.vmware.com/antrea/antrea-ubuntu:<TAG> create <CLUSTER_NAME>
-kubectl apply -f https://github.com/antrea-io/antrea/releases/download/<TAG>/antrea.yml
+tag=<TAG>
+cluster=<CLUSTER_NAME>
+docker pull antrea/antrea-controller-ubuntu:$tag
+docker pull antrea/antrea-agent-ubuntu:$tag
+./ci/kind/kind-setup.sh \
+  --images "antrea/antrea-controller-ubuntu:$tag antrea/antrea-agent-ubuntu:$tag" \
+  create $cluster
+kubectl apply -f https://github.com/antrea-io/antrea/releases/download/$tag/antrea.yml
 ```
 
 The `kind-setup.sh` is a convenience script typically used by developers for
@@ -117,11 +120,6 @@ kind create cluster --config kind-config.yml
 ### Deploy Antrea to your Kind cluster
 
 ```bash
-# pull the Antrea Docker image
-docker pull projects.registry.vmware.com/antrea/antrea-ubuntu:<TAG>
-# load the Antrea Docker image in the Nodes
-kind load docker-image projects.registry.vmware.com/antrea/antrea-ubuntu:<TAG>
-# deploy Antrea
 kubectl apply -f https://github.com/antrea-io/antrea/releases/download/<TAG>/antrea.yml
 ```
 
@@ -131,8 +129,8 @@ These instructions assume that you have built the Antrea Docker image locally
 (e.g. by running `make` from the root of the repository).
 
 ```bash
-# load the Antrea Docker image in the Nodes
-kind load docker-image projects.registry.vmware.com/antrea/antrea-ubuntu:latest
+# load the Antrea Docker images in the Nodes
+kind load docker-image antrea/antrea-controller-ubuntu:latest antrea/antrea-agent-ubuntu:latest
 # deploy Antrea
 kubectl apply -f build/yamls/antrea.yml
 ```
@@ -153,7 +151,7 @@ antrea-controller-775f4d79f8-6tksp   1/1     Running   0          8m56s
 ## Run the Antrea e2e tests
 
 To run the Antrea e2e test suite on your Kind cluster, please refer to [this
-document](../test/e2e/README.md#running-the-e2e-tests-on-a-kind-cluster).
+document](https://github.com/antrea-io/antrea/blob/main/test/e2e/README.md#running-the-e2e-tests-on-a-kind-cluster).
 
 ## FAQ
 

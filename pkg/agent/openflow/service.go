@@ -18,15 +18,17 @@ import (
 	"net"
 	"sync"
 
-	"k8s.io/klog/v2"
+	"antrea.io/libOpenflow/openflow15"
 
 	"antrea.io/antrea/pkg/agent/config"
+	"antrea.io/antrea/pkg/agent/nodeip"
 	"antrea.io/antrea/pkg/agent/openflow/cookie"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
 type featureService struct {
 	cookieAllocator cookie.Allocator
+	nodeIPChecker   nodeip.Checker
 	ipProtocols     []binding.Protocol
 	bridge          binding.Bridge
 
@@ -44,8 +46,10 @@ type featureService struct {
 	networkConfig          *config.NetworkConfig
 	gatewayPort            uint32
 
+	enableAntreaPolicy    bool
 	enableProxy           bool
 	proxyAll              bool
+	enableDSR             bool
 	connectUplinkToBridge bool
 	ctZoneSrcField        *binding.RegField
 
@@ -58,13 +62,16 @@ func (f *featureService) getFeatureName() string {
 
 func newFeatureService(
 	cookieAllocator cookie.Allocator,
+	nodeIPChecker nodeip.Checker,
 	ipProtocols []binding.Protocol,
 	nodeConfig *config.NodeConfig,
 	networkConfig *config.NetworkConfig,
 	serviceConfig *config.ServiceConfig,
 	bridge binding.Bridge,
+	enableAntreaPolicy,
 	enableProxy,
 	proxyAll,
+	enableDSR,
 	connectUplinkToBridge bool) *featureService {
 	gatewayIPs := make(map[binding.Protocol]net.IP)
 	virtualIPs := make(map[binding.Protocol]net.IP)
@@ -99,6 +106,7 @@ func newFeatureService(
 
 	return &featureService{
 		cookieAllocator:        cookieAllocator,
+		nodeIPChecker:          nodeIPChecker,
 		ipProtocols:            ipProtocols,
 		bridge:                 bridge,
 		cachedFlows:            newFlowCategoryCache(),
@@ -113,15 +121,26 @@ func newFeatureService(
 		gatewayMAC:             nodeConfig.GatewayConfig.MAC,
 		gatewayPort:            nodeConfig.GatewayConfig.OFPort,
 		networkConfig:          networkConfig,
+		enableAntreaPolicy:     enableAntreaPolicy,
 		enableProxy:            enableProxy,
 		proxyAll:               proxyAll,
+		enableDSR:              enableDSR,
 		connectUplinkToBridge:  connectUplinkToBridge,
 		ctZoneSrcField:         getZoneSrcField(connectUplinkToBridge),
 		category:               cookie.Service,
 	}
 }
 
-func (f *featureService) initFlows() []binding.Flow {
+// serviceNoEndpointFlow generates the flow to match the packets to Service without Endpoint and send them to controller.
+func (f *featureService) serviceNoEndpointFlow() binding.Flow {
+	return EndpointDNATTable.ofTable.BuildFlow(priorityNormal).
+		Cookie(f.cookieAllocator.Request(f.category).Raw()).
+		MatchRegMark(SvcNoEpRegMark).
+		Action().SendToController([]byte{uint8(PacketInCategorySvcReject)}, false).
+		Done()
+}
+
+func (f *featureService) initFlows() []*openflow15.FlowMod {
 	var flows []binding.Flow
 	if f.enableProxy {
 		flows = append(flows, f.conntrackFlows()...)
@@ -131,11 +150,15 @@ func (f *featureService) initFlows() []binding.Flow {
 		flows = append(flows, f.snatConntrackFlows()...)
 		flows = append(flows, f.serviceNeedLBFlow())
 		flows = append(flows, f.sessionAffinityReselectFlow())
+		flows = append(flows, f.serviceNoEndpointFlow())
 		flows = append(flows, f.l2ForwardOutputHairpinServiceFlow())
 		if f.proxyAll {
 			// This installs the flows to match the first packet of NodePort connection. The flows set a bit of a register
 			// to mark the Service type of the packet as NodePort, and the mark is consumed in table serviceLBTable.
 			flows = append(flows, f.nodePortMarkFlows()...)
+		}
+		if f.enableDSR {
+			flows = append(flows, f.dsrServiceNoDNATFlows()...)
 		}
 	} else {
 		// This installs the flows to enable Service connectivity. Upstream kube-proxy is leveraged to provide load-balancing,
@@ -144,25 +167,28 @@ func (f *featureService) initFlows() []binding.Flow {
 		// they are DNATed to backend Pods.
 		flows = append(flows, f.serviceCIDRDNATFlows()...)
 	}
-	return flows
+	return GetFlowModMessages(flows, binding.AddMessage)
 }
 
-func (f *featureService) replayFlows() []binding.Flow {
-	var flows []binding.Flow
-
-	// Get cached flows.
-	flows = append(flows, getCachedFlows(f.cachedFlows)...)
-
-	return flows
+func (f *featureService) replayFlows() []*openflow15.FlowMod {
+	return getCachedFlowMessages(f.cachedFlows)
 }
 
-func (f *featureService) replayGroups() {
+func (f *featureService) replayGroups() []binding.OFEntry {
+	var groups []binding.OFEntry
 	f.groupCache.Range(func(id, value interface{}) bool {
 		group := value.(binding.Group)
 		group.Reset()
-		if err := group.Add(); err != nil {
-			klog.Errorf("Error when replaying cached group %d: %v", id, err)
-		}
+		groups = append(groups, group)
 		return true
 	})
+	return groups
+}
+
+func (f *featureService) initGroups() []binding.OFEntry {
+	return nil
+}
+
+func (f *featureService) replayMeters() []binding.OFEntry {
+	return nil
 }

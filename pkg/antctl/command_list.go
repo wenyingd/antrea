@@ -63,7 +63,9 @@ func (cl *commandList) applyToRootCommand(root *cobra.Command, client AntctlClie
 		if (runtime.Mode == runtime.ModeAgent && cmd.supportAgent) ||
 			(runtime.Mode == runtime.ModeController && cmd.supportController) ||
 			(runtime.Mode == runtime.ModeFlowAggregator && cmd.supportFlowAggregator) ||
-			(!runtime.InPod && cmd.commandGroup == mc) {
+			(!runtime.InPod && cmd.commandGroup == mc) ||
+			(!runtime.InPod && cmd.commandGroup == upgrade) ||
+			(!runtime.InPod && cmd.commandGroup == check) {
 			if groupCommand, ok := groupCommands[cmd.commandGroup]; ok {
 				groupCommand.AddCommand(cmd.cobraCommand)
 			} else {
@@ -103,7 +105,8 @@ func (cl *commandList) validate() []error {
 	if len(cl.definitions) == 0 {
 		return []error{fmt.Errorf("no command found in the command list")}
 	}
-	for i, c := range cl.definitions {
+	for i := range cl.definitions {
+		c := &cl.definitions[i]
 		for _, err := range c.validate() {
 			errs = append(errs, fmt.Errorf("#%d command<%s>: %w", i, c.use, err))
 		}

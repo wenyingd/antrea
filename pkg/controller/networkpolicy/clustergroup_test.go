@@ -15,6 +15,7 @@
 package networkpolicy
 
 import (
+	"net"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,11 +25,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/utils/ptr"
 
 	"antrea.io/antrea/pkg/apis/controlplane"
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
 	crdv1alpha2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
-	crdv1alpha3 "antrea.io/antrea/pkg/apis/crd/v1alpha3"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	antreatypes "antrea.io/antrea/pkg/controller/types"
 )
 
@@ -38,17 +39,21 @@ func TestProcessClusterGroup(t *testing.T) {
 	selectorC := metav1.LabelSelector{MatchLabels: map[string]string{"foo3": "bar3"}}
 	selectorD := metav1.LabelSelector{MatchLabels: map[string]string{"foo4": "bar4"}}
 	cidr := "10.0.0.0/24"
-	cidrIPNet, _ := cidrStrToIPNet(cidr)
+	exceptCIDR := "10.0.0.0/25"
+	controlplaneIPNet, _ := cidrStrToIPNet(cidr)
+	controlplaneIPNetExcept, _ := cidrStrToIPNet(exceptCIDR)
+	_, controlplaneIPNetDiff, _ := net.ParseCIDR("10.0.0.128/25")
+	_, ipNet, _ := net.ParseCIDR(cidr)
 	tests := []struct {
 		name          string
-		inputGroup    *crdv1alpha3.ClusterGroup
+		inputGroup    *crdv1beta1.ClusterGroup
 		expectedGroup *antreatypes.Group
 	}{
 		{
 			name: "cg-with-ns-selector",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					NamespaceSelector: &selectorA,
 				},
 			},
@@ -63,9 +68,9 @@ func TestProcessClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-pod-selector",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgB", UID: "uidB"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					PodSelector: &selectorB,
 				},
 			},
@@ -80,9 +85,9 @@ func TestProcessClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-pod-ns-selector",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgC", UID: "uidC"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					NamespaceSelector: &selectorD,
 					PodSelector:       &selectorC,
 				},
@@ -98,10 +103,10 @@ func TestProcessClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-ip-block",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgD", UID: "uidD"},
-				Spec: crdv1alpha3.GroupSpec{
-					IPBlocks: []crdv1alpha1.IPBlock{
+				Spec: crdv1beta1.GroupSpec{
+					IPBlocks: []crdv1beta1.IPBlock{
 						{
 							CIDR: cidr,
 						},
@@ -116,18 +121,18 @@ func TestProcessClusterGroup(t *testing.T) {
 				},
 				IPBlocks: []controlplane.IPBlock{
 					{
-						CIDR:   *cidrIPNet,
-						Except: []controlplane.IPNet{},
+						CIDR: *controlplaneIPNet,
 					},
 				},
+				IPNets: []*net.IPNet{ipNet},
 			},
 		},
 		{
 			name: "cg-with-svc-reference",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgE", UID: "uidE"},
-				Spec: crdv1alpha3.GroupSpec{
-					ServiceReference: &crdv1alpha1.NamespacedName{
+				Spec: crdv1beta1.GroupSpec{
+					ServiceReference: &crdv1beta1.NamespacedName{
 						Name:      "test-svc",
 						Namespace: "test-ns",
 					},
@@ -147,10 +152,10 @@ func TestProcessClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-child-groups",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgF", UID: "uidF"},
-				Spec: crdv1alpha3.GroupSpec{
-					ChildGroups: []crdv1alpha3.ClusterGroupReference{"cgA", "cgB"},
+				Spec: crdv1beta1.GroupSpec{
+					ChildGroups: []crdv1beta1.ClusterGroupReference{"cgA", "cgB"},
 				},
 			},
 			expectedGroup: &antreatypes.Group{
@@ -162,10 +167,38 @@ func TestProcessClusterGroup(t *testing.T) {
 				ChildGroups: []string{"cgA", "cgB"},
 			},
 		},
+		{
+			name: "cg-with-ip-block-except",
+			inputGroup: &crdv1beta1.ClusterGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "cgG", UID: "uidG"},
+				Spec: crdv1beta1.GroupSpec{
+					IPBlocks: []crdv1beta1.IPBlock{
+						{
+							CIDR:   cidr,
+							Except: []string{exceptCIDR},
+						},
+					},
+				},
+			},
+			expectedGroup: &antreatypes.Group{
+				UID: "uidG",
+				SourceReference: &controlplane.GroupReference{
+					Name: "cgG",
+					UID:  "uidG",
+				},
+				IPBlocks: []controlplane.IPBlock{
+					{
+						CIDR:   *controlplaneIPNet,
+						Except: []controlplane.IPNet{*controlplaneIPNetExcept},
+					},
+				},
+				IPNets: []*net.IPNet{controlplaneIPNetDiff},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, c := newController()
+			_, c := newController(nil, nil)
 			actualGroup := c.processClusterGroup(tt.inputGroup)
 			assert.Equal(t, tt.expectedGroup, actualGroup)
 		})
@@ -178,17 +211,22 @@ func TestAddClusterGroup(t *testing.T) {
 	selectorC := metav1.LabelSelector{MatchLabels: map[string]string{"foo3": "bar3"}}
 	selectorD := metav1.LabelSelector{MatchLabels: map[string]string{"foo4": "bar4"}}
 	cidr := "10.0.0.0/24"
-	cidrIPNet, _ := cidrStrToIPNet(cidr)
+	exceptCIDR1, exceptCIDR2 := "10.0.0.0/25", "10.0.0.128/26"
+	controlplaneIPNet, _ := cidrStrToIPNet(cidr)
+	controlplaneIPNetExcept1, _ := cidrStrToIPNet(exceptCIDR1)
+	controlplaneIPNetExcept2, _ := cidrStrToIPNet(exceptCIDR2)
+	_, controlplaneIPNetDiff, _ := net.ParseCIDR("10.0.0.192/26")
+	_, ipNet, _ := net.ParseCIDR(cidr)
 	tests := []struct {
 		name          string
-		inputGroup    *crdv1alpha3.ClusterGroup
+		inputGroup    *crdv1beta1.ClusterGroup
 		expectedGroup *antreatypes.Group
 	}{
 		{
 			name: "cg-with-ns-selector",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					NamespaceSelector: &selectorA,
 				},
 			},
@@ -203,9 +241,9 @@ func TestAddClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-pod-selector",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgB", UID: "uidB"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					PodSelector: &selectorB,
 				},
 			},
@@ -220,9 +258,9 @@ func TestAddClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-pod-ns-selector",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgC", UID: "uidC"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					NamespaceSelector: &selectorD,
 					PodSelector:       &selectorC,
 				},
@@ -238,10 +276,10 @@ func TestAddClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-with-ip-block",
-			inputGroup: &crdv1alpha3.ClusterGroup{
+			inputGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgD", UID: "uidD"},
-				Spec: crdv1alpha3.GroupSpec{
-					IPBlocks: []crdv1alpha1.IPBlock{
+				Spec: crdv1beta1.GroupSpec{
+					IPBlocks: []crdv1beta1.IPBlock{
 						{
 							CIDR: cidr,
 						},
@@ -256,16 +294,44 @@ func TestAddClusterGroup(t *testing.T) {
 				},
 				IPBlocks: []controlplane.IPBlock{
 					{
-						CIDR:   *cidrIPNet,
-						Except: []controlplane.IPNet{},
+						CIDR: *controlplaneIPNet,
 					},
 				},
+				IPNets: []*net.IPNet{ipNet},
+			},
+		},
+		{
+			name: "cg-with-ip-block-except",
+			inputGroup: &crdv1beta1.ClusterGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "cgE", UID: "uidE"},
+				Spec: crdv1beta1.GroupSpec{
+					IPBlocks: []crdv1beta1.IPBlock{
+						{
+							CIDR:   cidr,
+							Except: []string{exceptCIDR1, exceptCIDR2},
+						},
+					},
+				},
+			},
+			expectedGroup: &antreatypes.Group{
+				UID: "uidE",
+				SourceReference: &controlplane.GroupReference{
+					Name: "cgE",
+					UID:  "uidE",
+				},
+				IPBlocks: []controlplane.IPBlock{
+					{
+						CIDR:   *controlplaneIPNet,
+						Except: []controlplane.IPNet{*controlplaneIPNetExcept1, *controlplaneIPNetExcept2},
+					},
+				},
+				IPNets: []*net.IPNet{controlplaneIPNetDiff},
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, npc := newController()
+			_, npc := newController(nil, nil)
 			npc.addClusterGroup(tt.inputGroup)
 			key := tt.inputGroup.Name
 			actualGroupObj, _, _ := npc.internalGroupStore.Get(key)
@@ -280,24 +346,25 @@ func TestUpdateClusterGroup(t *testing.T) {
 	selectorB := metav1.LabelSelector{MatchLabels: map[string]string{"foo2": "bar2"}}
 	selectorC := metav1.LabelSelector{MatchLabels: map[string]string{"foo3": "bar3"}}
 	selectorD := metav1.LabelSelector{MatchLabels: map[string]string{"foo4": "bar4"}}
-	testCG := crdv1alpha3.ClusterGroup{
+	testCG := crdv1beta1.ClusterGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-		Spec: crdv1alpha3.GroupSpec{
+		Spec: crdv1beta1.GroupSpec{
 			NamespaceSelector: &selectorA,
 		},
 	}
 	cidr := "10.0.0.0/24"
-	cidrIPNet, _ := cidrStrToIPNet(cidr)
+	controlplaneIPNet, _ := cidrStrToIPNet(cidr)
+	_, ipNet, _ := net.ParseCIDR(cidr)
 	tests := []struct {
 		name          string
-		updatedGroup  *crdv1alpha3.ClusterGroup
+		updatedGroup  *crdv1beta1.ClusterGroup
 		expectedGroup *antreatypes.Group
 	}{
 		{
 			name: "cg-update-ns-selector",
-			updatedGroup: &crdv1alpha3.ClusterGroup{
+			updatedGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					NamespaceSelector: &selectorB,
 				},
 			},
@@ -312,9 +379,9 @@ func TestUpdateClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-update-pod-selector",
-			updatedGroup: &crdv1alpha3.ClusterGroup{
+			updatedGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					PodSelector: &selectorC,
 				},
 			},
@@ -329,9 +396,9 @@ func TestUpdateClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-update-pod-ns-selector",
-			updatedGroup: &crdv1alpha3.ClusterGroup{
+			updatedGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
+				Spec: crdv1beta1.GroupSpec{
 					NamespaceSelector: &selectorD,
 					PodSelector:       &selectorC,
 				},
@@ -347,10 +414,10 @@ func TestUpdateClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-update-ip-block",
-			updatedGroup: &crdv1alpha3.ClusterGroup{
+			updatedGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
-					IPBlocks: []crdv1alpha1.IPBlock{
+				Spec: crdv1beta1.GroupSpec{
+					IPBlocks: []crdv1beta1.IPBlock{
 						{
 							CIDR: cidr,
 						},
@@ -365,18 +432,18 @@ func TestUpdateClusterGroup(t *testing.T) {
 				},
 				IPBlocks: []controlplane.IPBlock{
 					{
-						CIDR:   *cidrIPNet,
-						Except: []controlplane.IPNet{},
+						CIDR: *controlplaneIPNet,
 					},
 				},
+				IPNets: []*net.IPNet{ipNet},
 			},
 		},
 		{
 			name: "cg-update-svc-reference",
-			updatedGroup: &crdv1alpha3.ClusterGroup{
+			updatedGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
-					ServiceReference: &crdv1alpha1.NamespacedName{
+				Spec: crdv1beta1.GroupSpec{
+					ServiceReference: &crdv1beta1.NamespacedName{
 						Name:      "test-svc",
 						Namespace: "test-ns",
 					},
@@ -396,10 +463,10 @@ func TestUpdateClusterGroup(t *testing.T) {
 		},
 		{
 			name: "cg-update-child-groups",
-			updatedGroup: &crdv1alpha3.ClusterGroup{
+			updatedGroup: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-				Spec: crdv1alpha3.GroupSpec{
-					ChildGroups: []crdv1alpha3.ClusterGroupReference{"cgB", "cgC"},
+				Spec: crdv1beta1.GroupSpec{
+					ChildGroups: []crdv1beta1.ClusterGroupReference{"cgB", "cgC"},
 				},
 			},
 			expectedGroup: &antreatypes.Group{
@@ -412,7 +479,7 @@ func TestUpdateClusterGroup(t *testing.T) {
 			},
 		},
 	}
-	_, npc := newController()
+	_, npc := newController(nil, nil)
 	npc.addClusterGroup(&testCG)
 	key := testCG.Name
 	for _, tt := range tests {
@@ -427,14 +494,14 @@ func TestUpdateClusterGroup(t *testing.T) {
 
 func TestDeleteCG(t *testing.T) {
 	selectorA := metav1.LabelSelector{MatchLabels: map[string]string{"foo1": "bar1"}}
-	testCG := crdv1alpha3.ClusterGroup{
+	testCG := crdv1beta1.ClusterGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
-		Spec: crdv1alpha3.GroupSpec{
+		Spec: crdv1beta1.GroupSpec{
 			NamespaceSelector: &selectorA,
 		},
 	}
 	key := testCG.Name
-	_, npc := newController()
+	_, npc := newController(nil, nil)
 	npc.addClusterGroup(&testCG)
 	npc.deleteClusterGroup(&testCG)
 	_, found, _ := npc.internalGroupStore.Get(key)
@@ -444,15 +511,15 @@ func TestDeleteCG(t *testing.T) {
 func TestClusterClusterGroupMembersComputedConditionEqual(t *testing.T) {
 	tests := []struct {
 		name          string
-		existingConds []crdv1alpha3.GroupCondition
+		existingConds []crdv1beta1.GroupCondition
 		checkStatus   corev1.ConditionStatus
 		expValue      bool
 	}{
 		{
 			name: "groupmem-cond-exists-not-equal",
-			existingConds: []crdv1alpha3.GroupCondition{
+			existingConds: []crdv1beta1.GroupCondition{
 				{
-					Type:   crdv1alpha3.GroupMembersComputed,
+					Type:   crdv1beta1.GroupMembersComputed,
 					Status: corev1.ConditionFalse,
 				},
 			},
@@ -461,9 +528,9 @@ func TestClusterClusterGroupMembersComputedConditionEqual(t *testing.T) {
 		},
 		{
 			name: "groupmem-cond-exists-equal",
-			existingConds: []crdv1alpha3.GroupCondition{
+			existingConds: []crdv1beta1.GroupCondition{
 				{
-					Type:   crdv1alpha3.GroupMembersComputed,
+					Type:   crdv1beta1.GroupMembersComputed,
 					Status: corev1.ConditionTrue,
 				},
 			},
@@ -472,7 +539,7 @@ func TestClusterClusterGroupMembersComputedConditionEqual(t *testing.T) {
 		},
 		{
 			name: "groupmem-cond-not-exists-not-equal",
-			existingConds: []crdv1alpha3.GroupCondition{
+			existingConds: []crdv1beta1.GroupCondition{
 				{
 					Status: corev1.ConditionFalse,
 				},
@@ -483,8 +550,8 @@ func TestClusterClusterGroupMembersComputedConditionEqual(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			inCond := crdv1alpha3.GroupCondition{
-				Type:   crdv1alpha3.GroupMembersComputed,
+			inCond := crdv1beta1.GroupCondition{
+				Type:   crdv1beta1.GroupMembersComputed,
 				Status: tt.checkStatus,
 			}
 			actualValue := groupMembersComputedConditionEqual(tt.existingConds, inCond)
@@ -565,20 +632,20 @@ func TestFilterInternalGroupsForService(t *testing.T) {
 	tests := []struct {
 		name           string
 		toMatch        *corev1.Service
-		expectedGroups sets.String
+		expectedGroups sets.Set[string]
 	}{
 		{
 			"service-match-name-default-ns",
 			svc1,
-			sets.NewString("cgA", "cgB"),
+			sets.New[string]("cgA", "cgB"),
 		},
 		{
 			"service-match-name-and-namespace",
 			svc2,
-			sets.NewString("cgC"),
+			sets.New[string]("cgC"),
 		},
 	}
-	_, npc := newController()
+	_, npc := newController(nil, nil)
 	npc.internalGroupStore.Create(grp1)
 	npc.internalGroupStore.Create(grp2)
 	npc.internalGroupStore.Create(grp3)
@@ -682,7 +749,7 @@ func TestServiceToGroupSelector(t *testing.T) {
 			nil,
 		},
 	}
-	_, npc := newController()
+	_, npc := newController(nil, nil)
 	npc.serviceStore.Add(svc1)
 	npc.serviceStore.Add(svc2)
 	npc.serviceStore.Add(svc3)
@@ -852,7 +919,7 @@ func TestGetAssociatedGroups(t *testing.T) {
 			[]antreatypes.Group{},
 		},
 	}
-	_, npc := newController()
+	_, npc := newController(nil, nil)
 	for i := range testPods {
 		npc.groupingInterface.AddPod(testPods[i])
 	}
@@ -867,14 +934,13 @@ func TestGetAssociatedGroups(t *testing.T) {
 					npc.groupingInterface.AddGroup(internalGroupType, g.SourceReference.Name, g.Selector)
 				}
 			}
-			groups, err := npc.GetAssociatedGroups(tt.queryName, tt.queryNamespace)
-			assert.Equal(t, err, nil)
+			groups := npc.GetAssociatedGroups(tt.queryName, tt.queryNamespace)
 			assert.ElementsMatch(t, tt.expectedGroups, groups)
 		})
 	}
 }
 
-func TestGetGroupMembers(t *testing.T) {
+func TestGetClusterGroupMembers(t *testing.T) {
 	pod1MemberSet := controlplane.GroupMemberSet{}
 	pod1MemberSet.Insert(podToGroupMember(testPods[0], true))
 	pod12MemberSet := controlplane.GroupMemberSet{}
@@ -901,7 +967,7 @@ func TestGetGroupMembers(t *testing.T) {
 			controlplane.GroupMemberSet{},
 		},
 	}
-	_, npc := newController()
+	_, npc := newController(nil, nil)
 	for i := range testPods {
 		npc.groupingInterface.AddPod(testPods[i])
 	}
@@ -922,23 +988,23 @@ func TestGetGroupMembers(t *testing.T) {
 func TestSyncInternalGroup(t *testing.T) {
 	p10 := float64(10)
 	p20 := float64(20)
-	allowAction := crdv1alpha1.RuleActionAllow
+	allowAction := crdv1beta1.RuleActionAllow
 	cgName := "cgA"
 	cgUID := types.UID("uidA")
-	cg := &crdv1alpha3.ClusterGroup{
+	cg := &crdv1beta1.ClusterGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: cgName, UID: cgUID},
-		Spec:       crdv1alpha3.GroupSpec{NamespaceSelector: &selectorA},
+		Spec:       crdv1beta1.GroupSpec{NamespaceSelector: &selectorA},
 	}
-	cnp1 := &crdv1alpha1.ClusterNetworkPolicy{
+	cnp1 := &crdv1beta1.ClusterNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "cnp1", UID: "uid1"},
-		Spec: crdv1alpha1.ClusterNetworkPolicySpec{
-			AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+		Spec: crdv1beta1.ClusterNetworkPolicySpec{
+			AppliedTo: []crdv1beta1.AppliedTo{
 				{PodSelector: &selectorB},
 			},
 			Priority: p10,
-			Ingress: []crdv1alpha1.Rule{
+			Ingress: []crdv1beta1.Rule{
 				{
-					From: []crdv1alpha1.NetworkPolicyPeer{
+					From: []crdv1beta1.NetworkPolicyPeer{
 						{Group: cgName},
 					},
 					Action: &allowAction,
@@ -946,16 +1012,16 @@ func TestSyncInternalGroup(t *testing.T) {
 			},
 		},
 	}
-	cnp2 := &crdv1alpha1.ClusterNetworkPolicy{
+	cnp2 := &crdv1beta1.ClusterNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: "cnp2", UID: "uid2"},
-		Spec: crdv1alpha1.ClusterNetworkPolicySpec{
-			AppliedTo: []crdv1alpha1.NetworkPolicyPeer{
+		Spec: crdv1beta1.ClusterNetworkPolicySpec{
+			AppliedTo: []crdv1beta1.AppliedTo{
 				{PodSelector: &selectorC},
 			},
 			Priority: p20,
-			Ingress: []crdv1alpha1.Rule{
+			Ingress: []crdv1beta1.Rule{
 				{
-					From: []crdv1alpha1.NetworkPolicyPeer{
+					From: []crdv1beta1.NetworkPolicyPeer{
 						{Group: cgName},
 					},
 					Action: &allowAction,
@@ -970,34 +1036,23 @@ func TestSyncInternalGroup(t *testing.T) {
 	npc.crdInformerFactory.Start(stopCh)
 	npc.crdInformerFactory.WaitForCacheSync(stopCh)
 
-	// After creating a ClusterGroup:
-	// - A corresponding internal group should be added for it.
-	// - The internal NetworkPolicies for the ClusterNetworkPolicies that use it should reference to it regardless of
-	//   whether they are added before the ClusterGroup or after it.
-	// - An AddressGroup should be created for it.
-
-	// cnp1 is added before the ClusterGroup.
-	npc.addCNP(cnp1)
-	npc.addClusterGroup(cg)
-	err := npc.syncInternalGroup(internalGroupKeyFunc(cg))
-	require.NoError(t, err)
-	// cnp2 is added after the ClusterGroup.
-	npc.addCNP(cnp2)
-
+	// cnp1 is synced before the ClusterGroup. The rule's From should be empty as the ClusterGroup hasn't been synced,
+	require.NoError(t, npc.syncInternalNetworkPolicy(getACNPReference(cnp1)))
+	assert.Equal(t, 0, npc.internalNetworkPolicyQueue.Len())
 	expectedInternalNetworkPolicy1 := &antreatypes.NetworkPolicy{
-		UID:  "uid1",
-		Name: "uid1",
+		UID:      "uid1",
+		Name:     "uid1",
+		SpanMeta: antreatypes.SpanMeta{NodeNames: sets.New[string]()},
 		SourceRef: &controlplane.NetworkPolicyReference{
 			Type: controlplane.AntreaClusterNetworkPolicy,
 			Name: "cnp1",
 			UID:  "uid1",
 		},
 		Priority:     &p10,
-		TierPriority: &DefaultTierPriority,
+		TierPriority: ptr.To(crdv1beta1.DefaultTierPriority),
 		Rules: []controlplane.NetworkPolicyRule{
 			{
 				Direction: controlplane.DirectionIn,
-				From:      controlplane.NetworkPolicyPeer{AddressGroups: []string{cgName}},
 				Priority:  0,
 				Action:    &allowAction,
 			},
@@ -1006,18 +1061,46 @@ func TestSyncInternalGroup(t *testing.T) {
 	}
 	actualInternalNetworkPolicy1, exists, _ := npc.internalNetworkPolicyStore.Get(internalNetworkPolicyKeyFunc(cnp1))
 	require.True(t, exists)
-	assert.Equal(t, expectedInternalNetworkPolicy1, actualInternalNetworkPolicy1)
+	require.Equal(t, expectedInternalNetworkPolicy1, actualInternalNetworkPolicy1)
 
+	// After creating a ClusterGroup:
+	// - A corresponding internal group should be added for it.
+	// - The internal NetworkPolicies for the ClusterNetworkPolicies that use it should be enqueued.
+	// - An AddressGroup should be created for it.
+	npc.addClusterGroup(cg)
+	err := npc.syncInternalGroup(internalGroupKeyFunc(cg))
+	require.NoError(t, err)
+	require.Equal(t, 2, npc.internalNetworkPolicyQueue.Len())
+	expectedKeys := []controlplane.NetworkPolicyReference{
+		*getACNPReference(cnp1),
+		*getACNPReference(cnp2),
+	}
+	actualKeys := make([]controlplane.NetworkPolicyReference, 0, 2)
+	for i := 0; i < 2; i++ {
+		key, _ := npc.internalNetworkPolicyQueue.Get()
+		actualKeys = append(actualKeys, key)
+		npc.internalNetworkPolicyQueue.Done(key)
+	}
+	assert.ElementsMatch(t, expectedKeys, actualKeys)
+
+	expectedInternalNetworkPolicy1.Rules[0].From = controlplane.NetworkPolicyPeer{AddressGroups: []string{cgName}}
+	require.NoError(t, npc.syncInternalNetworkPolicy(getACNPReference(cnp1)))
+	actualInternalNetworkPolicy1, exists, _ = npc.internalNetworkPolicyStore.Get(internalNetworkPolicyKeyFunc(cnp1))
+	require.True(t, exists)
+	require.Equal(t, expectedInternalNetworkPolicy1, actualInternalNetworkPolicy1)
+
+	// cnp2 is synced after the ClusterGroup.
 	expectedInternalNetworkPolicy2 := &antreatypes.NetworkPolicy{
-		UID:  "uid2",
-		Name: "uid2",
+		UID:      "uid2",
+		Name:     "uid2",
+		SpanMeta: antreatypes.SpanMeta{NodeNames: sets.New[string]()},
 		SourceRef: &controlplane.NetworkPolicyReference{
 			Type: controlplane.AntreaClusterNetworkPolicy,
 			Name: "cnp2",
 			UID:  "uid2",
 		},
 		Priority:     &p20,
-		TierPriority: &DefaultTierPriority,
+		TierPriority: ptr.To(crdv1beta1.DefaultTierPriority),
 		Rules: []controlplane.NetworkPolicyRule{
 			{
 				Direction: controlplane.DirectionIn,
@@ -1028,6 +1111,7 @@ func TestSyncInternalGroup(t *testing.T) {
 		},
 		AppliedToGroups: []string{getNormalizedUID(antreatypes.NewGroupSelector("", &selectorC, nil, nil, nil).NormalizedName)},
 	}
+	require.NoError(t, npc.syncInternalNetworkPolicy(getACNPReference(cnp2)))
 	actualInternalNetworkPolicy2, exists, _ := npc.internalNetworkPolicyStore.Get(internalNetworkPolicyKeyFunc(cnp2))
 	require.True(t, exists)
 	assert.Equal(t, expectedInternalNetworkPolicy2, actualInternalNetworkPolicy2)
@@ -1055,14 +1139,17 @@ func TestSyncInternalGroup(t *testing.T) {
 	err = npc.syncInternalGroup(internalGroupKeyFunc(cg))
 	require.NoError(t, err)
 
+	require.Equal(t, 2, npc.internalNetworkPolicyQueue.Len())
 	_, exists, _ = npc.internalGroupStore.Get(internalGroupKeyFunc(cg))
 	require.False(t, exists)
 
+	require.NoError(t, npc.syncInternalNetworkPolicy(getACNPReference(cnp1)))
 	expectedInternalNetworkPolicy1.Rules[0].From.AddressGroups = nil
 	actualInternalNetworkPolicy1, exists, _ = npc.internalNetworkPolicyStore.Get(internalNetworkPolicyKeyFunc(cnp1))
 	require.True(t, exists)
 	assert.Equal(t, expectedInternalNetworkPolicy1, actualInternalNetworkPolicy1)
 
+	require.NoError(t, npc.syncInternalNetworkPolicy(getACNPReference(cnp2)))
 	expectedInternalNetworkPolicy2.Rules[0].From.AddressGroups = nil
 	actualInternalNetworkPolicy2, exists, _ = npc.internalNetworkPolicyStore.Get(internalNetworkPolicyKeyFunc(cnp2))
 	require.True(t, exists)
@@ -1075,12 +1162,12 @@ func TestSyncInternalGroup(t *testing.T) {
 func TestGetClusterGroupSourceRef(t *testing.T) {
 	tests := []struct {
 		name        string
-		group       *crdv1alpha3.ClusterGroup
+		group       *crdv1beta1.ClusterGroup
 		expectedRef *controlplane.GroupReference
 	}{
 		{
 			name: "cg-ref",
-			group: &crdv1alpha3.ClusterGroup{
+			group: &crdv1beta1.ClusterGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "cgA", UID: "uidA"},
 			},
 			expectedRef: &controlplane.GroupReference{
@@ -1094,6 +1181,120 @@ func TestGetClusterGroupSourceRef(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			actualRef := getClusterGroupSourceRef(tt.group)
 			assert.Equal(t, tt.expectedRef, actualRef)
+		})
+	}
+}
+
+func TestGetAssociatedIPBlockGroups(t *testing.T) {
+	cg1 := &crdv1beta1.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "ipBlockGrp1", UID: "UID1"},
+		Spec: crdv1beta1.GroupSpec{
+			IPBlocks: []crdv1beta1.IPBlock{
+				{CIDR: "172.60.0.0/16"},
+			},
+		},
+	}
+	cg2 := &crdv1beta1.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "ipBlockGrp2", UID: "UID2"},
+		Spec: crdv1beta1.GroupSpec{
+			IPBlocks: []crdv1beta1.IPBlock{
+				{CIDR: "172.60.2.0/24"},
+			},
+		},
+	}
+	cg2Parent := &crdv1beta1.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "ipBlockParentGrp", UID: "UID3"},
+		Spec: crdv1beta1.GroupSpec{
+			ChildGroups: []crdv1beta1.ClusterGroupReference{
+				"ipBlockGrp2",
+			},
+		},
+	}
+	cgExceptIPv4 := &crdv1beta1.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "ipBlockExceptV4", UID: "UID4"},
+		Spec: crdv1beta1.GroupSpec{
+			IPBlocks: []crdv1beta1.IPBlock{
+				{
+					CIDR: "192.168.0.0/16",
+					Except: []string{
+						"192.168.3.0/24", "192.168.4.0/24",
+					},
+				},
+			},
+		},
+	}
+	cgExceptIPv6 := &crdv1beta1.ClusterGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "ipBlockExceptV6", UID: "UID5"},
+		Spec: crdv1beta1.GroupSpec{
+			IPBlocks: []crdv1beta1.IPBlock{
+				{
+					CIDR:   "fd00:192:168::/48",
+					Except: []string{"fd00:192:168:3::/64", "fd00:192:168:4::/64"},
+				},
+			},
+		},
+	}
+
+	_, npc := newControllerWithoutEventHandler(nil, []runtime.Object{cg1, cg2, cg2Parent, cgExceptIPv4, cgExceptIPv6})
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	npc.crdInformerFactory.Start(stopCh)
+	npc.crdInformerFactory.WaitForCacheSync(stopCh)
+
+	for _, cg := range []*crdv1beta1.ClusterGroup{cg1, cg2, cg2Parent, cgExceptIPv4, cgExceptIPv6} {
+		npc.addClusterGroup(cg)
+		npc.syncInternalGroup(internalGroupKeyFunc(cg))
+	}
+
+	tests := []struct {
+		name           string
+		ipQuery        net.IP
+		expectedGroups []string
+	}{
+		{
+			name:           "single-group-association",
+			ipQuery:        net.ParseIP("172.60.1.1"),
+			expectedGroups: []string{"ipBlockGrp1"},
+		},
+		{
+			name:           "multiple-group-association",
+			ipQuery:        net.ParseIP("172.60.2.1"),
+			expectedGroups: []string{"ipBlockGrp1", "ipBlockGrp2", "ipBlockParentGrp"},
+		},
+		{
+			name:           "no-group-association",
+			ipQuery:        net.ParseIP("172.160.0.1"),
+			expectedGroups: []string{},
+		},
+		{
+			name:           "group-association-ipv4-group-except",
+			ipQuery:        net.ParseIP("192.168.8.1"),
+			expectedGroups: []string{"ipBlockExceptV4"},
+		},
+		{
+			name:           "no-group-association-ipv4-group-except",
+			ipQuery:        net.ParseIP("192.168.3.1"),
+			expectedGroups: []string{},
+		},
+		{
+			name:           "group-association-ipv6-group-except",
+			ipQuery:        net.ParseIP("fd00:192:168:0::1"),
+			expectedGroups: []string{"ipBlockExceptV6"},
+		},
+		{
+			name:           "no-group-association-ipv6-group-except",
+			ipQuery:        net.ParseIP("fd00:192:168:3:abcd:1234:5678:9abc:def0"),
+			expectedGroups: []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			groups := npc.GetAssociatedIPBlockGroups(tt.ipQuery)
+			var groupNames []string
+			for _, g := range groups {
+				groupNames = append(groupNames, g.SourceReference.ToGroupName())
+			}
+			assert.ElementsMatch(t, groupNames, tt.expectedGroups)
 		})
 	}
 }

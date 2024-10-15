@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -28,7 +29,7 @@ import (
 	"antrea.io/antrea/pkg/util/ip"
 )
 
-func TestGetNodeAddr(t *testing.T) {
+func TestGetNodeAddrs(t *testing.T) {
 	tests := []struct {
 		name         string
 		node         *corev1.Node
@@ -99,7 +100,81 @@ func TestGetNodeAddr(t *testing.T) {
 				},
 			},
 			expectedAddr: nil,
-			expectedErr:  fmt.Errorf("Node foo has neither external ip nor internal ip"),
+			expectedErr:  fmt.Errorf("no IP with type in [InternalIP ExternalIP] was found for Node 'foo'"),
+		},
+		{
+			name: "dual stack Internal IP addresses",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{
+							Type:    corev1.NodeInternalIP,
+							Address: "192.168.10.10",
+						},
+						{
+							Type:    corev1.NodeInternalIP,
+							Address: "abcd::1",
+						},
+					},
+				},
+			},
+			expectedAddr: &ip.DualStackIPs{IPv4: net.ParseIP("192.168.10.10"), IPv6: net.ParseIP("abcd::1")},
+			expectedErr:  nil,
+		},
+		{
+			name: "dual stack external IP addresses",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{
+							Type:    corev1.NodeExternalIP,
+							Address: "1.1.1.1",
+						},
+						{
+							Type:    corev1.NodeExternalIP,
+							Address: "2023::1",
+						},
+					},
+				},
+			},
+			expectedAddr: &ip.DualStackIPs{IPv4: net.ParseIP("1.1.1.1"), IPv6: net.ParseIP("2023::1")},
+			expectedErr:  nil,
+		},
+		{
+			name: "mixed IP addresses",
+			node: &corev1.Node{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo",
+				},
+				Status: corev1.NodeStatus{
+					Addresses: []corev1.NodeAddress{
+						{
+							Type:    corev1.NodeInternalIP,
+							Address: "192.168.10.10",
+						},
+						{
+							Type:    corev1.NodeInternalIP,
+							Address: "abcd::1",
+						},
+						{
+							Type:    corev1.NodeExternalIP,
+							Address: "1.1.1.1",
+						},
+						{
+							Type:    corev1.NodeExternalIP,
+							Address: "2023::1",
+						},
+					},
+				},
+			},
+			expectedAddr: &ip.DualStackIPs{IPv4: net.ParseIP("192.168.10.10"), IPv6: net.ParseIP("abcd::1")},
+			expectedErr:  nil,
 		},
 	}
 	for _, tt := range tests {
@@ -107,6 +182,81 @@ func TestGetNodeAddr(t *testing.T) {
 			addr, err := GetNodeAddrs(tt.node)
 			assert.Equal(t, tt.expectedErr, err)
 			assert.Equal(t, tt.expectedAddr, addr)
+		})
+	}
+}
+
+func TestGetNodeAddrsWithType(t *testing.T) {
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "foo",
+		},
+		Status: corev1.NodeStatus{
+			Addresses: []corev1.NodeAddress{
+				{
+					Type:    corev1.NodeInternalIP,
+					Address: "192.168.10.10",
+				},
+				{
+					Type:    corev1.NodeInternalIP,
+					Address: "192.168.10.11",
+				},
+				{
+					Type:    corev1.NodeInternalIP,
+					Address: "abcd::1",
+				},
+				{
+					Type:    corev1.NodeInternalIP,
+					Address: "abcd::2",
+				},
+				{
+					Type:    corev1.NodeExternalIP,
+					Address: "1.1.1.1",
+				},
+				{
+					Type:    corev1.NodeExternalIP,
+					Address: "2023::1",
+				},
+			},
+		},
+	}
+	tests := []struct {
+		name         string
+		types        []corev1.NodeAddressType
+		expectedAddr *ip.DualStackIPs
+		expectedErr  string
+	}{
+		{
+			name:        "no address type",
+			types:       nil,
+			expectedErr: "at least one Node address type is required",
+		},
+		{
+			name:        "no matching address",
+			types:       []corev1.NodeAddressType{corev1.NodeHostName},
+			expectedErr: "no IP with type in [Hostname] was found for Node 'foo'",
+		},
+		{
+			name:         "correct priority",
+			types:        []corev1.NodeAddressType{corev1.NodeExternalIP, corev1.NodeInternalIP},
+			expectedAddr: &ip.DualStackIPs{IPv4: net.ParseIP("1.1.1.1"), IPv6: net.ParseIP("2023::1")},
+		},
+		{
+			name:         "shoud return the first matching address",
+			types:        []corev1.NodeAddressType{corev1.NodeInternalIP, corev1.NodeExternalIP},
+			expectedAddr: &ip.DualStackIPs{IPv4: net.ParseIP("192.168.10.10"), IPv6: net.ParseIP("abcd::1")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, err := GetNodeAddrsWithType(node, tt.types)
+			if tt.expectedErr != "" {
+				assert.EqualError(t, err, tt.expectedErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectedAddr, addr)
+			}
 		})
 	}
 }
@@ -224,7 +374,7 @@ func TestGetNodeAllAddrs(t *testing.T) {
 	tests := []struct {
 		name          string
 		node          *corev1.Node
-		expectedAddrs sets.String
+		expectedAddrs sets.Set[string]
 		expectedErr   error
 	}{
 		{
@@ -244,7 +394,7 @@ func TestGetNodeAllAddrs(t *testing.T) {
 					},
 				},
 			},
-			expectedAddrs: sets.NewString("172.16.0.1", "192.168.0.1", "10.176.10.10", "1::1", "2001::1"),
+			expectedAddrs: sets.New[string]("172.16.0.1", "192.168.0.1", "10.176.10.10", "1::1", "2001::1"),
 			expectedErr:   nil,
 		},
 		{
@@ -264,7 +414,7 @@ func TestGetNodeAllAddrs(t *testing.T) {
 					},
 				},
 			},
-			expectedAddrs: sets.NewString("192.168.0.1", "1.1.1.1"),
+			expectedAddrs: sets.New[string]("192.168.0.1", "1.1.1.1"),
 			expectedErr:   nil,
 		},
 		{
@@ -283,7 +433,7 @@ func TestGetNodeAllAddrs(t *testing.T) {
 					},
 				},
 			},
-			expectedAddrs: sets.NewString("1.1.1.1"),
+			expectedAddrs: sets.New[string]("1.1.1.1"),
 			expectedErr:   &net.ParseError{Type: "CIDR address", Text: "x"},
 		},
 		{
@@ -303,7 +453,7 @@ func TestGetNodeAllAddrs(t *testing.T) {
 					},
 				},
 			},
-			expectedAddrs: sets.NewString("1.1.1.1", "192.168.0.1"),
+			expectedAddrs: sets.New[string]("1.1.1.1", "192.168.0.1"),
 			expectedErr:   fmt.Errorf("invalid annotation for ip-address on Node node3: x"),
 		},
 		{
@@ -313,8 +463,8 @@ func TestGetNodeAllAddrs(t *testing.T) {
 					Name: "node4",
 				},
 			},
-			expectedAddrs: sets.NewString(),
-			expectedErr:   fmt.Errorf("Node node4 has neither external ip nor internal ip"),
+			expectedAddrs: sets.New[string](),
+			expectedErr:   fmt.Errorf("no IP with type in [InternalIP ExternalIP] was found for Node 'node4'"),
 		},
 	}
 	for _, tt := range tests {

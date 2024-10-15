@@ -230,6 +230,19 @@ func NewReachability(pods []Pod, defaultExpectation PodConnectivityMark) *Reacha
 	return r
 }
 
+func (r *Reachability) NewReachabilityWithSameExpectations() *Reachability {
+	var items []string
+	for _, pod := range r.Pods {
+		items = append(items, string(pod))
+	}
+	return &Reachability{
+		Expected:        r.Expected,
+		Observed:        NewConnectivityTable(items, nil),
+		Pods:            r.Pods,
+		PodsByNamespace: r.PodsByNamespace,
+	}
+}
+
 // ExpectConn is an experimental way to describe connectivity with named fields
 func (r *Reachability) ExpectConn(spec *Connectivity) {
 	if spec.From == "" && spec.To == "" {
@@ -312,6 +325,26 @@ func (r *Reachability) ExpectEgressToNamespace(pod Pod, namespace string, connec
 	}
 }
 
+func (r *Reachability) ExpectNamespaceIngressFromNamespace(dstNamespace, srcNamespace string, connectivity PodConnectivityMark) {
+	dstPods, ok := r.PodsByNamespace[dstNamespace]
+	if !ok {
+		panic(fmt.Errorf("destination Namespace %s is not found", dstNamespace))
+	}
+	for _, p := range dstPods {
+		r.ExpectIngressFromNamespace(p, srcNamespace, connectivity)
+	}
+}
+
+func (r *Reachability) ExpectNamespaceEgressToNamespace(srcNamespace, dstNamespace string, connectivity PodConnectivityMark) {
+	srcPods, ok := r.PodsByNamespace[srcNamespace]
+	if !ok {
+		panic(fmt.Errorf("src Namespace %s is not found", srcNamespace))
+	}
+	for _, p := range srcPods {
+		r.ExpectEgressToNamespace(p, dstNamespace, connectivity)
+	}
+}
+
 func (r *Reachability) Observe(pod1 Pod, pod2 Pod, connectivity PodConnectivityMark) {
 	r.Observed.Set(string(pod1), string(pod2), connectivity)
 }
@@ -347,4 +380,52 @@ func (r *Reachability) PrintSummary(printExpected bool, printObserved bool, prin
 	if printComparison {
 		fmt.Printf("comparison:\n\n%s\n\n\n", comparison.PrettyPrint(""))
 	}
+}
+
+type NPEvalActionType string
+
+const (
+	NPEvalNone    NPEvalActionType = "<NONE>"
+	NPEvalAllow   NPEvalActionType = "Allow"
+	NPEvalDrop    NPEvalActionType = "Drop"
+	NPEvalIsolate NPEvalActionType = "Isolate"
+	NPEvalReject  NPEvalActionType = "Reject"
+)
+
+type NPEvaluationSpec struct {
+	Source      Pod
+	Destination Pod
+	NPName      string
+	Action      NPEvalActionType
+}
+
+type NPEvaluation struct {
+	itemSet    map[string]bool
+	Assertions []*NPEvaluationSpec
+}
+
+func NewNPEvaluation(pods []Pod) *NPEvaluation {
+	itemSet := map[string]bool{}
+	for _, pod := range pods {
+		itemSet[pod.String()] = true
+	}
+	return &NPEvaluation{
+		itemSet:    itemSet,
+		Assertions: []*NPEvaluationSpec{},
+	}
+}
+
+func (e *NPEvaluation) Expect(from, to Pod, npName string, action NPEvalActionType) *NPEvaluation {
+	if _, ok := e.itemSet[from.String()]; !ok {
+		panic(fmt.Errorf("key %s not allowed", from))
+	}
+	if _, ok := e.itemSet[to.String()]; !ok {
+		panic(fmt.Errorf("key %s not allowed", to))
+	}
+	e.Assertions = append(e.Assertions, &NPEvaluationSpec{from, to, npName, action})
+	return e
+}
+
+func (e *NPEvaluation) ExpectNone(from Pod, to Pod) *NPEvaluation {
+	return e.Expect(from, to, string(NPEvalNone), NPEvalNone)
 }

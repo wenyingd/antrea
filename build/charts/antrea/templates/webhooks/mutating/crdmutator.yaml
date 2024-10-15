@@ -4,6 +4,7 @@ metadata:
   name: "crdmutator.antrea.io"
   labels:
     app: antrea
+    served-by: antrea-controller
 webhooks:
   - name: "acnpmutator.antrea.io"
     clientConfig:
@@ -14,22 +15,22 @@ webhooks:
     rules:
       - operations: ["CREATE", "UPDATE"]
         apiGroups: ["crd.antrea.io"]
-        apiVersions: ["v1alpha1"]
+        apiVersions: ["v1beta1"]
         resources: ["clusternetworkpolicies"]
         scope: "Cluster"
     admissionReviewVersions: ["v1", "v1beta1"]
     sideEffects: None
     timeoutSeconds: 5
-  - name: "anpmutator.antrea.io"
+  - name: "annpmutator.antrea.io"
     clientConfig:
       service:
         name: "antrea"
         namespace: {{ .Release.Namespace }}
-        path: "/mutate/anp"
+        path: "/mutate/annp"
     rules:
       - operations: ["CREATE", "UPDATE"]
         apiGroups: ["crd.antrea.io"]
-        apiVersions: ["v1alpha1"]
+        apiVersions: ["v1beta1"]
         resources: ["networkpolicies"]
         scope: "Namespaced"
     admissionReviewVersions: ["v1", "v1beta1"]

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package controller
 
 import (
 	componentbaseconfig "k8s.io/component-base/config"
@@ -61,12 +61,29 @@ type ControllerConfig struct {
 	TLSCipherSuites string `yaml:"tlsCipherSuites,omitempty"`
 	// TLS min version.
 	TLSMinVersion string `yaml:"tlsMinVersion,omitempty"`
-	// Legacy CRD mirroring (deprecated).
-	LegacyCRDMirroring *bool `yaml:"legacyCRDMirroring,omitempty"`
+	// ClientCAFile is the file path of the certificate bundle for all the signers that is recognized for incoming
+	// client certificates.
+	ClientCAFile string `yaml:"clientCAFile,omitempty"`
+	// Provide the address of Kubernetes apiserver, to override any value provided in kubeconfig or InClusterConfig.
+	// It is typically used when kube-proxy is not deployed (replaced by AntreaProxy) and kube-controller-manager
+	// does not run NodeIPAMController (replaced by Antrea NodeIPAM).
+	// Defaults to "". It must be a host string, a host:port pair, or a URL to the base of the apiserver.
+	KubeAPIServerOverride string `yaml:"kubeAPIServerOverride,omitempty"`
 	// NodeIPAM Configuration
 	NodeIPAM NodeIPAMConfig `yaml:"nodeIPAM"`
 	// IPsec CSR signer configuration
 	IPsecCSRSignerConfig IPsecCSRSignerConfig `yaml:"ipsecCSRSigner"`
+	// Multicluster configuration options.
+	Multicluster MulticlusterConfig `yaml:"multicluster,omitempty"`
+}
+
+type MulticlusterConfig struct {
+	// Enable Multi-cluster NetworkPolicy, including ingress rules that select peers from all
+	// clusters in a ClusterSet, and egress rules that select Multi-cluster Services.
+	EnableStretchedNetworkPolicy bool `yaml:"enableStretchedNetworkPolicy,omitempty"`
+	// The Namespace where the Antrea Multi-cluster Controller is running.
+	// The default is antrea-agent's Namespace.
+	Namespace string `yaml:"namespace,omitempty"`
 }
 
 type IPsecCSRSignerConfig struct {

@@ -18,12 +18,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
-	"golang.org/x/exp/rand"
 	corev1 "k8s.io/api/core/v1"
 	networkv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,18 +33,16 @@ import (
 )
 
 const (
-	seed uint64 = 0xA1E47 // Use a specific rand seed to make the generated workloads always same
+	seed = 0xA1E47 // Use a specific rand seed to make the generated workloads always same
 
 	perfTestAppLabel                = "antrea-perf-test"
 	podsConnectionNetworkPolicyName = "pods.ingress"
 	workloadNetworkPolicyName       = "workloads.ingress"
-	perftoolContainerName           = "perftool"
-	nginxContainerName              = "nginx"
 )
 
 var (
-	benchNginxPodName = randName(perftoolContainerName + "-")
-	perftoolPodName   = randName(nginxContainerName + "-")
+	benchNginxPodName = randName(nginxContainerName + "-")
+	toolboxPodName    = randName(toolboxContainerName + "-")
 
 	customizeRequests    = flag.Int("perf.http.requests", 0, "Number of http requests")
 	customizePolicyRules = flag.Int("perf.http.policy_rules", 0, "Number of CIDRs in the network policy")
@@ -95,8 +93,11 @@ func BenchmarkCustomizeRealizeNetworkPolicy(b *testing.B) {
 	withPerfTestSetup(func(data *TestData) { networkPolicyRealize(*customizePolicyRules, data, b) }, b)
 }
 
-func randCidr(rndSrc rand.Source) string {
-	return fmt.Sprintf("%d.%d.%d.%d/32", rndSrc.Uint64()%255+1, rndSrc.Uint64()%255+1, rndSrc.Uint64()%255+1, rndSrc.Uint64()%255+1)
+func randCidr(rnd *rand.Rand) string {
+	getByte := func() int {
+		return rnd.Intn(255) + 1
+	}
+	return fmt.Sprintf("%d.%d.%d.%d/32", getByte(), getByte(), getByte(), getByte())
 }
 
 // createPerfTestPodDefinition creates the Pod specification for the perf test.
@@ -148,12 +149,13 @@ func setupTestPodsConnection(data *TestData) error {
 
 func generateWorkloadNetworkPolicy(policyRules int) *networkv1.NetworkPolicy {
 	ingressRules := make([]networkv1.NetworkPolicyPeer, policyRules)
-	rndSrc := rand.NewSource(seed)
+	// #nosec G404: random number generator not used for security purposes
+	rnd := rand.New(rand.NewSource(seed))
 	existingCIDRs := make(map[string]struct{}) // ensure no duplicated cidrs
 	for i := 0; i < policyRules; i++ {
-		cidr := randCidr(rndSrc)
+		cidr := randCidr(rnd)
 		for _, ok := existingCIDRs[cidr]; ok; {
-			cidr = randCidr(rndSrc)
+			cidr = randCidr(rnd)
 		}
 		existingCIDRs[cidr] = struct{}{}
 		ingressRules[i] = networkv1.NetworkPolicyPeer{IPBlock: &networkv1.IPBlock{CIDR: cidr}}
@@ -187,22 +189,22 @@ func setupTestPods(data *TestData, b *testing.B) (nginxPodIP, perfPodIP *PodIPs)
 		b.Fatalf("Error when waiting for IP assignment of nginx test Pod: %v", err)
 	}
 
-	b.Logf("Creating a perftool test Pod")
-	perfPod := createPerfTestPodDefinition(perftoolPodName, perftoolContainerName, perftoolImage)
+	b.Logf("Creating a toolbox test Pod")
+	perfPod := createPerfTestPodDefinition(toolboxPodName, toolboxContainerName, ToolboxImage)
 	_, err = data.clientset.CoreV1().Pods(data.testNamespace).Create(context.TODO(), perfPod, metav1.CreateOptions{})
 	if err != nil {
-		b.Fatalf("Error when creating perftool test Pod: %v", err)
+		b.Fatalf("Error when creating toolbox test Pod: %v", err)
 	}
-	b.Logf("Waiting for IP assignment of the perftool test Pod")
-	perfPodIP, err = data.podWaitForIPs(defaultTimeout, perftoolPodName, data.testNamespace)
+	b.Logf("Waiting for IP assignment of the toolbox test Pod")
+	perfPodIP, err = data.podWaitForIPs(defaultTimeout, toolboxPodName, data.testNamespace)
 	if err != nil {
-		b.Fatalf("Error when waiting for IP assignment of perftool test Pod: %v", err)
+		b.Fatalf("Error when waiting for IP assignment of toolbox test Pod: %v", err)
 	}
 	return nginxPodIP, perfPodIP
 }
 
-// httpRequest runs a benchmark to measure intra-Node Pod-to-Pod HTTP request performance. It creates one perftool
-// Pod and one Nginx Pod, both on the control-plane Node. The perftool will use apache-bench tool to issue perf.http.requests
+// httpRequest runs a benchmark to measure intra-Node Pod-to-Pod HTTP request performance. It creates one toolbox
+// Pod and one Nginx Pod, both on the control-plane Node. The toolbox will use apache-bench tool to issue perf.http.requests
 // number of requests to the Nginx Pod. The number of concurrent requests will be determined by the value provided with
 // the http.perf.concurrency command-line flag (default is 1, for sequential requests). policyRules indicates how many CIDR
 // rules should be included in the network policy applied to the Pods.
@@ -210,7 +212,7 @@ func httpRequest(requests, policyRules int, data *TestData, b *testing.B) {
 	nginxPodIP, _ := setupTestPods(data, b)
 
 	// performance_test only runs in IPv4 cluster, so here only check the IPv4 address of nginx server Pod.
-	nginxPodIPStr := nginxPodIP.ipv4.String()
+	nginxPodIPStr := nginxPodIP.IPv4.String()
 
 	err := setupTestPodsConnection(data) // enable Pods connectivity policy first
 	if err != nil {
@@ -235,7 +237,7 @@ func httpRequest(requests, policyRules int, data *TestData, b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.Logf("Running http request bench %d/%d", i+1, b.N)
 		cmd := []string{"ab", "-n", fmt.Sprint(requests), "-c", fmt.Sprint(*httpConcurrency), serverURL.String()}
-		stdout, stderr, err := data.RunCommandFromPod(data.testNamespace, perftoolPodName, perftoolContainerName, cmd)
+		stdout, stderr, err := data.RunCommandFromPod(data.testNamespace, toolboxPodName, toolboxContainerName, cmd)
 		if err != nil {
 			b.Errorf("Error when running http request %dx: %v, stdout: %s, stderr: %s\n", requests, err, stdout, stderr)
 		}
@@ -276,7 +278,7 @@ func networkPolicyRealize(policyRules int, data *TestData, b *testing.B) {
 }
 
 func WaitNetworkPolicyRealize(nodeName string, table *openflow.Table, policyRules int, data *TestData) error {
-	return wait.PollImmediate(50*time.Millisecond, *realizeTimeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(context.Background(), 50*time.Millisecond, *realizeTimeout, true, func(ctx context.Context) (bool, error) {
 		return checkRealize(nodeName, table, policyRules, data)
 	})
 }

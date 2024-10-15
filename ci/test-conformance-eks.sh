@@ -21,8 +21,8 @@ function echoerr {
 }
 
 CLUSTER=""
-REGION="us-east-2"
-K8S_VERSION="1.21"
+REGION="us-west-2"
+K8S_VERSION="1.27"
 AWS_NODE_TYPE="t3.medium"
 SSH_KEY_PATH="$HOME/.ssh/id_rsa.pub"
 SSH_PRIVATE_KEY_PATH="$HOME/.ssh/id_rsa"
@@ -34,24 +34,29 @@ MODE="report"
 TEST_SCRIPT_RC=0
 KUBE_CONFORMANCE_IMAGE_VERSION=auto
 INSTALL_EKSCTL=true
+AWS_SERVICE_USER_ROLE_ARN=""
+AWS_SERVICE_USER_NAME=""
 
 _usage="Usage: $0 [--cluster-name <EKSClusterNameToUse>] [--kubeconfig <KubeconfigSavePath>] [--k8s-version <ClusterVersion>]\
-                  [--aws-access-key <AccessKey>] [--aws-secret-key <SecretKey>] [--aws-region <Region>] [--ssh-key <SSHKey] \
-                  [--ssh-private-key <SSHPrivateKey] [--log-mode <SonobuoyResultLogLevel>] [--setup-only] [--cleanup-only]
+                  [--aws-access-key <AccessKey>] [--aws-secret-key <SecretKey>] [--aws-region <Region>] [--aws-service-user <ServiceUserName>]\
+                  [--aws-service-user-role-arn <ServiceUserRoleARN>] [--ssh-key <SSHKey] [--ssh-private-key <SSHPrivateKey] [--log-mode <SonobuoyResultLogLevel>]\
+                  [--setup-only] [--cleanup-only]
 
 Setup a EKS cluster to run K8s e2e community tests (Conformance & Network Policy).
 
-        --cluster-name           The cluster name to be used for the generated EKS cluster. Must be specified if not run in Jenkins environment.
-        --kubeconfig             Path to save kubeconfig of generated EKS cluster.
-        --k8s-version            GKE K8s cluster version. Defaults to 1.17.
-        --aws-access-key         AWS Acess Key for logging in to awscli.
-        --aws-secret-key         AWS Secret Key for logging in to awscli.
-        --aws-region             The AWS region where the cluster will be initiated. Defaults to us-east-2.
-        --ssh-key                The path of key to be used for ssh access to worker nodes.
-        --log-mode               Use the flag to set either 'report', 'detail', or 'dump' level data for sonobouy results.
-        --setup-only             Only perform setting up the cluster and run test.
-        --cleanup-only           Only perform cleaning up the cluster.
-        --skip-eksctl-install    Do not install the latest eksctl version. Eksctl must be installed already."
+        --cluster-name                The cluster name to be used for the generated EKS cluster. Must be specified if not run in Jenkins environment.
+        --kubeconfig                  Path to save kubeconfig of generated EKS cluster.
+        --k8s-version                 EKS K8s cluster version. Defaults to $K8S_VERSION.
+        --aws-access-key              AWS Acess Key for logging in to awscli.
+        --aws-secret-key              AWS Secret Key for logging in to awscli.
+        --aws-service-user-role-arn   AWS Service User Role ARN for logging in to awscli.
+        --aws-service-user            AWS Service User Name for logging in to awscli.
+        --aws-region                  The AWS region where the cluster will be initiated. Defaults to us-east-2.
+        --ssh-key                     The path of key to be used for ssh access to worker nodes.
+        --log-mode                    Use the flag to set either 'report', 'detail', or 'dump' level data for sonobuoy results.
+        --setup-only                  Only perform setting up the cluster and run test.
+        --cleanup-only                Only perform cleaning up the cluster.
+        --skip-eksctl-install         Do not install the latest eksctl version. Eksctl must be installed already."
 
 function print_usage {
     echoerr "$_usage"
@@ -76,6 +81,14 @@ case $key in
     ;;
     --aws-secret-key)
     AWS_SECRET_KEY="$2"
+    shift 2
+    ;;
+    --aws-service-user-role-arn)
+    AWS_SERVICE_USER_ROLE_ARN="$2"
+    shift 2
+    ;;
+    --aws-service-user)
+    AWS_SERVICE_USER_NAME="$2"
     shift 2
     ;;
     --aws-region)
@@ -150,6 +163,7 @@ managedNodeGroups:
     instanceType: ${AWS_NODE_TYPE}
     desiredCapacity: 2
     ami: ${AMI_ID}
+    amiFamily: AmazonLinux2
     ssh:
       allow: true
       publicKeyPath: ${SSH_KEY_PATH}
@@ -173,12 +187,37 @@ function setup_eks() {
     aws --version
 
     set +e
-    aws configure << EOF
-${AWS_ACCESS_KEY}
-${AWS_SECRET_KEY}
-${REGION}
-JSON
+    if [[ "$AWS_SERVICE_USER_ROLE_ARN" != "" ]] && [[ "$AWS_SERVICE_USER_NAME" != "" ]]; then
+        mkdir -p ~/.aws
+        cat > ~/.aws/config <<EOF
+[default]
+region = $REGION
+role_arn = $AWS_SERVICE_USER_ROLE_ARN
+source_profile = $AWS_SERVICE_USER_NAME
+output = json
 EOF
+        cat > ~/.aws/credentials <<EOF
+[$AWS_SERVICE_USER_NAME]
+aws_access_key_id = $AWS_ACCESS_KEY
+aws_secret_access_key = $AWS_SECRET_KEY
+EOF
+    elif [[ "$AWS_SERVICE_USER_ROLE_ARN" = "" ]] && [[ "$AWS_SERVICE_USER_NAME" = "" ]]; then
+        mkdir -p ~/.aws
+        cat > ~/.aws/config <<EOF
+[default]
+region = $REGION
+output = json
+EOF
+        cat > ~/.aws/credentials <<EOF
+[default]
+aws_access_key_id = $AWS_ACCESS_KEY
+aws_secret_access_key = $AWS_SECRET_KEY
+EOF
+    else
+        echo "Invalid input either specify both aws-service-user-role-arn and aws-service-user or none."
+        exit 1
+    fi
+
     if [[ "$INSTALL_EKSCTL" == true ]]; then
         echo "=== Installing latest version of eksctl ==="
         curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
@@ -222,31 +261,37 @@ function deliver_antrea_to_eks() {
     export PATH=${GOROOT}/bin:$PATH
 
     make clean -C ${GIT_CHECKOUT_DIR}
+    # The cleanup and stats are best-effort.
+    set +e
     if [[ -n ${JOB_NAME+x} ]]; then
-        docker images | grep "${JOB_NAME}" | awk '{print $3}' | xargs -r docker rmi -f || true > /dev/null
+        docker images --format "{{.Repository}}:{{.Tag}}" | grep "${JOB_NAME}" | xargs -r docker rmi -f > /dev/null
     fi
     # Clean up dangling images generated in previous builds. Recent ones must be excluded
     # because they might be being used in other builds running simultaneously.
-    docker image prune -f --filter "until=2h" || true > /dev/null
+    docker image prune -af --filter "until=2h" > /dev/null
+    docker system df -v
+    check_and_cleanup_docker_build_cache
+    set -e
 
     cd ${GIT_CHECKOUT_DIR}
-    VERSION="$CLUSTER" make
+    VERSION="$CLUSTER" ./hack/build-antrea-linux-all.sh --pull
     if [[ "$?" -ne "0" ]]; then
         echo "=== Antrea Image build failed ==="
         exit 1
     fi
 
     echo "=== Loading the Antrea image to each Node ==="
-    antrea_image="antrea-ubuntu"
+    antrea_images_tar="antrea-ubuntu.tar"
     DOCKER_IMG_VERSION=${CLUSTER}
-    DOCKER_IMG_NAME="projects.registry.vmware.com/antrea/antrea-ubuntu"
-    docker save -o ${antrea_image}.tar ${DOCKER_IMG_NAME}:${DOCKER_IMG_VERSION}
+    DOCKER_AGENT_IMG_NAME="antrea/antrea-agent-ubuntu"
+    DOCKER_CONTROLLER_IMG_NAME="antrea/antrea-controller-ubuntu"
+    docker save -o ${antrea_images_tar} ${DOCKER_AGENT_IMG_NAME}:${DOCKER_IMG_VERSION} ${DOCKER_CONTROLLER_IMG_NAME}:${DOCKER_IMG_VERSION}
 
     kubectl get nodes -o wide --no-headers=true | awk '{print $7}' | while read IP; do
-        scp -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} ${antrea_image}.tar ec2-user@${IP}:~
-        ssh -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} -n ec2-user@${IP} "sudo ctr -n=k8s.io images import ~/${antrea_image}.tar ; sudo ctr -n=k8s.io images tag ${DOCKER_IMG_NAME}:${DOCKER_IMG_VERSION} ${DOCKER_IMG_NAME}:latest --force"
+        scp -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} ${antrea_images_tar} ec2-user@${IP}:~
+        ssh -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} -n ec2-user@${IP} "sudo ctr -n=k8s.io images import ~/${antrea_images_tar} ; sudo ctr -n=k8s.io images tag docker.io/${DOCKER_AGENT_IMG_NAME}:${DOCKER_IMG_VERSION} docker.io/${DOCKER_AGENT_IMG_NAME}:latest --force ; sudo ctr -n=k8s.io images tag docker.io/${DOCKER_CONTROLLER_IMG_NAME}:${DOCKER_IMG_VERSION} docker.io/${DOCKER_CONTROLLER_IMG_NAME}:latest --force"
     done
-    rm ${antrea_image}.tar
+    rm ${antrea_images_tar}
 
     echo "=== Configuring Antrea for cluster ==="
     kubectl apply -f ${GIT_CHECKOUT_DIR}/build/yamls/antrea-eks-node-init.yml
@@ -264,10 +309,11 @@ function run_conformance() {
     # access through node external IP. See https://github.com/antrea-io/antrea/issues/690
     skip_regex="\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[sig-cli\]|\[sig-storage\]|\[sig-auth\]|\[sig-api-machinery\]|\[sig-apps\]|\[sig-node\]|\[sig-instrumentation\]|NodePort"
     ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-conformance --e2e-skip ${skip_regex} \
-      --kube-conformance-image-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
+      --kubernetes-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
       --log-mode ${MODE} > ${GIT_CHECKOUT_DIR}/eks-test.log && \
-    ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-network-policy --e2e-skip "Netpol" \
-      --kube-conformance-image-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
+    # Skip legacy NetworkPolicy tests
+    ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-network-policy --e2e-skip "NetworkPolicyLegacy" \
+      --kubernetes-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
       --log-mode ${MODE} >> ${GIT_CHECKOUT_DIR}/eks-test.log || \
     TEST_SCRIPT_RC=$?
 
@@ -312,6 +358,8 @@ function cleanup_cluster() {
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 GIT_CHECKOUT_DIR=${THIS_DIR}/..
 pushd "$THIS_DIR" > /dev/null
+
+source ${THIS_DIR}/jenkins/utils.sh
 
 if [[ "$RUN_ALL" == true || "$RUN_SETUP_ONLY" == true ]]; then
     setup_eks

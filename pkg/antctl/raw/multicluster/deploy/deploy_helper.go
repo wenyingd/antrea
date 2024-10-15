@@ -18,8 +18,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -32,35 +33,38 @@ import (
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 
 	"antrea.io/antrea/pkg/antctl/raw"
+	"antrea.io/antrea/pkg/antctl/raw/multicluster/common"
 )
 
 const (
 	leaderRole = "leader"
 	memberRole = "member"
 
-	latestVersionURL     = "https://raw.githubusercontent.com/antrea-io/antrea/main/multicluster/build/yamls"
-	downloadURL          = "https://github.com/antrea-io/antrea/releases/download"
-	leaderGlobalYAML     = "antrea-multicluster-leader-global.yml"
-	leaderNamespacedYAML = "antrea-multicluster-leader-namespaced.yml"
-	memberYAML           = "antrea-multicluster-member.yml"
+	latestVersionURL = "https://raw.githubusercontent.com/antrea-io/antrea/main/multicluster/build/yamls"
+	downloadURL      = "https://github.com/antrea-io/antrea/releases/download"
+	leaderYAML       = "antrea-multicluster-leader.yml"
+	memberYAML       = "antrea-multicluster-member.yml"
 )
+
+var httpGet = http.Get
+var getAPIGroupResources = getAPIGroupResourcesWrapper
 
 func generateManifests(role string, version string) ([]string, error) {
 	var manifests []string
+	if version != "latest" && !strings.HasPrefix(version, "v") {
+		version = fmt.Sprintf("v%s", version)
+	}
 	switch role {
 	case leaderRole:
 		manifests = []string{
-			fmt.Sprintf("%s/%s", latestVersionURL, leaderGlobalYAML),
-			fmt.Sprintf("%s/%s", latestVersionURL, leaderNamespacedYAML),
+			fmt.Sprintf("%s/%s", latestVersionURL, leaderYAML),
 		}
 		if version != "latest" {
 			manifests = []string{
-				fmt.Sprintf("%s/%s/%s", downloadURL, version, leaderGlobalYAML),
-				fmt.Sprintf("%s/%s/%s", downloadURL, version, leaderNamespacedYAML),
+				fmt.Sprintf("%s/%s/%s", downloadURL, version, leaderYAML),
 			}
 		}
 	case memberRole:
@@ -73,30 +77,15 @@ func generateManifests(role string, version string) ([]string, error) {
 			}
 		}
 	default:
-		return manifests, fmt.Errorf("invalid role %s", role)
+		return nil, fmt.Errorf("invalid role: %s", role)
 	}
-
 	return manifests, nil
 }
 
-func createResources(cmd *cobra.Command, content []byte) error {
-	kubeconfig, err := raw.ResolveKubeconfig(cmd)
-	if err != nil {
-		return err
-	}
-	restconfigTmpl := rest.CopyConfig(kubeconfig)
-	raw.SetupKubeconfig(restconfigTmpl)
-
-	k8sClient, err := kubernetes.NewForConfig(kubeconfig)
-	if err != nil {
-		return err
-	}
-	dynamicClient, err := dynamic.NewForConfig(kubeconfig)
-	if err != nil {
-		return err
-	}
-
+func createResources(cmd *cobra.Command, apiGroupResources []*restmapper.APIGroupResources, dynamicClient dynamic.Interface, content []byte) error {
+	var err error
 	decoder := yamlutil.NewYAMLOrJSONDecoder(bytes.NewReader([]byte(content)), 100)
+	unstructuredObjs := map[dynamic.ResourceInterface]*unstructured.Unstructured{}
 	for {
 		var rawObj runtime.RawExtension
 		if err = decoder.Decode(&rawObj); err != nil {
@@ -113,43 +102,73 @@ func createResources(cmd *cobra.Command, content []byte) error {
 		}
 
 		unstructuredObj := &unstructured.Unstructured{Object: unstructuredMap}
-
-		gr, err := restmapper.GetAPIGroupResources(k8sClient.Discovery())
-		if err != nil {
-			return err
-		}
-
-		mapper := restmapper.NewDiscoveryRESTMapper(gr)
+		mapper := restmapper.NewDiscoveryRESTMapper(apiGroupResources)
 		mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 		if err != nil {
 			return err
 		}
-
 		var dri dynamic.ResourceInterface
 		if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
 			dri = dynamicClient.Resource(mapping.Resource).Namespace(unstructuredObj.GetNamespace())
 		} else {
 			dri = dynamicClient.Resource(mapping.Resource)
 		}
+		unstructuredObjs[dri] = unstructuredObj
+	}
 
+	for dri, unstructuredObj := range unstructuredObjs {
 		if _, err := dri.Create(context.TODO(), unstructuredObj, metav1.CreateOptions{}); err != nil {
 			if !kerrors.IsAlreadyExists(err) {
 				return err
 			}
+			existingRes, err := dri.Get(context.TODO(), unstructuredObj.GetName(), metav1.GetOptions{})
+			if err != nil {
+				return err
+			}
+			existingVersion := existingRes.GetResourceVersion()
+			unstructuredObj.SetResourceVersion(existingVersion)
+			var updatedObj *unstructured.Unstructured
+			if updatedObj, err = dri.Update(context.TODO(), unstructuredObj, metav1.UpdateOptions{}); err != nil {
+				return err
+			}
+			if updatedObj.GetResourceVersion() != existingVersion {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s/%s configured\n", unstructuredObj.GetKind(), unstructuredObj.GetName())
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s/%s unchanged\n", unstructuredObj.GetKind(), unstructuredObj.GetName())
+			}
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s/%s created\n", unstructuredObj.GetKind(), unstructuredObj.GetName())
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s/%s created\n", unstructuredObj.GetKind(), unstructuredObj.GetName())
 	}
-
 	return nil
 }
 
 func deploy(cmd *cobra.Command, role string, version string, namespace string, filename string) error {
+	kubeconfig, err := raw.ResolveKubeconfig(cmd)
+	if err != nil {
+		return err
+	}
+
+	k8sClient, err := kubernetes.NewForConfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+	dynamicClient, err := dynamic.NewForConfig(kubeconfig)
+	if err != nil {
+		return err
+	}
+
+	apiGroupResources, err := getAPIGroupResources(k8sClient)
+	if err != nil {
+		return err
+	}
+
 	if filename != "" {
-		content, err := ioutil.ReadFile(filename)
+		content, err := os.ReadFile(filename)
 		if err != nil {
 			return err
 		}
-		if err := createResources(cmd, content); err != nil {
+		if err := createResources(cmd, apiGroupResources, dynamicClient, content); err != nil {
 			return err
 		}
 	} else {
@@ -159,29 +178,34 @@ func deploy(cmd *cobra.Command, role string, version string, namespace string, f
 		}
 		for _, manifest := range manifests {
 			// #nosec G107
-			resp, err := http.Get(manifest)
+			resp, err := httpGet(manifest)
+			if resp.StatusCode == 404 {
+				return fmt.Errorf("manifest %s not found", manifest)
+			}
 			if err != nil {
 				return err
 			}
-			b, err := ioutil.ReadAll(resp.Body)
+			b, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return err
 			}
 
 			content := string(b)
-			if role == leaderRole && strings.Contains(manifest, "namespaced") {
-				content = strings.ReplaceAll(content, "antrea-multicluster", namespace)
+			if role == leaderRole && strings.Contains(manifest, "namespaced") && namespace != common.DefaultLeaderNamespace {
+				content = strings.ReplaceAll(content, common.DefaultLeaderNamespace, namespace)
 			}
-			if role == memberRole && strings.Contains(manifest, "member") {
-				content = strings.ReplaceAll(content, "kube-system", namespace)
+			if role == memberRole && strings.Contains(manifest, "member") && namespace != common.DefaultMemberNamespace {
+				content = strings.ReplaceAll(content, common.DefaultMemberNamespace, namespace)
 			}
-
-			if err := createResources(cmd, []byte(content)); err != nil {
+			if err := createResources(cmd, apiGroupResources, dynamicClient, []byte(content)); err != nil {
 				return err
 			}
 		}
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "The %s cluster resources are deployed\n", role)
-
+	fmt.Fprintf(cmd.OutOrStdout(), "Antrea Multi-cluster successfully deployed\n")
 	return nil
+}
+
+func getAPIGroupResourcesWrapper(k8sClient kubernetes.Interface) ([]*restmapper.APIGroupResources, error) {
+	return restmapper.GetAPIGroupResources(k8sClient.Discovery())
 }

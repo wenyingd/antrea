@@ -45,7 +45,7 @@ Setup a AKS cluster to run K8s e2e community tests (Conformance & Network Policy
         --azure-tenant-id        Azure Service Principal Tenant ID.
         --azure-password         Azure Service Principal Password.
         --aks-region             The Azure region where the cluster will be initiated. Defaults to westus.
-        --log-mode               Use the flag to set either 'report', 'detail', or 'dump' level data for sonobouy results.
+        --log-mode               Use the flag to set either 'report', 'detail', or 'dump' level data for sonobuoy results.
         --setup-only             Only perform setting up the cluster and run test.
         --cleanup-only           Only perform cleaning up the cluster."
 
@@ -183,15 +183,22 @@ function deliver_antrea_to_aks() {
         GIT_CHECKOUT_DIR=..
     fi
     make clean -C ${GIT_CHECKOUT_DIR}
+
+    # The cleanup and stats are best-effort.
+    set +e
     if [[ -n ${JOB_NAME+x} ]]; then
-        docker images | grep "${JOB_NAME}" | awk '{print $3}' | xargs -r docker rmi -f || true > /dev/null
+       docker images --format "{{.Repository}}:{{.Tag}}" | grep "${JOB_NAME}" | xargs -r docker rmi -f > /dev/null
     fi
     # Clean up dangling images generated in previous builds. Recent ones must be excluded
     # because they might be being used in other builds running simultaneously.
-    docker image prune -f --filter "until=2h" || true > /dev/null
+    docker image prune -af --filter "until=2h" > /dev/null
+    docker system df -v
+    check_and_cleanup_docker_build_cache
+
+    set -e
 
     cd ${GIT_CHECKOUT_DIR}
-    VERSION="$CLUSTER" make
+    VERSION="$CLUSTER" ./hack/build-antrea-linux-all.sh --pull
     if [[ "$?" -ne "0" ]]; then
         echo "=== Antrea Image build failed ==="
         exit 1
@@ -199,10 +206,11 @@ function deliver_antrea_to_aks() {
 
     echo "=== Loading the Antrea image to each Node ==="
 
-    antrea_image="antrea-ubuntu"
+    antrea_images_tar="antrea-ubuntu.tar"
     DOCKER_IMG_VERSION=${CLUSTER}
-    DOCKER_IMG_NAME="projects.registry.vmware.com/antrea/antrea-ubuntu"
-    docker save -o ${antrea_image}.tar ${DOCKER_IMG_NAME}:${DOCKER_IMG_VERSION}
+    DOCKER_AGENT_IMG_NAME="antrea/antrea-agent-ubuntu"
+    DOCKER_CONTROLLER_IMG_NAME="antrea/antrea-controller-ubuntu"
+    docker save -o ${antrea_images_tar} ${DOCKER_AGENT_IMG_NAME}:${DOCKER_IMG_VERSION} ${DOCKER_CONTROLLER_IMG_NAME}:${DOCKER_IMG_VERSION}
 
     CLUSTER_RESOURCE_GROUP=$(az aks show --resource-group ${RESOURCE_GROUP} --name ${CLUSTER} --query nodeResourceGroup -o tsv)
     SCALE_SET_NAME=$(az vmss list --resource-group ${CLUSTER_RESOURCE_GROUP} --query [0].name -o tsv)
@@ -216,10 +224,10 @@ function deliver_antrea_to_aks() {
     sleep 30
 
     for IP in ${NODE_IPS}; do
-        scp -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} ${antrea_image}.tar azureuser@${IP}:~
-        ssh -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} -n azureuser@${IP} "sudo ctr -n=k8s.io images import ~/${antrea_image}.tar ; sudo ctr -n=k8s.io images tag ${DOCKER_IMG_NAME}:${DOCKER_IMG_VERSION} ${DOCKER_IMG_NAME}:latest"
+        scp -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} ${antrea_images_tar} azureuser@${IP}:~
+        ssh -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} -n azureuser@${IP} "sudo ctr -n=k8s.io images import ~/${antrea_images_tar} ; sudo ctr -n=k8s.io images tag docker.io/${DOCKER_AGENT_IMG_NAME}:${DOCKER_IMG_VERSION} docker.io/${DOCKER_AGENT_IMG_NAME}:latest ; sudo ctr -n=k8s.io images tag docker.io/${DOCKER_CONTROLLER_IMG_NAME}:${DOCKER_IMG_VERSION} docker.io/${DOCKER_CONTROLLER_IMG_NAME}:latest"
     done
-    rm ${antrea_image}.tar
+    rm ${antrea_images_tar}
 
     echo "=== Configuring Antrea for AKS cluster ==="
 
@@ -249,10 +257,10 @@ function run_conformance() {
     # through public IPs by default. See https://github.com/antrea-io/antrea/issues/2409
     skip_regex="\[Slow\]|\[Serial\]|\[Disruptive\]|\[Flaky\]|\[Feature:.+\]|\[sig-cli\]|\[sig-storage\]|\[sig-auth\]|\[sig-api-machinery\]|\[sig-apps\]|\[sig-node\]|\[sig-instrumentation\]|NodePort"
     ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-conformance --e2e-skip ${skip_regex} \
-      --kube-conformance-image-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
+      --kubernetes-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
       --log-mode ${MODE} > ${GIT_CHECKOUT_DIR}/aks-test.log && \
-    ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-network-policy --e2e-skip "Netpol" \
-      --kube-conformance-image-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
+    ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-network-policy --e2e-skip "\[Feature:SCTPConnectivity\]|Netpol" \
+      --kubernetes-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
       --log-mode ${MODE} >> ${GIT_CHECKOUT_DIR}/aks-test.log || \
     TEST_SCRIPT_RC=$?
 
@@ -296,6 +304,8 @@ function cleanup_cluster() {
 THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 GIT_CHECKOUT_DIR=${THIS_DIR}/..
 pushd "$THIS_DIR" > /dev/null
+
+source ${THIS_DIR}/jenkins/utils.sh
 
 if [[ "$RUN_ALL" == true || "$RUN_SETUP_ONLY" == true ]]; then
     setup_aks

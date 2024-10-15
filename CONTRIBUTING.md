@@ -168,22 +168,41 @@ Here are the trigger phrases for individual checks:
 * `/test-windows-e2e`: Windows IPv4 e2e tests
 * `/test-windows-conformance`: Windows IPv4 conformance tests
 * `/test-windows-networkpolicy`: Windows IPv4 networkpolicy tests
-* `/test-windows-proxyall-e2e`: Windows IPv4 e2e tests with proxyAll enabled
 * `/test-ipv6-e2e`: Linux dual stack e2e tests
 * `/test-ipv6-conformance`: Linux dual stack conformance tests
-* `/test-ipv6-networkpolicy`: dLinux ual stack networkpolicy tests
+* `/test-ipv6-networkpolicy`: Linux dual stack networkpolicy tests
 * `/test-ipv6-only-e2e`: Linux IPv6 only e2e tests
 * `/test-ipv6-only-conformance`: Linux IPv6 only conformance tests
 * `/test-ipv6-only-networkpolicy`: Linux IPv6 only networkpolicy tests
 * `/test-flexible-ipam-e2e`: Flexible IPAM e2e tests
 * `/test-multicast-e2e`: Multicast e2e tests
+* `/test-multicluster-e2e`: Multicluster e2e tests
+* `/test-vm-e2e`: ExternalNode e2e tests
+* `/test-whole-conformance`: All conformance tests on Linux
+* `/test-hw-offload`: Hardware offloading e2e tests
+* `/test-rancher-e2e`: Linux IPv4 e2e tests on Rancher clusters.
+* `/test-rancher-conformance`: Linux IPv4 conformance tests on Rancher clusters.
+* `/test-rancher-networkpolicy`: Linux IPv4 networkpolicy tests on Rancher clusters.
+* `/test-kind-e2e`: Linux IPv4 e2e tests on Kind cluster.
+* `/test-kind-ipv6-e2e`: Linux dual stack e2e tests on Kind cluster.
+* `/test-kind-ipv6-only-e2e`: Linux IPv6 only e2e tests on Kind cluster.
+* `/test-kind-conformance`: Linux IPv4 conformance tests on Kind cluster.
+* `/test-kind-ipv6-only-conformance`: Linux IPv6 only conformance tests on Kind cluster.
+* `/test-kind-ipv6-conformance`: Linux dual stack conformance tests on Kind cluster.
+* `/test-kind-networkpolicy`: Linux IPv4 networkpolicy tests on Kind cluster.
+* `/test-kind-ipv6-only-networkpolicy`: Linux IPv6 only networkpolicy tests on Kind cluster.
+* `/test-kind-ipv6-networkpolicy`: Linux dual stack networkpolicy tests on Kind cluster.
+* `/test-kind-flexible-ipam-e2e`: Flexible IPAM e2e tests on Kind clusters.
 
 Here are the trigger phrases for groups of checks:
 
 * `/test-all`: Linux IPv4 tests
-* `/test-windows-all`: Windows IPv4 tests, including e2e tests with proxyAll enabled
+* `/test-kind-all`: Linux IPv4 tests on Kind cluster
+* `/test-windows-all`: Windows IPv4 tests, including e2e tests with proxyAll enabled. It also includes all containerd runtime based Windows tests since 1.10.0.
 * `/test-ipv6-all`: Linux dual stack tests
 * `/test-ipv6-only-all`: Linux IPv6 only tests
+* `/test-kind-ipv6-only-all`: Linux IPv6 only tests on Kind cluster.
+* `/test-kind-ipv6-all`: Linux dual stack tests on Kind cluster.
 
 Besides, you can skip a check with `/skip-*`, e.g. `/skip-e2e`: skip Linux IPv4
 e2e tests.
@@ -195,6 +214,9 @@ specific function. For example:
 * comment change: skip all checks
 * test/e2e/* change: skip conformance and networkpolicy checks
 * *_windows.go change: skip Linux checks
+
+Besides skipping specific checks you can also cancel all stale running or waiting capv jenkins jobs related to your PR with
+`/stop-all-jobs`.
 
 For more information about the tests we run as part of CI, please refer to
 [ci/README.md](ci/README.md).
@@ -233,7 +255,7 @@ do:
 2. Run `make`
 
 The second step will compile the Antrea code in a `golang` container, and build
-a `Ubuntu 20.04` Docker image that includes all the generated binaries. [`Docker`](https://docs.docker.com/install)
+an Ubuntu-based Docker image that includes all the generated binaries. [`Docker`](https://docs.docker.com/install)
 must be installed on your local machine in advance. If you are a macOS user and
 cannot use [Docker Desktop](https://www.docker.com/products/docker-desktop) to
 contribute to Antrea for licensing reasons, check out this
@@ -247,7 +269,7 @@ the `$GOPATH`.
 
 To develop locally, you can follow these steps:
 
- 1. [Install Go 1.17](https://golang.org/doc/install)
+ 1. [Install Go 1.21](https://golang.org/doc/install)
  2. Checkout your feature branch and `cd` into it.
  3. To build all Go files and install them under `bin`, run `make bin`
  4. To run all Go unit tests, run `make test-unit`
@@ -357,10 +379,10 @@ labels are included on your issue:
   will ensure the appropriate reviewers shepherd the issue or PR through to its
   closure. For an overview of areas, see the
   [`docs/github-labels.md`](docs/contributors/github-labels.md).
-* **size** (optional) -- if you have an idea of the size (lines of code, complexity,
-  effort) of the issue, you can label it using a [size label](#size). The size
-  can be updated during backlog grooming by contributors. This estimate is used
-  to guide the number of features selected for a milestone.
+* **size** (optional) -- if you have an idea of the size (lines of code,
+  complexity, effort) of the issue, you can label it using a size label. The
+  size can be updated during backlog grooming by contributors. This estimate is
+  used to guide the number of features selected for a milestone.
 
 All other labels will be assigned during issue triage.
 

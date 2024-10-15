@@ -41,7 +41,7 @@ type ndpConn interface {
 type ndpResponder struct {
 	iface           *net.Interface
 	conn            ndpConn
-	assignedIPs     sets.String
+	assignedIPs     sets.Set[string]
 	multicastGroups map[int]int
 	mutex           sync.Mutex
 }
@@ -65,27 +65,12 @@ func NewNDPResponder(iface *net.Interface) (*ndpResponder, error) {
 		iface:           iface,
 		conn:            conn,
 		multicastGroups: make(map[int]int),
-		assignedIPs:     sets.NewString(),
+		assignedIPs:     sets.New[string](),
 	}, nil
 }
 
 func (r *ndpResponder) InterfaceName() string {
 	return r.iface.Name
-}
-
-// advertise sends Neighbor Advertisement for the IP.
-func (r *ndpResponder) advertise(ip net.IP) error {
-	na := &ndp.NeighborAdvertisement{
-		Override:      true,
-		TargetAddress: ip,
-		Options: []ndp.Option{
-			&ndp.LinkLayerAddress{
-				Direction: ndp.Target,
-				Addr:      r.iface.HardwareAddr,
-			},
-		},
-	}
-	return r.conn.WriteTo(na, nil, net.IPv6linklocalallnodes)
 }
 
 func (r *ndpResponder) handleNeighborSolicitation() error {
@@ -172,9 +157,6 @@ func (r *ndpResponder) AddIP(ip net.IP) error {
 		return nil
 	}(); err != nil {
 		return err
-	}
-	if err := r.advertise(ip); err != nil {
-		klog.ErrorS(err, "Failed to advertise", "ip", ip, "interface", r.iface.Name)
 	}
 	return nil
 }

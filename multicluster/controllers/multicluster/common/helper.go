@@ -13,34 +13,33 @@ limitations under the License.
 
 package common
 
-import corev1 "k8s.io/api/core/v1"
+import (
+	"crypto/sha1" // #nosec G505: not used for security purposes
+	"encoding/hex"
+	"time"
 
-const (
-	AntreaMCServiceAnnotation = "multicluster.antrea.io/imported-service"
-	AntreaMCACNPAnnotation    = "multicluster.antrea.io/imported-acnp"
-	GatewayAnnotation         = "multicluster.antrea.io/gateway"
-	GatewayIPAnnotation       = "multicluster.antrea.io/gateway-ip"
-
-	AntreaMCSPrefix                = "antrea-mc-"
-	ServiceKind                    = "Service"
-	EndpointsKind                  = "Endpoints"
-	AntreaClusterNetworkPolicyKind = "AntreaClusterNetworkPolicy"
-	ServiceImportKind              = "ServiceImport"
-	ClusterInfoKind                = "ClusterInfo"
-
-	SourceName      = "sourceName"
-	SourceNamespace = "sourceNamespace"
-	SourceClusterID = "sourceClusterID"
-	SourceKind      = "sourceKind"
-
-	DefaultWorkerCount = 5
-
-	ResourceExportFinalizer = "resourceexport.finalizers.antrea.io"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
+
+const labelIdentityHashLength = 16
+
+// CleanUpRetry is the retry when the clean up method
+// failed to clean up all stale resources.
+var CleanUpRetry = wait.Backoff{
+	Steps:    12,
+	Duration: 500 * time.Millisecond,
+	Factor:   2.0,
+	Jitter:   1,
+}
 
 // TODO: Use NamespacedName stringer method instead of this. e.g. nsName.String()
 func NamespacedName(namespace, name string) string {
 	return namespace + "/" + name
+}
+
+func ToMCResourceName(originalResourceName string) string {
+	return AntreaMCSPrefix + originalResourceName
 }
 
 func StringExistsInSlice(slice []string, s string) bool {
@@ -60,26 +59,6 @@ func RemoveStringFromSlice(slice []string, s string) (result []string) {
 		result = append(result, item)
 	}
 	return
-}
-
-// FilterEndpointSubsets keeps IPs only and removes others which are unnecessary information for other member clusters.
-func FilterEndpointSubsets(subsets []corev1.EndpointSubset) []corev1.EndpointSubset {
-	newSubsets := []corev1.EndpointSubset{}
-	for _, s := range subsets {
-		subset := corev1.EndpointSubset{}
-		newAddresses := []corev1.EndpointAddress{}
-		for _, addr := range s.Addresses {
-			newAddresses = append(newAddresses, corev1.EndpointAddress{
-				IP: addr.IP,
-			})
-		}
-		if len(newAddresses) > 0 {
-			subset.Addresses = newAddresses
-			subset.Ports = s.Ports
-			newSubsets = append(newSubsets, subset)
-		}
-	}
-	return newSubsets
 }
 
 func GetServiceEndpointSubset(svc *corev1.Service) corev1.EndpointSubset {
@@ -106,4 +85,16 @@ func GetServiceEndpointPorts(ports []corev1.ServicePort) []corev1.EndpointPort {
 		})
 	}
 	return epPorts
+}
+
+// HashLabelIdentity generates a hash value for label identity string.
+func HashLabelIdentity(l string) string {
+	hash := sha1.New() // #nosec G401: not used for security purposes
+	hash.Write([]byte(l))
+	hashValue := hex.EncodeToString(hash.Sum(nil))
+	return hashValue[:labelIdentityHashLength]
+}
+
+func IsMulticlusterService(service *corev1.Service) bool {
+	return service.Annotations[AntreaMCServiceAnnotation] == "true"
 }

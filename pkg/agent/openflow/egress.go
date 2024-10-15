@@ -16,6 +16,9 @@ package openflow
 
 import (
 	"net"
+	"sync"
+
+	"antrea.io/libOpenflow/openflow15"
 
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/openflow/cookie"
@@ -27,12 +30,14 @@ type featureEgress struct {
 	ipProtocols     []binding.Protocol
 
 	cachedFlows *flowCategoryCache
+	cachedMeter sync.Map
 
 	exceptCIDRs map[binding.Protocol][]net.IPNet
 	nodeIPs     map[binding.Protocol]net.IP
 	gatewayMAC  net.HardwareAddr
 
-	category cookie.Category
+	category                   cookie.Category
+	enableEgressTrafficShaping bool
 }
 
 func (f *featureEgress) getFeatureName() string {
@@ -42,7 +47,8 @@ func (f *featureEgress) getFeatureName() string {
 func newFeatureEgress(cookieAllocator cookie.Allocator,
 	ipProtocols []binding.Protocol,
 	nodeConfig *config.NodeConfig,
-	egressConfig *config.EgressConfig) *featureEgress {
+	egressConfig *config.EgressConfig,
+	enableEgressTrafficShaping bool) *featureEgress {
 	exceptCIDRs := make(map[binding.Protocol][]net.IPNet)
 	for _, cidr := range egressConfig.ExceptCIDRs {
 		if cidr.IP.To4() == nil {
@@ -61,26 +67,47 @@ func newFeatureEgress(cookieAllocator cookie.Allocator,
 		}
 	}
 	return &featureEgress{
-		cachedFlows:     newFlowCategoryCache(),
-		cookieAllocator: cookieAllocator,
-		exceptCIDRs:     exceptCIDRs,
-		ipProtocols:     ipProtocols,
-		nodeIPs:         nodeIPs,
-		gatewayMAC:      nodeConfig.GatewayConfig.MAC,
-		category:        cookie.Egress,
+		cachedFlows:                newFlowCategoryCache(),
+		cachedMeter:                sync.Map{},
+		cookieAllocator:            cookieAllocator,
+		exceptCIDRs:                exceptCIDRs,
+		ipProtocols:                ipProtocols,
+		nodeIPs:                    nodeIPs,
+		gatewayMAC:                 nodeConfig.GatewayConfig.MAC,
+		category:                   cookie.Egress,
+		enableEgressTrafficShaping: enableEgressTrafficShaping,
 	}
 }
 
-func (f *featureEgress) initFlows() []binding.Flow {
+func (f *featureEgress) initFlows() []*openflow15.FlowMod {
 	// This installs the flows to enable Pods to communicate to the external IP addresses. The flows identify the packets
 	// from local Pods to the external IP address, and mark the packets to be SNAT'd with the configured SNAT IPs.
-	return f.externalFlows()
+	initialFlows := f.externalFlows()
+	if f.enableEgressTrafficShaping {
+		initialFlows = append(initialFlows, f.egressQoSDefaultFlow())
+	}
+	return GetFlowModMessages(initialFlows, binding.AddMessage)
 }
 
-func (f *featureEgress) replayFlows() []binding.Flow {
-	var flows []binding.Flow
-	// Get cached flows.
-	flows = append(flows, getCachedFlows(f.cachedFlows)...)
+func (f *featureEgress) replayFlows() []*openflow15.FlowMod {
+	return getCachedFlowMessages(f.cachedFlows)
+}
 
-	return flows
+func (f *featureEgress) initGroups() []binding.OFEntry {
+	return nil
+}
+
+func (f *featureEgress) replayGroups() []binding.OFEntry {
+	return nil
+}
+
+func (f *featureEgress) replayMeters() []binding.OFEntry {
+	var meters []binding.OFEntry
+	f.cachedMeter.Range(func(id, value interface{}) bool {
+		meter := value.(binding.Meter)
+		meter.Reset()
+		meters = append(meters, meter)
+		return true
+	})
+	return meters
 }

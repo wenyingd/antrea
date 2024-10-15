@@ -14,18 +14,27 @@
 
 package ipassigner
 
-import "k8s.io/apimachinery/pkg/util/sets"
+import (
+	"antrea.io/antrea/pkg/apis/crd/v1beta1"
+)
 
 // IPAssigner provides methods to assign or unassign IP.
 type IPAssigner interface {
 	// AssignIP ensures the provided IP is assigned to the system.
-	AssignIP(ip string) error
+	// It returns true only in the case when there is no error and the IP provided
+	// was not assigned to the interface before the operation, in all other cases it
+	// returns false.
+	AssignIP(ip string, subnetInfo *v1beta1.SubnetInfo, forceAdvertise bool) (bool, error)
 	// UnassignIP ensures the provided IP is not assigned to the system.
-	UnassignIP(ip string) error
+	// It returns true only in the case when there is no error and the IP provided
+	// was assigned to the interface before the operation.
+	UnassignIP(ip string) (bool, error)
 	// AssignedIPs return the IPs that are assigned to the system by this IPAssigner.
-	AssignedIPs() sets.String
+	AssignedIPs() map[string]*v1beta1.SubnetInfo
 	// InitIPs ensures the IPs that are assigned to the system match the given IPs.
-	InitIPs(sets.String) error
+	InitIPs(map[string]*v1beta1.SubnetInfo) error
+	// GetInterfaceID returns the index of the network interface to which IPs in the provided subnet are assigned.
+	GetInterfaceID(subnetInfo *v1beta1.SubnetInfo) (int, bool)
 	// Run starts the IP assigner.
 	Run(<-chan struct{})
 }

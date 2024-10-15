@@ -15,13 +15,16 @@
 package ipam
 
 import (
+	"context"
 	"fmt"
 	"regexp"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/invoke"
 	cnitypes "github.com/containernetworking/cni/pkg/types"
+	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +40,7 @@ import (
 
 	cniservertest "antrea.io/antrea/pkg/agent/cniserver/testing"
 	argtypes "antrea.io/antrea/pkg/agent/cniserver/types"
-	crdv1a2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
+	crdv1b1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions"
 	annotations "antrea.io/antrea/pkg/ipam"
 	fakepoolclient "antrea.io/antrea/pkg/ipam/poolallocator/testing"
@@ -49,96 +52,92 @@ var (
 	testPear           = "pear"
 	testNoAnnotation   = "empty"
 	testJunkAnnotation = "junk"
+
+	testCNIVersion = current.ImplementedSpecVersion
 )
 
 func createIPPools(crdClient *fakepoolclient.IPPoolClientset) {
 
-	ipRangeApple := crdv1a2.IPRange{
+	ipRangeApple := crdv1b1.IPRange{
 		Start: "10.2.2.100",
 		End:   "10.2.2.200",
 	}
 
-	subnetInfoApple := crdv1a2.SubnetInfo{
+	subnetInfoApple := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.2.1",
 		PrefixLength: 24,
 	}
 
-	subnetRangeApple := crdv1a2.SubnetIPRange{IPRange: ipRangeApple,
-		SubnetInfo: subnetInfoApple}
-
-	crdClient.InitPool(&crdv1a2.IPPool{
+	crdClient.InitPool(&crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testApple,
 			UID: k8suuid.NewUUID()},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRangeApple},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRangeApple},
+			SubnetInfo: subnetInfoApple,
 		},
 	})
 
-	ipRangeOrange := crdv1a2.IPRange{
+	ipRangeOrange := crdv1b1.IPRange{
 		Start: "20::2",
 		End:   "20::20",
 	}
 
-	subnetInfoOrange := crdv1a2.SubnetInfo{
+	subnetInfoOrange := crdv1b1.SubnetInfo{
 		Gateway:      "20::1",
 		PrefixLength: 64,
 	}
 
-	subnetRangeOrange := crdv1a2.SubnetIPRange{IPRange: ipRangeOrange,
-		SubnetInfo: subnetInfoOrange}
-
-	crdClient.InitPool(&crdv1a2.IPPool{
+	crdClient.InitPool(&crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testOrange,
 			UID: k8suuid.NewUUID()},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRangeOrange},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRangeOrange},
+			SubnetInfo: subnetInfoOrange,
 		},
 	})
 
-	ipRangePear := crdv1a2.IPRange{
+	ipRangePear := crdv1b1.IPRange{
 		Start: "10.2.3.100",
 		End:   "10.2.3.200",
 	}
-	subnetInfoPear := crdv1a2.SubnetInfo{
+	subnetInfoPear := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.3.1",
 		PrefixLength: 24,
 		VLAN:         100,
 	}
-	subnetRangePear := crdv1a2.SubnetIPRange{IPRange: ipRangePear,
-		SubnetInfo: subnetInfoPear}
-	crdClient.InitPool(&crdv1a2.IPPool{
+	crdClient.InitPool(&crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: testPear},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges:  []crdv1a2.SubnetIPRange{subnetRangePear},
-			IPVersion: crdv1a2.IPv4,
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRangePear},
+			SubnetInfo: subnetInfoPear,
 		},
-		Status: crdv1a2.IPPoolStatus{IPAddresses: []crdv1a2.IPAddressState{{
+		Status: crdv1b1.IPPoolStatus{IPAddresses: []crdv1b1.IPAddressState{{
 			IPAddress: "10.2.3.198",
-			Phase:     crdv1a2.IPAddressPhaseReserved,
-			Owner: crdv1a2.IPAddressOwner{StatefulSet: &crdv1a2.StatefulSetOwner{
+			Phase:     crdv1b1.IPAddressPhaseReserved,
+			Owner: crdv1b1.IPAddressOwner{StatefulSet: &crdv1b1.StatefulSetOwner{
 				Name:      "pear-sts",
 				Namespace: testPear,
 				Index:     8,
 			}},
 		}, {
 			IPAddress: "10.2.3.197",
-			Phase:     crdv1a2.IPAddressPhaseReserved,
-			Owner: crdv1a2.IPAddressOwner{
-				Pod: &crdv1a2.PodOwner{
+			Phase:     crdv1b1.IPAddressPhaseReserved,
+			Owner: crdv1b1.IPAddressOwner{
+				Pod: &crdv1b1.PodOwner{
 					Name:        "pear-sts-9",
 					Namespace:   testPear,
 					ContainerID: "pear-sts-9-container",
 				},
-				StatefulSet: &crdv1a2.StatefulSetOwner{
+				StatefulSet: &crdv1b1.StatefulSetOwner{
 					Name:      "pear-sts",
 					Namespace: testPear,
 					Index:     9,
 				}},
 		}, {
 			IPAddress: "10.2.3.196",
-			Phase:     crdv1a2.IPAddressPhaseReserved,
-			Owner: crdv1a2.IPAddressOwner{
-				Pod: &crdv1a2.PodOwner{
+			Phase:     crdv1b1.IPAddressPhaseReserved,
+			Owner: crdv1b1.IPAddressOwner{
+				Pod: &crdv1b1.PodOwner{
 					Name:        "pear10",
 					Namespace:   testPear,
 					ContainerID: "pear10-container",
@@ -322,7 +321,7 @@ func TestAntreaIPAMDriver(t *testing.T) {
 		listOptions,
 	)
 
-	antreaIPAMController, err := InitializeAntreaIPAMController(crdClient, informerFactory, crdInformerFactory, localPodInformer, true)
+	antreaIPAMController, err := InitializeAntreaIPAMController(crdClient, informerFactory.Core().V1().Namespaces(), crdInformerFactory.Crd().V1beta1().IPPools(), localPodInformer, true)
 	require.NoError(t, err, "Expected no error in initialization for Antrea IPAM Controller")
 	informerFactory.Start(stopCh)
 	go localPodInformer.Run(stopCh)
@@ -372,7 +371,7 @@ func TestAntreaIPAMDriver(t *testing.T) {
 
 		podNamespace := string(k8sArgsMap[test].K8S_POD_NAMESPACE)
 		podName := string(k8sArgsMap[test].K8S_POD_NAME)
-		err = wait.Poll(time.Millisecond*200, time.Second, func() (bool, error) {
+		err = wait.PollUntilContextTimeout(context.Background(), time.Millisecond*200, time.Second, false, func(ctx context.Context) (bool, error) {
 			ipPool, _ := antreaIPAMController.ipPoolLister.Get(podNamespace)
 			found := false
 			for _, ipAddress := range ipPool.Status.IPAddresses {
@@ -406,7 +405,7 @@ func TestAntreaIPAMDriver(t *testing.T) {
 
 		podNamespace := string(k8sArgsMap[test].K8S_POD_NAMESPACE)
 		podName := string(k8sArgsMap[test].K8S_POD_NAME)
-		err = wait.Poll(time.Millisecond*200, time.Second, func() (bool, error) {
+		err = wait.PollUntilContextTimeout(context.Background(), time.Millisecond*200, time.Second, false, func(ctx context.Context) (bool, error) {
 			ipPool, _ := antreaIPAMController.ipPoolLister.Get(podNamespace)
 			found := false
 			for _, ipAddress := range ipPool.Status.IPAddresses {
@@ -488,14 +487,15 @@ func TestAntreaIPAMDriver(t *testing.T) {
 	testDel("pear10", false)
 
 	// Verify last update was propagated to informer
-	err = wait.PollImmediate(100*time.Millisecond, 1*time.Second, func() (bool, error) {
-		owns, err := testDriver.Check(cniArgsMap["orange2"], k8sArgsMap["orange2"], networkConfig)
-		if err != nil {
-			// container already relelased
-			return true, nil
-		}
-		return !owns, nil
-	})
+	err = wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 1*time.Second, true,
+		func(ctx context.Context) (bool, error) {
+			owns, err := testDriver.Check(cniArgsMap["orange2"], k8sArgsMap["orange2"], networkConfig)
+			if err != nil {
+				// container already relelased
+				return true, nil
+			}
+			return !owns, nil
+		})
 
 	require.NoError(t, err, "orange2 pod was not released")
 
@@ -531,4 +531,118 @@ func TestAntreaIPAMDriver(t *testing.T) {
 
 	// Make sure repeated call without previous container results in error
 	testAddError("pear3")
+}
+
+func TestSecondaryNetworkAdd(t *testing.T) {
+	testCases := []struct {
+		name        string
+		networkConf *argtypes.NetworkConfig
+		initFunc    func(stopCh chan struct{}) *AntreaIPAM
+		expectedRes error
+	}{
+		{
+			name: "Both Antrea IPPool and static address are empty",
+			networkConf: &argtypes.NetworkConfig{
+				CNIVersion: testCNIVersion,
+				IPAM: &argtypes.IPAMConfig{
+					IPPools: []string{},
+				},
+			},
+			expectedRes: fmt.Errorf("at least one Antrea IPPool or static address must be specified"),
+		},
+		{
+			name: "Specify the static IP Address",
+			networkConf: &argtypes.NetworkConfig{
+				CNIVersion: testCNIVersion,
+				IPAM: &argtypes.IPAMConfig{
+					Addresses: []argtypes.Address{
+						{Address: "192.168.1.1/24"},
+					},
+				},
+			},
+		},
+		{
+			name: "Antrea IPAM driver not ready",
+			networkConf: &argtypes.NetworkConfig{
+				CNIVersion: testCNIVersion,
+				IPAM: &argtypes.IPAMConfig{
+					IPPools: []string{
+						testApple,
+					},
+				},
+			},
+			expectedRes: fmt.Errorf("Antrea IPAM driver not ready: context deadline exceeded"),
+		},
+		{
+			name: "Add secondary network successfully",
+			networkConf: &argtypes.NetworkConfig{
+				CNIVersion: testCNIVersion,
+				IPAM: &argtypes.IPAMConfig{
+					IPPools: []string{
+						testApple,
+					},
+				},
+			},
+			expectedRes: nil,
+			initFunc: func(stopCh chan struct{}) *AntreaIPAM {
+				k8sClient, crdClient := initTestClients()
+
+				informerFactory := informers.NewSharedInformerFactory(k8sClient, 0)
+				crdInformerFactory := crdinformers.NewSharedInformerFactory(crdClient, 0)
+				listOptions := func(options *metav1.ListOptions) {
+					options.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", "fakeNode").String()
+				}
+				localPodInformer := coreinformers.NewFilteredPodInformer(
+					k8sClient,
+					metav1.NamespaceAll,
+					0,
+					cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, // NamespaceIndex is used in NPLController.
+					listOptions,
+				)
+
+				antreaIPAMController, err := InitializeAntreaIPAMController(crdClient,
+					informerFactory.Core().V1().Namespaces(),
+					crdInformerFactory.Crd().V1beta1().IPPools(),
+					localPodInformer,
+					true,
+				)
+				require.NoError(t, err, "Expected no error in initialization for Antrea IPAM Controller")
+				createIPPools(crdClient)
+
+				go antreaIPAMController.Run(stopCh)
+				crdInformerFactory.Start(stopCh)
+				crdInformerFactory.WaitForCacheSync(stopCh)
+
+				return &AntreaIPAM{
+					controller:      antreaIPAMController,
+					controllerMutex: sync.RWMutex{},
+				}
+			},
+		},
+	}
+
+	for _, tt := range testCases {
+		t.Run(tt.name, func(t *testing.T) {
+			var d *AntreaIPAM
+			if tt.initFunc == nil {
+				d = &AntreaIPAM{}
+			} else {
+				stopCh := make(chan struct{})
+				d = tt.initFunc(stopCh)
+				defer close(stopCh)
+			}
+
+			args := &invoke.Args{
+				ContainerID: "container-id",
+			}
+			k8sArgs := &argtypes.K8sArgs{
+				CommonArgs:        cnitypes.CommonArgs{},
+				K8S_POD_NAME:      "test-pod",
+				K8S_POD_NAMESPACE: "test-ns",
+			}
+
+			_, err := d.secondaryNetworkAdd(args, k8sArgs, tt.networkConf)
+			assert.Equal(t, tt.expectedRes, err)
+		})
+	}
 }

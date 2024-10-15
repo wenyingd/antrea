@@ -1,6 +1,6 @@
 # Antctl
 
-Antctl is the command-line tool for Antrea. At the moment, antctl supports
+antctl is the command-line tool for Antrea. At the moment, antctl supports
 running in three different modes:
 
 * "controller mode": when run out-of-cluster or from within the Antrea
@@ -21,10 +21,14 @@ running in three different modes:
 - [Usage](#usage)
   - [Showing or changing log verbosity level](#showing-or-changing-log-verbosity-level)
   - [Showing feature gates status](#showing-feature-gates-status)
+  - [Performing checks to facilitate installation process](#performing-checks-to-facilitate-installation-process)
+    - [Pre-installation checks](#pre-installation-checks)
+    - [Post-installation checks](#post-installation-checks)
   - [Collecting support information](#collecting-support-information)
   - [controllerinfo and agentinfo commands](#controllerinfo-and-agentinfo-commands)
   - [NetworkPolicy commands](#networkpolicy-commands)
     - [Mapping endpoints to NetworkPolicies](#mapping-endpoints-to-networkpolicies)
+    - [Evaluating expected NetworkPolicy behavior](#evaluating-expected-networkpolicy-behavior)
   - [Dumping Pod network interface information](#dumping-pod-network-interface-information)
   - [Dumping OVS flows](#dumping-ovs-flows)
   - [OVS packet tracing](#ovs-packet-tracing)
@@ -34,14 +38,19 @@ running in three different modes:
     - [Dumping flow records](#dumping-flow-records)
     - [Record metrics](#record-metrics)
   - [Multi-cluster commands](#multi-cluster-commands)
+  - [Multicast commands](#multicast-commands)
+  - [Showing memberlist state](#showing-memberlist-state)
+  - [BGP commands](#bgp-commands)
+  - [Upgrade existing objects of CRDs](#upgrade-existing-objects-of-crds)
 <!-- /toc -->
 
 ## Installation
 
-The antctl binary is included in the Antrea Docker image
-(`antrea/antrea-ubuntu`) which means that there is no need to install anything
-to connect to the Antrea Agent. Simply exec into the antrea-agent container for
-the appropriate antrea-agent Pod and run `antctl`:
+The antctl binary is included in the Antrea Docker images
+(`antrea/antrea-agent-ubuntu`, `antrea/antrea-controller-ubuntu`) which means
+that there is no need to install anything to connect to the Antrea Agent. Simply
+exec into the antrea-agent container for the appropriate antrea-agent Pod and
+run `antctl`:
 
 ```bash
 kubectl exec -it ANTREA-AGENT_POD_NAME -n kube-system -c antrea-agent -- bash
@@ -120,6 +129,52 @@ The following command prints the current feature gates:
 antctl get featuregates
 ```
 
+### Performing checks to facilitate installation process
+
+Antrea provides a utility command `antctl check` designed to perform checks
+that verify whether a Kubernetes cluster is correctly configured for installing
+Antrea, and also to confirm that Antrea has been installed correctly.
+
+#### Pre-installation checks
+
+Before installing Antrea, it can be helpful to ensure that the Kubernetes
+cluster is configured properly. This can prevent potential issues that might
+arise during the installation of Antrea. To perform these pre-installation
+checks, simply run the command as follows:
+
+```bash
+antctl check cluster
+```
+
+Run the following command to discover more options:
+
+```bash
+antctl check cluster --help
+```
+
+#### Post-installation checks
+
+Once Antrea is installed, you can verify that networking is functioning
+correctly within your cluster. To perform post-installation checks, simply run
+the command as follows:
+
+```bash
+antctl check installation
+```
+
+In case Antrea is installed in a custom namespace, You
+can specify the namespace by adding the flag:
+
+```bash
+antctl check installation --namespace [NAMESPACE]
+```
+
+Run the following command to discover more options:
+
+```bash
+antctl check installation --help
+```
+
 ### Collecting support information
 
 Starting with version 0.7.0, Antrea supports the `antctl supportbundle` command,
@@ -159,6 +214,10 @@ included over time):
 The `antctl supportbundle` command can also be run inside a Controller or Agent
 Pod, in which case only local information will be collected.
 
+Since v1.10.0, Antrea also supports collecting information by applying a
+`SupportBundleCollection` CRD, you can refer to the [support bundle guide](./support-bundle-guide.md)
+for more information.
+
 ### controllerinfo and agentinfo commands
 
 `antctl` controller command `get controllerinfo` (or `get ci`) and agent command
@@ -174,8 +233,8 @@ antctl get agentinfo
 
 Both Antrea Controller and Agent support querying the NetworkPolicy objects in the Antrea
 control plane API. The source of a control plane NetworkPolicy is the original policy resource
-(K8s NetworkPolicy or Antrea-native Policy) from which the control plane NetworkPolicy was
-derived.
+(K8s NetworkPolicy, Antrea-native Policy or AdminNetworkPolicy) from which the control plane
+NetworkPolicy was derived.
 
 - `antctl` `get networkpolicy` (or `get netpol`) command can print all
 NetworkPolicies, a specified NetworkPolicy, or NetworkPolicies in a specified
@@ -193,9 +252,22 @@ output format. The `NAME` of a control plane NetworkPolicy is the UID of its sou
 NetworkPolicy.
 
 ```bash
-antctl get networkpolicy [NAME] [-n NAMESPACE] [-o yaml]
+antctl get networkpolicy [NAME] [-n NAMESPACE] [-T K8sNP|ACNP|ANNP|ANP|BANP] [-o yaml]
 antctl get appliedtogroup [NAME] [-o yaml]
 antctl get addressgroup [NAME] [-o yaml]
+```
+
+NetworkPolicy, AppliedToGroup, and AddressGroup also support `sort-by=''` option,
+which can be used to sort these resources on the basis of a particular field. Any
+valid json path can be passed as flag value. If no value is passed it will use a
+default field to sort results. For NetworkPolicy, the default field is the name of
+the source NetworkPolicy. For AppliedToGroup and AddressGroup, the default field is
+the object name (which is a generated UUID).
+
+```bash
+antctl get networkpolicy --sort-by='.sourceRef.name'
+antctl get appliedtogroup --sort-by='.metadata.name'
+antctl get addressgroup --sort-by='.metadata.name'
 ```
 
 NetworkPolicy also supports `sort-by=effectivePriority` option, which can be used to
@@ -218,7 +290,7 @@ Antrea Agent supports some extra `antctl` commands.
 * Printing NetworkPolicies with a specific source NetworkPolicy type.
 
   ```bash
-  antctl get networkpolicy -T (K8sNP|ACNP|ANP)
+  antctl get networkpolicy -T (K8sNP|ACNP|ANNP|ANP)
   ```
   
 * Printing NetworkPolicies with a specific source NetworkPolicy name.
@@ -243,6 +315,20 @@ Namespace.
 This command only works in "controller mode" and **as of now it can only be run
 from inside the Antrea Controller Pod, and not from out-of-cluster**.
 
+#### Evaluating expected NetworkPolicy behavior
+
+`antctl` supports evaluating all the existing Antrea-native NetworkPolicies,
+Kubernetes NetworkPolicies and AdminNetworkPolicies to predict the effective
+policy rule for traffic between source and destination Pods.
+
+```bash
+antctl query networkpolicyevaluation -S NAMESPACE/POD -D NAMESPACE/POD
+```
+
+If only Pod name is provided, the command will default to the "default" Namespace.
+
+This command only works in "controller mode".
+
 ### Dumping Pod network interface information
 
 `antctl` agent command `get podinterface` (or `get pi`) can dump network
@@ -265,7 +351,7 @@ in the specified OVS flow tables, or all or the specified OVS groups.
 antctl get ovsflows
 antctl get ovsflows -p POD -n NAMESPACE
 antctl get ovsflows -S SERVICE -n NAMESPACE
-antctl get ovsflows -N NETWORKPOLICY -n NAMESPACE
+antctl get ovsflows [-n NAMESPACE] -N NETWORKPOLICY --type NETWORKPOLICY_TYPE
 antctl get ovsflows -T TABLE_A,TABLE_B
 antctl get ovsflows -T TABLE_A,TABLE_B_NUM
 antctl get ovsflows -G all
@@ -273,7 +359,7 @@ antctl get ovsflows -G GROUP_ID1,GROUP_ID2
 ```
 
 OVS flow tables can be specified using table names, or the table numbers.
-`antctl get ovsflow --help` lists all Antrea flow tables. For more information
+`antctl get ovsflows --table-names-only` lists all Antrea flow tables. For more information
 about Antrea OVS pipeline and flows, please refer to the [OVS pipeline doc](design/ovs-pipeline.md).
 
 Example outputs of dumping Pod and NetworkPolicy OVS flows:
@@ -296,19 +382,28 @@ kube-system kube-dns 160ea6d7-0234-5d1d-8ea0-b703d0aa3b46 1
 # Dump OVS flows of NetworkPolicy "kube-dns"
 $ antctl get of -N kube-dns -n kube-system
 FLOW
-table=90, n_packets=0, n_bytes=0, priority=190,conj_id=1,ip actions=resubmit(,105)
-table=90, n_packets=0, n_bytes=0, priority=200,ip actions=conjunction(1,1/3)
-table=90, n_packets=0, n_bytes=0, priority=200,ip,reg1=0x5 actions=conjunction(2,2/3),conjunction(1,2/3)
-table=90, n_packets=0, n_bytes=0, priority=200,udp,tp_dst=53 actions=conjunction(1,3/3)
-table=90, n_packets=0, n_bytes=0, priority=200,tcp,tp_dst=53 actions=conjunction(1,3/3)
-table=90, n_packets=0, n_bytes=0, priority=200,tcp,tp_dst=9153 actions=conjunction(1,3/3)
-table=100, n_packets=0, n_bytes=0, priority=200,ip,reg1=0x5 actions=drop
+table=IngressRule, n_packets=0, n_bytes=0, priority=190,conj_id=1,ip actions=set_field:0x1->reg5,ct(commit,table=IngressMetric,zone=65520,exec(set_field:0x1/0xffffffff->ct_label))
+table=IngressRule, n_packets=0, n_bytes=0, priority=200,ip actions=conjunction(1,1/3)
+table=IngressRule, n_packets=0, n_bytes=0, priority=200,ip,reg1=0x5 actions=conjunction(2,2/3),conjunction(1,2/3)
+table=IngressRule, n_packets=0, n_bytes=0, priority=200,udp,tp_dst=53 actions=conjunction(1,3/3)
+table=IngressRule, n_packets=0, n_bytes=0, priority=200,tcp,tp_dst=53 actions=conjunction(1,3/3)
+table=IngressRule, n_packets=0, n_bytes=0, priority=200,tcp,tp_dst=9153 actions=conjunction(1,3/3)
+table=IngressDefaultRule, n_packets=0, n_bytes=0, priority=200,ip,reg1=0x5 actions=drop
+
+# Dump OVS flows of AntreaNetworkPolicy "test-annp"
+$ antctl get ovsflows -N test-annp -n default --type ANNP
+FLOW
+table=AntreaPolicyIngressRule, n_packets=0, n_bytes=0, priority=14900,conj_id=6 actions=set_field:0x6->reg3,set_field:0x400/0x400->reg0,goto_table:IngressMetric
+table=AntreaPolicyIngressRule, n_packets=0, n_bytes=0, priority=14900,ip,nw_src=10.20.1.8 actions=conjunction(6,1/3)
+table=AntreaPolicyIngressRule, n_packets=0, n_bytes=0, priority=14900,ip,nw_src=10.20.2.8 actions=conjunction(6,1/3)
+table=AntreaPolicyIngressRule, n_packets=0, n_bytes=0, priority=14900,reg1=0x3 actions=conjunction(6,2/3)
+table=AntreaPolicyIngressRule, n_packets=0, n_bytes=0, priority=14900,tcp,tp_dst=443 actions=conjunction(6,3/3)
 ```
 
 ### OVS packet tracing
 
 Starting from version 0.7.0, Antrea Agent supports tracing the OVS flows that a
-specified packet traverses, leveraging the [OVS packet tracing tool](http://docs.openvswitch.org/en/latest/topics/tracing).
+specified packet traverses, leveraging the [OVS packet tracing tool](https://docs.openvswitch.org/en/latest/topics/tracing/).
 
 `antctl trace-packet` command starts a packet tracing operation.
 `antctl help trace-packet` shows the usage of the command. This section lists a
@@ -337,11 +432,11 @@ local (coredns) Pod:
 ```bash
 $ antctl trace-packet -S default/web-client -D kube-system/coredns-6955765f44-zcbwj -f udp,udp_dst=53
 result: |
-  Flow: udp,in_port=1,vlan_tci=0x0000,dl_src=aa:bb:cc:dd:ee:ff,dl_dst=aa:bb:cc:dd:ee:ff,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=53
+  Flow: udp,in_port=32768,vlan_tci=0x0000,dl_src=aa:bb:cc:dd:ee:ff,dl_dst=aa:bb:cc:dd:ee:ff,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=53
 
   bridge("br-int")
   ----------------
-   0. in_port=1, priority 200, cookie 0x5e000000000000
+   0. in_port=32768, priority 200, cookie 0x5e000000000000
       load:0->NXM_NX_REG0[0..15]
       resubmit(,30)
   30. ip, priority 200, cookie 0x5e000000000000
@@ -351,14 +446,14 @@ result: |
        -> Sets the packet to an untracked state, and clears all the conntrack fields.
 
   Final flow: unchanged
-  Megaflow: recirc_id=0,eth,udp,in_port=1,nw_frag=no,tp_src=0x0/0xfc00
+  Megaflow: recirc_id=0,eth,udp,in_port=32768,nw_frag=no,tp_src=0x0/0xfc00
   Datapath actions: ct(zone=65520),recirc(0x53)
 
   ===============================================================================
   recirc(0x53) - resume conntrack with default ct_state=trk|new (use --ct-next to customize)
   ===============================================================================
 
-  Flow: recirc_id=0x53,ct_state=new|trk,ct_zone=65520,eth,udp,in_port=1,vlan_tci=0x0000,dl_src=aa:bb:cc:dd:ee:ff,dl_dst=aa:bb:cc:dd:ee:ff,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=53
+  Flow: recirc_id=0x53,ct_state=new|trk,ct_zone=65520,eth,udp,in_port=32768,vlan_tci=0x0000,dl_src=aa:bb:cc:dd:ee:ff,dl_dst=aa:bb:cc:dd:ee:ff,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=64,tp_src=0,tp_dst=53
 
   bridge("br-int")
   ----------------
@@ -389,15 +484,15 @@ result: |
        -> A clone of the packet is forked to recirculate. The forked pipeline will be resumed at table 110.
        -> Sets the packet to an untracked state, and clears all the conntrack fields.
 
-  Final flow: recirc_id=0x53,eth,udp,reg0=0x10000,reg1=0x5,in_port=1,vlan_tci=0x0000,dl_src=62:39:b4:e8:05:76,dl_dst=52:bd:c6:e0:eb:c1,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=63,tp_src=0,tp_dst=53
-  Megaflow: recirc_id=0x53,ct_state=+new-est-inv+trk,ct_mark=0,eth,udp,in_port=1,dl_src=aa:bb:cc:dd:ee:ff,dl_dst=aa:bb:cc:dd:ee:ff,nw_src=192.0.0.0/2,nw_dst=172.100.1.7,nw_ttl=64,nw_frag=no,tp_dst=53
+  Final flow: recirc_id=0x53,eth,udp,reg0=0x10000,reg1=0x5,in_port=32768,vlan_tci=0x0000,dl_src=62:39:b4:e8:05:76,dl_dst=52:bd:c6:e0:eb:c1,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=63,tp_src=0,tp_dst=53
+  Megaflow: recirc_id=0x53,ct_state=+new-est-inv+trk,ct_mark=0,eth,udp,in_port=32768,dl_src=aa:bb:cc:dd:ee:ff,dl_dst=aa:bb:cc:dd:ee:ff,nw_src=192.0.0.0/2,nw_dst=172.100.1.7,nw_ttl=64,nw_frag=no,tp_dst=53
   Datapath actions: set(eth(src=62:39:b4:e8:05:76,dst=52:bd:c6:e0:eb:c1)),set(ipv4(ttl=63)),ct(commit,zone=65520),recirc(0x54)
 
   ===============================================================================
   recirc(0x54) - resume conntrack with default ct_state=trk|new (use --ct-next to customize)
   ===============================================================================
 
-  Flow: recirc_id=0x54,ct_state=new|trk,ct_zone=65520,eth,udp,reg0=0x10000,reg1=0x5,in_port=1,vlan_tci=0x0000,dl_src=62:39:b4:e8:05:76,dl_dst=52:bd:c6:e0:eb:c1,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=63,tp_src=0,tp_dst=53
+  Flow: recirc_id=0x54,ct_state=new|trk,ct_zone=65520,eth,udp,reg0=0x10000,reg1=0x5,in_port=32768,vlan_tci=0x0000,dl_src=62:39:b4:e8:05:76,dl_dst=52:bd:c6:e0:eb:c1,nw_src=172.100.2.11,nw_dst=172.100.1.7,nw_tos=0,nw_ecn=0,nw_ttl=63,tp_src=0,tp_dst=53
 
   bridge("br-int")
   ----------------
@@ -408,7 +503,7 @@ result: |
        -> output port is 5
 
   Final flow: unchanged
-  Megaflow: recirc_id=0x54,eth,ip,in_port=1,nw_frag=no
+  Megaflow: recirc_id=0x54,eth,ip,in_port=32768,nw_frag=no
   Datapath actions: 3
 ```
 
@@ -478,7 +573,7 @@ $ antctl traceflow -D pod1 -f tcp,tcp_dst=80 --live-traffic --dropped-only -t 10
 
 ### Antctl Proxy
 
-Antctl can run as a reverse proxy for the Antrea API (Controller or arbitrary
+antctl can run as a reverse proxy for the Antrea API (Controller or arbitrary
 Agent). Usage is very similar to `kubectl proxy` and the implementation is
 essentially the same.
 
@@ -632,3 +727,131 @@ RECORDS-EXPORTED RECORDS-RECEIVED FLOWS EXPORTERS-CONNECTED
 
 For information about Antrea Multi-cluster commands, please refer to the
 [antctl Multi-cluster commands](./multicluster/antctl.md).
+
+### Multicast commands
+
+The `antctl get podmulticaststats [POD_NAME] [-n NAMESPACE]` command prints inbound
+and outbound multicast statistics for each Pod. Note that IGMP packets are not counted.
+
+Example output of podmulticaststats:
+
+```bash
+$ antctl get podmulticaststats
+
+NAMESPACE              NAME                         INBOUND OUTBOUND
+testmulticast-vw7gx5b9 test3-receiver-2             30      0
+testmulticast-vw7gx5b9 test3-sender-1               0       10
+```
+
+### Showing memberlist state
+
+`antctl` agent command `get memberlist` (or `get ml`) prints the state of memberlist
+cluster of Antrea Agent.
+
+```bash
+$ antctl get memberlist
+
+NODE    IP         STATUS
+worker1 172.18.0.4 Alive 
+worker2 172.18.0.3 Alive 
+worker3 172.18.0.2 Dead
+```
+
+### BGP commands
+
+`antctl` agent command `get bgppolicy` prints the effective BGP policy applied on the local Node.
+It includes the name, local ASN, router ID and listen port of the effective BGP policy.
+
+```bash
+$ antctl get bgppolicy
+
+NAME               ROUTER-ID  LOCAL-ASN LISTEN-PORT
+example-bgp-policy 172.18.0.2 64512     179
+```
+
+`antctl` agent command `get bgppeers` print the current status of all BGP peers
+of effective BGP policy applied on the local Node. It includes Peer IP address with port,
+ASN, and State of the BGP Peers.
+
+```bash
+$ antctl get bgppeers
+
+PEER               ASN   STATE
+192.168.77.200:179 65001 Established
+192.168.77.201:179 65002 Active
+```
+
+### Upgrade existing objects of CRDs
+
+antctl supports upgrading existing objects of Antrea CRDs to the storage version.
+The related sub-commands should be run out-of-cluster. Please ensure that the
+kubeconfig file used by antctl has the necessary permissions. The required permissions
+are listed in the following sample ClusterRole.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: antctl
+rules:
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get 
+      - list
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources: 
+      - customresourcedefinitions/status
+    verbs:
+      - update
+  - apiGroups: 
+      - crd.antrea.io
+    resources:
+      - "*"
+    verbs: 
+      - get
+      - list 
+      - update
+```
+
+This command performs a dry-run to upgrade all existing objects of Antrea CRDs to
+the storage version:
+
+```bash
+antctl upgrade api-storage --dry-run
+```
+
+This command upgrades all existing objects of Antrea CRDs to the storage version:
+
+```bash
+antctl upgrade api-storage
+```
+
+This command upgrades existing AntreaAgentInfo objects to the storage version:
+
+```bash
+antctl upgrade api-storage --crds=antreaagentinfos.crd.antrea.io
+```
+
+This command upgrades existing Egress and Group objects to the storage version:
+
+```bash
+antctl upgrade api-storage --crds=egresses.crd.antrea.io,groups.crd.antrea.io
+```
+
+If you encounter any errors related to permissions while running the commands, double-check
+the permissions of the kubeconfig used by antctl. Ensure that the ClusterRole has the
+required permissions. The following sample errors are caused by insufficient permissions:
+
+```bash
+Error: failed to get CRD list: customresourcedefinitions.apiextensions.k8s.io is forbidden: User "user" cannot list resource "customresourcedefinitions" in API group "apiextensions.k8s.io" at the cluster scope
+
+Error: externalippools.crd.antrea.io is forbidden: User "user" cannot list resource "externalippools" in API group "crd.antrea.io" at the cluster scope
+
+Error: error upgrading object prod-external-ip-pool of CRD "externalippools.crd.antrea.io": externalippools.crd.antrea.io "prod-external-ip-pool" is forbidden: User "user" cannot update resource "externalippools" in API group "crd.antrea.io" at the cluster scope
+
+Error: error updating CRD "externalippools.crd.antrea.io" status.storedVersion: customresourcedefinitions.apiextensions.k8s.io "externalippools.crd.antrea.io" is forbidden: User "user" cannot update resource "customresourcedefinitions/status" in API group "apiextensions.k8s.io" at the cluster scope
+```

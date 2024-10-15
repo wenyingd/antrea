@@ -36,7 +36,7 @@ LoadBalancer
 ## Service external IP management by Antrea
 
 Antrea supports external IP management for Services of type LoadBalancer
-since version 1.5, which can work together with `AntreaProxy` or
+since version 1.5, which can work together with Antrea Proxy or
 `kube-proxy` to implement Services of type LoadBalancer, without requiring an
 external load balancer. With the external IP management feature, Antrea can
 allocate an external IP for a Service of type LoadBalancer from an
@@ -44,7 +44,7 @@ allocate an external IP for a Service of type LoadBalancer from an
 based on the ExternalIPPool's NodeSelector to host the external IP. Antrea
 configures the Service's external IP on the selected Node, and thus Service
 requests to the external IP will get to the Node, and they are then handled by
-`AntreaProxy` or `kube-proxy` on the Node and distributed to the Service's
+Antrea Proxy or `kube-proxy` on the Node and distributed to the Service's
 Endpoints. Antrea also implements a Node failover mechanism for Service
 external IPs. When Antrea detects a Node hosting an external IP is down, it
 will move the external IP to another available Node of the ExternalIPPool.
@@ -56,7 +56,7 @@ enabled in the `kube-proxy` configuration. For more information about how to
 configure `kube-proxy`, please refer to the [Interoperability with kube-proxy
 IPVS mode](#interoperability-with-kube-proxy-ipvs-mode) section.
 
-If you are using `kube-proxy` iptables mode or [`AntreaProxy` with `proxyAll`](antrea-proxy.md#antreaproxy-with-proxyall),
+If you are using `kube-proxy` iptables mode or [Antrea Proxy with `proxyAll`](antrea-proxy.md#antrea-proxy-with-proxyall),
 no extra configuration change is needed.
 
 ### Configuration
@@ -73,30 +73,26 @@ the Antrea deployment YAML:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: antrea-config-dcfb6k2hkm
+  name: antrea-config
   namespace: kube-system
 data:
   antrea-agent.conf: |
     featureGates:
-...
       ServiceExternalIP: true
-...
   antrea-controller.conf: |
     featureGates:
-...
       ServiceExternalIP: true
-...
 ```
 
-The feature works with both `AntreaProxy` and `kube-proxy`, including the
+The feature works with both Antrea Proxy and `kube-proxy`, including the
 following configurations:
 
-- `AntreaProxy` without `proxyAll` enabled - this is `antrea-agent`'s default
+- Antrea Proxy without `proxyAll` enabled - this is `antrea-agent`'s default
 configuration, in which `kube-proxy` serves the request traffic for Services
-of type LoadBalancer (while `AntreaProxy` handles Service requests from Pods).
-- `AntreaProxy` with `proxyAll` enabled - in this case, `AntreaProxy` handles
+of type LoadBalancer (while Antrea Proxy handles Service requests from Pods).
+- Antrea Proxy with `proxyAll` enabled - in this case, Antrea Proxy handles
 all Service traffic, including Services of type LoadBalancer.
-- `AntreaProxy` disabled - `kube-proxy` handles all Service traffic, including
+- Antrea Proxy disabled - `kube-proxy` handles all Service traffic, including
 Services of type LoadBalancer.
 
 #### Create an ExternalIPPool custom resource
@@ -110,7 +106,7 @@ selects the Nodes with label "network-role: ingress-node" to host the external
 IPs:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha2
+apiVersion: crd.antrea.io/v1beta1
 kind: ExternalIPPool
 metadata:
   name: service-external-ip-pool
@@ -168,6 +164,69 @@ spec:
       targetPort: 9376
   type: LoadBalancer
 ```
+
+By default, Antrea doesn't allocate a single IP to multiple Services. Before
+Antrea v2.1, if multiple Services requested the same IP, only one of them would
+get the IP assigned. Starting with Antrea v2.1, to share an IP between multiple
+Services, you can annotate the Services with
+`service.antrea.io/allow-shared-load-balancer-ip: true` when requesting a
+particular IP. Note that the IP will only be shared between Services having the
+annotation. If not all Services are annotated, the IP may either be allocated
+to one of the unannotated Services or shared between the annotated Services,
+depending on the order in which they are processed. The annotation only takes
+effect during the IP allocation phase. Once the IP has been allocated, removing
+this annotation from a Service will not result in the IP being reclaimed from
+it or other Services.
+
+For example, the following two Services will share an IP:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service-1
+  annotations:
+    service.antrea.io/external-ip-pool: "service-external-ip-pool"
+    service.antrea.io/allow-shared-load-balancer-ip: "true"
+spec:
+  selector:
+    app: MyApp1
+  loadBalancerIP: "10.10.0.2"
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service-2
+  annotations:
+    service.antrea.io/external-ip-pool: "service-external-ip-pool"
+    service.antrea.io/allow-shared-load-balancer-ip: "true"
+spec:
+  selector:
+    app: MyApp2
+  loadBalancerIP: "10.10.0.2"
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: LoadBalancer
+```
+
+Note that sharing a LoadBalancer IP between multiple Services only works under
+the following conditions:
+
+* The Services use different ports.
+* The Services use the `Cluster` external traffic policy. Sharing a
+  LoadBalancer IP between Services using the `Local` external traffic policy
+  can also work if they have identical Endpoints. However, in such cases, it
+  may be preferable to consolidate the Services into a single Service.
+
+Otherwise, the datapath may not work even though the IP is allocated to the
+Services successfully.
 
 #### Validate Service external IP
 
@@ -241,19 +300,19 @@ To learn more about MetalLB concepts and functionalities, you can read the
 You can run the following commands to install MetalLB using the YAML manifests:
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.11.0/manifests/namespace.yaml
-kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.11.0/manifests/metallb.yaml
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.11/config/manifests/metallb-native.yaml
 ```
 
-The commands will deploy MetalLB of version 0.11.0 into Namespace
-`metallb-system`. You can also refer to this [MetalLB installation guide](https://metallb.universe.tf/installation)
-for other ways of installing MetalLB.
+The commands will deploy MetalLB version 0.13.11 into Namespace
+`metallb-system`. You can also refer to this [MetalLB installation
+guide](https://metallb.universe.tf/installation) for other ways of installing
+MetalLB.
 
 As MetalLB will allocate external IPs for all Services of type LoadBalancer,
 once it is running, the Service external IP management feature of Antrea should
 not be enabled to avoid conflicts with MetalLB. You can deploy Antrea with the
 default configuration (in which the `ServiceExternalIP` feature gate of
-`antrea-agent` is set to `false`). MetalLB can work with both `AntreaProxy` and
+`antrea-agent` is set to `false`). MetalLB can work with both Antrea Proxy and
 `kube-proxy` configurations of `antrea-agent`.
 
 ### Configure MetalLB with layer 2 mode
@@ -264,50 +323,62 @@ you are using `kube-proxy` IPVS. Please refer to the [Interoperability with
 kube-proxy IPVS mode](#interoperability-with-kube-proxy-ipvs-mode) section for
 more information.
 
-MetalLB is configured through a ConfigMap. To configure MetalLB to work in the
-layer 2 mode, you just need to provide the IP ranges to allocate external IPs.
-The IP ranges should be from the Node network subnet.
+MetalLB is configured through Custom Resources (since v0.13). To configure
+MetalLB to work in the layer 2 mode, you need to create an `L2Advertisement`
+resource, as well as an `IPAddressPool` resource, which provides the IP ranges
+to allocate external IPs from. The IP ranges should be from the Node network
+subnet.
 
 For example:
 
 ```yaml
-apiVersion: v1
-kind: ConfigMap
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
 metadata:
+  name: first-pool
   namespace: metallb-system
-  name: config
-data:
-  config: |
-    address-pools:
-    - name: default
-      protocol: layer2
-      addresses:
-      - 10.10.0.2-10.10.0.10
+spec:
+  addresses:
+  - 10.10.0.2-10.10.0.10
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: example
+  namespace: metallb-system
 ```
 
 ### Configure MetalLB with BGP mode
 
 The BGP mode of MetalLB requires more configuration parameters to establish BGP
-peering to the router. The example below configures MetalLB using AS number
-64500 to connect to peer router 10.0.0.1 with AS number 64501:
+peering to the router. The example resources below configure MetalLB using AS
+number 64500 to connect to peer router 10.0.0.1 with AS number 64501:
 
 ```yaml
-apiVersion: v1
-kind: ConfigMap
+apiVersion: metallb.io/v1beta2
+kind: BGPPeer
 metadata:
+  name: sample
   namespace: metallb-system
-  name: config
-data:
-  config: |
-    peers:
-    - peer-address: 10.0.0.1
-      peer-asn: 64501
-      my-asn: 64500
-    address-pools:
-    - name: default
-      protocol: bgp
-      addresses:
-      - 10.10.0.2-10.10.0.10
+spec:
+  myASN: 64500
+  peerASN: 64501
+  peerAddress: 10.0.0.1
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: first-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 10.10.0.2-10.10.0.10
+---
+apiVersion: metallb.io/v1beta1
+kind: BGPAdvertisement
+metadata:
+  name: example
+  namespace: metallb-system
 ```
 
 In addition to the basic layer 2 and BGP mode configurations described in this

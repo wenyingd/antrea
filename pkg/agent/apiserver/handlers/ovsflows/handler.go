@@ -16,16 +16,18 @@ package ovsflows
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	"antrea.io/antrea/pkg/agent/openflow"
 	agentquerier "antrea.io/antrea/pkg/agent/querier"
-	"antrea.io/antrea/pkg/antctl/transform/common"
-	"antrea.io/antrea/pkg/features"
+	cpv1beta "antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 	"antrea.io/antrea/pkg/querier"
 )
@@ -34,15 +36,13 @@ var (
 	// Use function variables for tests.
 	getFlowTableName = openflow.GetFlowTableName
 	getFlowTableID   = openflow.GetFlowTableID
+	getFlowTableList = openflow.GetTableList
+
+	errAmbiguousQuery = fmt.Errorf("query is ambiguous and matches more than one policy")
 )
 
-// Response is the response struct of ovsflows command.
-type Response struct {
-	Flow string `json:"flow,omitempty"`
-}
-
-func dumpMatchedFlows(aq agentquerier.AgentQuerier, flowKeys []string) ([]Response, error) {
-	resps := []Response{}
+func dumpMatchedFlows(aq agentquerier.AgentQuerier, flowKeys []string) ([]apis.OVSFlowResponse, error) {
+	var resps []apis.OVSFlowResponse
 	for _, f := range flowKeys {
 		flowStr, err := aq.GetOVSCtlClient().DumpMatchedFlow(f)
 		if err != nil {
@@ -50,14 +50,14 @@ func dumpMatchedFlows(aq agentquerier.AgentQuerier, flowKeys []string) ([]Respon
 			return nil, err
 		}
 		if flowStr != "" {
-			resps = append(resps, Response{flowStr})
+			resps = append(resps, apis.OVSFlowResponse{Flow: flowStr})
 		}
 	}
 	return resps, nil
 }
 
-func dumpFlows(aq agentquerier.AgentQuerier, table uint8) ([]Response, error) {
-	resps := []Response{}
+func dumpFlows(aq agentquerier.AgentQuerier, table uint8) ([]apis.OVSFlowResponse, error) {
+	var resps []apis.OVSFlowResponse
 	var flowStrs []string
 	var err error
 	if table != binding.TableIDAll {
@@ -69,13 +69,13 @@ func dumpFlows(aq agentquerier.AgentQuerier, table uint8) ([]Response, error) {
 		return nil, err
 	}
 	for _, s := range flowStrs {
-		resps = append(resps, Response{s})
+		resps = append(resps, apis.OVSFlowResponse{Flow: s})
 	}
 	return resps, nil
 }
 
-func dumpMatchedGroups(aq agentquerier.AgentQuerier, groupIDs []binding.GroupIDType) ([]Response, error) {
-	resps := []Response{}
+func dumpMatchedGroups(aq agentquerier.AgentQuerier, groupIDs []binding.GroupIDType) ([]apis.OVSFlowResponse, error) {
+	resps := []apis.OVSFlowResponse{}
 	for _, g := range groupIDs {
 		groupStr, err := aq.GetOVSCtlClient().DumpGroup(uint32(g))
 		if err != nil {
@@ -83,7 +83,7 @@ func dumpMatchedGroups(aq agentquerier.AgentQuerier, groupIDs []binding.GroupIDT
 			return nil, err
 		}
 		if groupStr != "" {
-			resps = append(resps, Response{groupStr})
+			resps = append(resps, apis.OVSFlowResponse{Flow: groupStr})
 		}
 	}
 	return resps, nil
@@ -91,8 +91,8 @@ func dumpMatchedGroups(aq agentquerier.AgentQuerier, groupIDs []binding.GroupIDT
 
 // nil is returned if the flow table can not be found (the passed table name or
 // number is invalid).
-func getTableFlows(aq agentquerier.AgentQuerier, tables string) ([]Response, error) {
-	var resps []Response
+func getTableFlows(aq agentquerier.AgentQuerier, tables string) ([]apis.OVSFlowResponse, error) {
+	var resps []apis.OVSFlowResponse
 	for _, tableSeg := range strings.Split(tables, ",") {
 		tableSeg = strings.TrimSpace(tableSeg)
 		var tableNumber uint8
@@ -119,15 +119,15 @@ func getTableFlows(aq agentquerier.AgentQuerier, tables string) ([]Response, err
 }
 
 // nil is returned if the passed group IDs are invalid.
-func getGroups(aq agentquerier.AgentQuerier, groups string) ([]Response, error) {
+func getGroups(aq agentquerier.AgentQuerier, groups string) ([]apis.OVSFlowResponse, error) {
 	if strings.EqualFold(groups, "all") {
 		groupStrs, err := aq.GetOVSCtlClient().DumpGroups()
 		if err != nil {
 			return nil, err
 		}
-		resps := make([]Response, 0, len(groupStrs))
+		resps := make([]apis.OVSFlowResponse, 0, len(groupStrs))
 		for _, s := range groupStrs {
-			resps = append(resps, Response{s})
+			resps = append(resps, apis.OVSFlowResponse{Flow: s})
 		}
 		return resps, nil
 	}
@@ -148,7 +148,7 @@ func getGroups(aq agentquerier.AgentQuerier, groups string) ([]Response, error) 
 	return dumpMatchedGroups(aq, groupIDs)
 }
 
-func getPodFlows(aq agentquerier.AgentQuerier, podName, namespace string) ([]Response, error) {
+func getPodFlows(aq agentquerier.AgentQuerier, podName, namespace string) ([]apis.OVSFlowResponse, error) {
 	interfaces := aq.GetInterfaceStore().GetContainerInterfacesByPod(podName, namespace)
 	if len(interfaces) == 0 {
 		return nil, nil
@@ -158,7 +158,7 @@ func getPodFlows(aq agentquerier.AgentQuerier, podName, namespace string) ([]Res
 	return dumpMatchedFlows(aq, flowKeys)
 }
 
-func getServiceFlows(aq agentquerier.AgentQuerier, serviceName, namespace string) ([]Response, error) {
+func getServiceFlows(aq agentquerier.AgentQuerier, serviceName, namespace string) ([]apis.OVSFlowResponse, error) {
 	flowKeys, groupIDs, found := aq.GetProxier().GetServiceFlowKeys(serviceName, namespace)
 	if !found {
 		return nil, nil
@@ -174,46 +174,106 @@ func getServiceFlows(aq agentquerier.AgentQuerier, serviceName, namespace string
 	return append(resps, groupResps...), nil
 }
 
-func getNetworkPolicyFlows(aq agentquerier.AgentQuerier, npName, namespace string) ([]Response, error) {
-	if len(aq.GetNetworkPolicyInfoQuerier().GetNetworkPolicies(&querier.NetworkPolicyQueryFilter{SourceName: npName, Namespace: namespace})) == 0 {
+func getNetworkPolicyFlows(aq agentquerier.AgentQuerier, npName, namespace string, policyType cpv1beta.NetworkPolicyType) ([]apis.OVSFlowResponse, error) {
+	npFilter := &querier.NetworkPolicyQueryFilter{
+		SourceName: npName,
+		Namespace:  namespace,
+		SourceType: policyType,
+	}
+	nps := aq.GetNetworkPolicyInfoQuerier().GetNetworkPolicies(npFilter)
+	if len(nps) == 0 {
 		// NetworkPolicy not found.
 		return nil, nil
+	} else if len(nps) > 1 {
+		return nil, errAmbiguousQuery
 	}
-
-	flowKeys := aq.GetOpenflowClient().GetNetworkPolicyFlowKeys(npName, namespace)
+	namespace, policyType = nps[0].SourceRef.Namespace, nps[0].SourceRef.Type
+	flowKeys := aq.GetOpenflowClient().GetNetworkPolicyFlowKeys(npName, namespace, policyType)
 	return dumpMatchedFlows(aq, flowKeys)
+}
+
+func getTableNames() []apis.OVSFlowResponse {
+	var resps []apis.OVSFlowResponse
+	var names []string
+	for _, t := range getFlowTableList() {
+		names = append(names, t.GetName())
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		resps = append(resps, apis.OVSFlowResponse{Flow: name})
+	}
+	return resps
 }
 
 // HandleFunc returns the function which can handle API requests to "/ovsflows".
 func HandleFunc(aq agentquerier.AgentQuerier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var err error
-		var resps []Response
+		var resps []apis.OVSFlowResponse
 		pod := r.URL.Query().Get("pod")
 		service := r.URL.Query().Get("service")
 		networkPolicy := r.URL.Query().Get("networkpolicy")
+		policyType := strings.ToUpper(r.URL.Query().Get("type"))
 		namespace := r.URL.Query().Get("namespace")
 		table := r.URL.Query().Get("table")
 		groups := r.URL.Query().Get("groups")
+		tableNamesOnly := r.URL.Query().Has("table-names-only")
 
-		if (pod != "" || service != "" || networkPolicy != "") && namespace == "" {
-			http.Error(w, "namespace must be provided", http.StatusBadRequest)
+		encodeResp := func() {
+			err = json.NewEncoder(w).Encode(resps)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+		}
+
+		if tableNamesOnly {
+			resps = getTableNames()
+			encodeResp()
 			return
 		}
 
+		if (pod != "" || service != "") && namespace == "" {
+			http.Error(w, "namespace must be provided", http.StatusBadRequest)
+			return
+		}
+		if networkPolicy != "" && policyType != "" {
+			_, ok := querier.NetworkPolicyTypeMap[policyType]
+			if !ok {
+				errorMsg := fmt.Sprintf("unknown policy type. Valid types are %v", querier.GetNetworkPolicyTypeShorthands())
+				http.Error(w, errorMsg, http.StatusBadRequest)
+				return
+			}
+			if querier.NamespaceScopedPolicyTypes.Has(policyType) && namespace == "" {
+				http.Error(w, "policy Namespace must be provided for policy type "+policyType, http.StatusBadRequest)
+				return
+			}
+			if !querier.NamespaceScopedPolicyTypes.Has(policyType) && namespace != "" {
+				http.Error(w, "policy Namespace should not be provided for cluster-scoped policy type "+policyType, http.StatusBadRequest)
+				return
+			}
+		}
 		if pod == "" && service == "" && networkPolicy == "" && namespace == "" && table == "" && groups == "" {
 			resps, err = dumpFlows(aq, binding.TableIDAll)
 		} else if pod != "" {
 			// Pod Namespace must be provided to dump flows of a Pod.
 			resps, err = getPodFlows(aq, pod, namespace)
 		} else if service != "" {
-			if !features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
+			if aq.GetProxier() == nil {
 				http.Error(w, "AntreaProxy is not enabled", http.StatusServiceUnavailable)
 				return
 			}
 			resps, err = getServiceFlows(aq, service, namespace)
 		} else if networkPolicy != "" {
-			resps, err = getNetworkPolicyFlows(aq, networkPolicy, namespace)
+			var cpPolicyType cpv1beta.NetworkPolicyType
+			if policyType != "" {
+				// policyType string has already been validated above
+				cpPolicyType = querier.NetworkPolicyTypeMap[policyType]
+			}
+			resps, err = getNetworkPolicyFlows(aq, networkPolicy, namespace, cpPolicyType)
+			if err == errAmbiguousQuery {
+				http.Error(w, errAmbiguousQuery.Error(), http.StatusBadRequest)
+				return
+			}
 		} else if table != "" {
 			resps, err = getTableFlows(aq, table)
 			if err == nil && resps == nil {
@@ -241,23 +301,6 @@ func HandleFunc(aq agentquerier.AgentQuerier) http.HandlerFunc {
 			return
 		}
 
-		err = json.NewEncoder(w).Encode(resps)
-		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
+		encodeResp()
 	}
-}
-
-var _ common.TableOutput = new(Response)
-
-func (r Response) GetTableHeader() []string {
-	return []string{"FLOW"}
-}
-
-func (r Response) GetTableRow(maxColumnLength int) []string {
-	return []string{r.Flow}
-}
-
-func (r Response) SortRows() bool {
-	return false
 }

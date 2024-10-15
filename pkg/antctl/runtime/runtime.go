@@ -18,10 +18,11 @@ import (
 	"os"
 	"strings"
 
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
-	agentapiserver "antrea.io/antrea/pkg/agent/apiserver"
+	"antrea.io/antrea/pkg/apis"
 	"antrea.io/antrea/pkg/util/runtime"
 )
 
@@ -58,7 +59,7 @@ func init() {
 		strings.HasPrefix(podName, "flow-aggregator"))
 
 	if runtime.IsWindowsPlatform() && !InPod {
-		if _, err := os.Stat(agentapiserver.TokenPath); err == nil {
+		if _, err := os.Stat(apis.APIServerLoopbackTokenPath); err == nil {
 			InPod = true
 			Mode = ModeAgent
 			return

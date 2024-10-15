@@ -32,7 +32,7 @@ spec:
       serviceAccountName: antrea-agent
       initContainers:
       - name: init-inotify-limit
-        image: projects.registry.vmware.com/library/busybox:latest
+        image: antrea/ubuntu:24.04
         command: ['sysctl', '-w', 'fs.inotify.max_user_instances=200']
         securityContext:
           privileged: true
@@ -43,9 +43,12 @@ spec:
       - name: logs-volume
         hostPath:
           path: /var/log
+      - name: containerd
+        hostPath:
+          path: /run/containerd
       containers:
       - name: simulator
-        image: projects.registry.vmware.com/antrea/antrea-ubuntu-simulator:latest
+        image: antrea/antrea-ubuntu-simulator:latest
         imagePullPolicy: IfNotPresent
         command: ['/usr/local/bin/antrea-agent-simulator', '-v', '5']
         env:
@@ -68,29 +71,24 @@ spec:
         - name: logs-volume
           mountPath: /var/log
       - name: hollow-kubelet
-        image: projects.registry.vmware.com/antrea/kubemark:v1.18.4
+        image: antrea/kubemark:v1.29.0
         ports:
         - containerPort: 4194
         - containerPort: 10250
         - containerPort: 10255
         env:
-        - name: CONTENT_TYPE
-          valueFrom:
-            configMapKeyRef:
-              name: node-configmap
-              key: content.type
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
         command: [
+          "/go-runner",
+          "-log-file=/var/log/kubelet-$(NODE_NAME).log",
           "/kubemark",
           "--morph=kubelet",
           "--name=$(NODE_NAME)",
           "--kubeconfig=/kubeconfig/admin.conf",
-          "$(CONTENT_TYPE)",
           "--v=2",
-          "--log-file=/var/log/kubelet-$(NODE_NAME).log",
           "--node-labels=antrea/instance=simulator",
         ]
         volumeMounts:
@@ -99,6 +97,8 @@ spec:
           readOnly: true
         - name: logs-volume
           mountPath: /var/log
+        - name: containerd
+          mountPath: /run/containerd
         resources:
           requests:
             cpu: 20m
@@ -106,27 +106,21 @@ spec:
         securityContext:
           privileged: true
       - name: hollow-proxy
-        image: projects.registry.vmware.com/antrea/kubemark:v1.18.4
+        image: antrea/kubemark:v1.29.0
         env:
-        - name: CONTENT_TYPE
-          valueFrom:
-            configMapKeyRef:
-              name: node-configmap
-              key: content.type
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
         command: [
+          "/go-runner",
+          "-log-file=/var/log/kubeproxy-$(NODE_NAME).log",
           "/kubemark",
           "--morph=proxy",
           "--name=$(NODE_NAME)",
           "--use-real-proxier=false",
           "--kubeconfig=/kubeconfig/admin.conf",
-          "$(CONTENT_TYPE)",
-          "--alsologtostderr",
           "--v=2",
-          "--log-file=/var/log/kubelet-$(NODE_NAME).log"
         ]
         volumeMounts:
         - name: kubeconfig-volume

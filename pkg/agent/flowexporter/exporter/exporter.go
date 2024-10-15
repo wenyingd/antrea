@@ -15,6 +15,7 @@
 package exporter
 
 import (
+	"context"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -23,6 +24,7 @@ import (
 	ipfixentities "github.com/vmware/go-ipfix/pkg/entities"
 	"github.com/vmware/go-ipfix/pkg/exporter"
 	ipfixregistry "github.com/vmware/go-ipfix/pkg/registry"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
@@ -31,14 +33,16 @@ import (
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/flowexporter/connections"
 	"antrea.io/antrea/pkg/agent/flowexporter/priorityqueue"
-	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/metrics"
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/proxy"
+	"antrea.io/antrea/pkg/features"
 	"antrea.io/antrea/pkg/ipfix"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	"antrea.io/antrea/pkg/querier"
 	"antrea.io/antrea/pkg/util/env"
+	k8sutil "antrea.io/antrea/pkg/util/k8s"
+	"antrea.io/antrea/pkg/util/podstore"
 )
 
 // When initializing flowExporter, a slice is allocated with a fixed size to
@@ -96,12 +100,18 @@ var (
 		"egressNetworkPolicyRuleAction",
 		"tcpState",
 		"flowType",
+		"egressName",
+		"egressIP",
+		"appProtocolName",
+		"httpVals",
+		"egressNodeName",
 	}
 	AntreaInfoElementsIPv4 = append(antreaInfoElementsCommon, []string{"destinationClusterIPv4"}...)
 	AntreaInfoElementsIPv6 = append(antreaInfoElementsCommon, []string{"destinationClusterIPv6"}...)
 )
 
 type FlowExporter struct {
+	collectorAddr          string
 	conntrackConnStore     *connections.ConntrackConnectionStore
 	denyConnStore          *connections.DenyConnectionStore
 	process                ipfix.IPFIXExportingProcess
@@ -122,6 +132,9 @@ type FlowExporter struct {
 	conntrackPriorityQueue *priorityqueue.ExpirePriorityQueue
 	denyPriorityQueue      *priorityqueue.ExpirePriorityQueue
 	expiredConns           []flowexporter.Connection
+	egressQuerier          querier.EgressQuerier
+	podStore               podstore.Interface
+	l7Listener             *connections.L7Listener
 }
 
 func genObservationID(nodeName string) uint32 {
@@ -130,26 +143,26 @@ func genObservationID(nodeName string) uint32 {
 	return h.Sum32()
 }
 
-func prepareExporterInputArgs(collectorAddr, collectorProto, nodeName string) exporter.ExporterInput {
+func prepareExporterInputArgs(collectorProto, nodeName string) exporter.ExporterInput {
 	expInput := exporter.ExporterInput{}
 	// Exporting process requires domain observation ID.
 	expInput.ObservationDomainID = genObservationID(nodeName)
 
-	expInput.CollectorAddress = collectorAddr
 	if collectorProto == "tls" {
-		expInput.IsEncrypted = true
+		expInput.TLSClientConfig = &exporter.ExporterTLSClientConfig{}
 		expInput.CollectorProtocol = "tcp"
 	} else {
-		expInput.IsEncrypted = false
+		expInput.TLSClientConfig = nil
 		expInput.CollectorProtocol = collectorProto
 	}
 
 	return expInput
 }
 
-func NewFlowExporter(ifaceStore interfacestore.InterfaceStore, proxier proxy.Proxier, k8sClient kubernetes.Interface, nodeRouteController *noderoute.Controller,
+func NewFlowExporter(podStore podstore.Interface, proxier proxy.Proxier, k8sClient kubernetes.Interface, nodeRouteController *noderoute.Controller,
 	trafficEncapMode config.TrafficEncapModeType, nodeConfig *config.NodeConfig, v4Enabled, v6Enabled bool, serviceCIDRNet, serviceCIDRNetv6 *net.IPNet,
-	ovsDatapathType ovsconfig.OVSDatapathType, proxyEnabled bool, npQuerier querier.AgentNetworkPolicyInfoQuerier, o *flowexporter.FlowExporterOptions) (*FlowExporter, error) {
+	ovsDatapathType ovsconfig.OVSDatapathType, proxyEnabled bool, npQuerier querier.AgentNetworkPolicyInfoQuerier, o *flowexporter.FlowExporterOptions,
+	egressQuerier querier.EgressQuerier, podL7FlowExporterAttrGetter connections.PodL7FlowExporterAttrGetter, l7FlowExporterEnabled bool) (*FlowExporter, error) {
 	// Initialize IPFIX registry
 	registry := ipfix.NewIPFIXRegistry()
 	registry.LoadRegistry()
@@ -159,13 +172,23 @@ func NewFlowExporter(ifaceStore interfacestore.InterfaceStore, proxier proxy.Pro
 	if err != nil {
 		return nil, err
 	}
-	expInput := prepareExporterInputArgs(o.FlowCollectorAddr, o.FlowCollectorProto, nodeName)
+	expInput := prepareExporterInputArgs(o.FlowCollectorProto, nodeName)
 
 	connTrackDumper := connections.InitializeConnTrackDumper(nodeConfig, serviceCIDRNet, serviceCIDRNetv6, ovsDatapathType, proxyEnabled)
-	denyConnStore := connections.NewDenyConnectionStore(ifaceStore, proxier, o)
-	conntrackConnStore := connections.NewConntrackConnectionStore(connTrackDumper, v4Enabled, v6Enabled, npQuerier, ifaceStore, proxier, o)
+	denyConnStore := connections.NewDenyConnectionStore(podStore, proxier, o)
+	var l7Listener *connections.L7Listener
+	var eventMapGetter connections.L7EventMapGetter
+	if l7FlowExporterEnabled {
+		l7Listener = connections.NewL7Listener(podL7FlowExporterAttrGetter, podStore)
+		eventMapGetter = l7Listener
+	}
+	conntrackConnStore := connections.NewConntrackConnectionStore(connTrackDumper, v4Enabled, v6Enabled, npQuerier, podStore, proxier, eventMapGetter, o)
+	if nodeRouteController == nil {
+		klog.InfoS("NodeRouteController is nil, will not be able to determine flow type for connections")
+	}
 
 	return &FlowExporter{
+		collectorAddr:          o.FlowCollectorAddr,
 		conntrackConnStore:     conntrackConnStore,
 		denyConnStore:          denyConnStore,
 		registry:               registry,
@@ -180,6 +203,9 @@ func NewFlowExporter(ifaceStore interfacestore.InterfaceStore, proxier proxy.Pro
 		conntrackPriorityQueue: conntrackConnStore.GetPriorityQueue(),
 		denyPriorityQueue:      denyConnStore.GetPriorityQueue(),
 		expiredConns:           make([]flowexporter.Connection, 0, maxConnsToExport*2),
+		egressQuerier:          egressQuerier,
+		podStore:               podStore,
+		l7Listener:             l7Listener,
 	}, nil
 }
 
@@ -188,6 +214,11 @@ func (exp *FlowExporter) GetDenyConnStore() *connections.DenyConnectionStore {
 }
 
 func (exp *FlowExporter) Run(stopCh <-chan struct{}) {
+	go exp.podStore.Run(stopCh)
+	// Start L7 connection flow socket
+	if features.DefaultFeatureGate.Enabled(features.L7FlowExporter) {
+		go exp.l7Listener.Run(stopCh)
+	}
 	// Start the goroutine to periodically delete stale deny connections.
 	go exp.denyConnStore.RunPeriodicDeletion(stopCh)
 
@@ -206,7 +237,9 @@ func (exp *FlowExporter) Run(stopCh <-chan struct{}) {
 			return
 		case <-expireTimer.C:
 			if exp.process == nil {
-				err := exp.initFlowExporter()
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				err := exp.initFlowExporter(ctx)
+				cancel()
 				if err != nil {
 					klog.ErrorS(err, "Error when initializing flow exporter")
 					// There could be other errors while initializing flow exporter
@@ -242,8 +275,14 @@ func (exp *FlowExporter) Run(stopCh <-chan struct{}) {
 func (exp *FlowExporter) sendFlowRecords() (time.Duration, error) {
 	currTime := time.Now()
 	var expireTime1, expireTime2 time.Duration
-	exp.expiredConns, expireTime1 = exp.conntrackConnStore.GetExpiredConns(exp.expiredConns, currTime, maxConnsToExport)
+	// We export records from denyConnStore first, then conntrackConnStore. We enforce the ordering to handle a
+	// special case: for an inter-node connection with egress drop network policy, both conntrackConnStore and
+	// denyConnStore from the same Node will send out records to Flow Aggregator. If the record from conntrackConnStore
+	// arrives FA first, FA will not be able to capture the deny network policy metadata, and it will keep waiting
+	// for a record from destination Node to finish flow correlation until timeout. Later on we probably should
+	// consider doing a record deduplication between conntrackConnStore and denyConnStore before exporting records.
 	exp.expiredConns, expireTime2 = exp.denyConnStore.GetExpiredConns(exp.expiredConns, currTime, maxConnsToExport)
+	exp.expiredConns, expireTime1 = exp.conntrackConnStore.GetExpiredConns(exp.expiredConns, currTime, maxConnsToExport)
 	// Select the shorter time out among two connection stores to do the next round of export.
 	nextExpireTime := getMinTime(expireTime1, expireTime2)
 	for i := range exp.expiredConns {
@@ -257,31 +296,57 @@ func (exp *FlowExporter) sendFlowRecords() (time.Duration, error) {
 	return nextExpireTime, nil
 }
 
-func (exp *FlowExporter) initFlowExporter() error {
+func (exp *FlowExporter) resolveCollectorAddress(ctx context.Context) error {
+	exp.exporterInput.CollectorAddress = ""
+	host, port, err := net.SplitHostPort(exp.collectorAddr)
+	if err != nil {
+		return err
+	}
+	ns, name := k8sutil.SplitNamespacedName(host)
+	if ns == "" {
+		exp.exporterInput.CollectorAddress = exp.collectorAddr
+		return nil
+	}
+	svc, err := exp.k8sClient.CoreV1().Services(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to resolve FlowAggregator Service: %s/%s", ns, name)
+	}
+	if svc.Spec.ClusterIP == "" {
+		return fmt.Errorf("ClusterIP is not available for FlowAggregator Service: %s/%s", ns, name)
+	}
+	exp.exporterInput.CollectorAddress = net.JoinHostPort(svc.Spec.ClusterIP, port)
+	if exp.exporterInput.TLSClientConfig != nil {
+		exp.exporterInput.TLSClientConfig.ServerName = fmt.Sprintf("%s.%s.svc", name, ns)
+	}
+	klog.V(2).InfoS("Resolved FlowAggregator Service address", "address", exp.exporterInput.CollectorAddress)
+	return nil
+}
+
+func (exp *FlowExporter) initFlowExporter(ctx context.Context) error {
+	if err := exp.resolveCollectorAddress(ctx); err != nil {
+		return err
+	}
 	var err error
-	if exp.exporterInput.IsEncrypted {
+	if exp.exporterInput.TLSClientConfig != nil {
+		tlsConfig := exp.exporterInput.TLSClientConfig
 		// if CA certificate, client certificate and key do not exist during initialization,
 		// it will retry to obtain the credentials in next export cycle
-		exp.exporterInput.CACert, err = getCACert(exp.k8sClient)
+		tlsConfig.CAData, err = getCACert(ctx, exp.k8sClient)
 		if err != nil {
 			return fmt.Errorf("cannot retrieve CA cert: %v", err)
 		}
-		exp.exporterInput.ClientCert, exp.exporterInput.ClientKey, err = getClientCertKey(exp.k8sClient)
+		tlsConfig.CertData, tlsConfig.KeyData, err = getClientCertKey(ctx, exp.k8sClient)
 		if err != nil {
 			return fmt.Errorf("cannot retrieve client cert and key: %v", err)
 		}
 		// TLS transport does not need any tempRefTimeout, so sending 0.
 		exp.exporterInput.TempRefTimeout = 0
-	} else if exp.exporterInput.CollectorProtocol == "tcp" {
-		// TCP transport does not need any tempRefTimeout, so sending 0.
-		// tempRefTimeout is the template refresh timeout, which specifies how often
-		// the exporting process should send the template again.
-		exp.exporterInput.TempRefTimeout = 0
-	} else {
-		// For UDP transport, hardcoding tempRefTimeout value as 1800s.
-		exp.exporterInput.TempRefTimeout = 1800
 	}
-	expProcess, err := ipfix.NewIPFIXExportingProcess(exp.exporterInput)
+	// TempRefTimeout specifies how often the exporting process should send the template
+	// again. It is only relevant when using the UDP protocol. We use 0 to tell the go-ipfix
+	// library to use the default value, which should be 600s as per the IPFIX standards.
+	exp.exporterInput.TempRefTimeout = 0
+	expProcess, err := exporter.InitExportingProcess(exp.exporterInput)
 	if err != nil {
 		return fmt.Errorf("error when starting exporter: %v", err)
 	}
@@ -380,7 +445,7 @@ func (exp *FlowExporter) addConnToSet(conn *flowexporter.Connection) error {
 
 	eL := exp.elementsListv4
 	templateID := exp.templateIDv4
-	if conn.FlowKey.SourceAddress.To4() == nil {
+	if conn.FlowKey.SourceAddress.Is6() {
 		templateID = exp.templateIDv6
 		eL = exp.elementsListv6
 	}
@@ -404,13 +469,13 @@ func (exp *FlowExporter) addConnToSet(conn *flowexporter.Connection) error {
 				ie.SetUnsigned8Value(ipfixregistry.IdleTimeoutReason)
 			}
 		case "sourceIPv4Address":
-			ie.SetIPAddressValue(conn.FlowKey.SourceAddress)
+			ie.SetIPAddressValue(conn.FlowKey.SourceAddress.AsSlice())
 		case "destinationIPv4Address":
-			ie.SetIPAddressValue(conn.FlowKey.DestinationAddress)
+			ie.SetIPAddressValue(conn.FlowKey.DestinationAddress.AsSlice())
 		case "sourceIPv6Address":
-			ie.SetIPAddressValue(conn.FlowKey.SourceAddress)
+			ie.SetIPAddressValue(conn.FlowKey.SourceAddress.AsSlice())
 		case "destinationIPv6Address":
-			ie.SetIPAddressValue(conn.FlowKey.DestinationAddress)
+			ie.SetIPAddressValue(conn.FlowKey.DestinationAddress.AsSlice())
 		case "sourceTransportPort":
 			ie.SetUnsigned16Value(conn.FlowKey.SourcePort)
 		case "destinationTransportPort":
@@ -473,7 +538,7 @@ func (exp *FlowExporter) addConnToSet(conn *flowexporter.Connection) error {
 			}
 		case "destinationClusterIPv4":
 			if conn.DestinationServicePortName != "" {
-				ie.SetIPAddressValue(conn.DestinationServiceAddress)
+				ie.SetIPAddressValue(conn.OriginalDestinationAddress.AsSlice())
 			} else {
 				// Sending dummy IP as IPFIX collector expects constant length of data for IP field.
 				// We should probably think of better approach as this involves customization of IPFIX collector to ignore
@@ -482,14 +547,14 @@ func (exp *FlowExporter) addConnToSet(conn *flowexporter.Connection) error {
 			}
 		case "destinationClusterIPv6":
 			if conn.DestinationServicePortName != "" {
-				ie.SetIPAddressValue(conn.DestinationServiceAddress)
+				ie.SetIPAddressValue(conn.OriginalDestinationAddress.AsSlice())
 			} else {
 				// Same as destinationClusterIPv4.
 				ie.SetIPAddressValue(net.ParseIP("::"))
 			}
 		case "destinationServicePort":
 			if conn.DestinationServicePortName != "" {
-				ie.SetUnsigned16Value(conn.DestinationServicePort)
+				ie.SetUnsigned16Value(conn.OriginalDestinationPort)
 			} else {
 				ie.SetUnsigned16Value(uint16(0))
 			}
@@ -518,7 +583,17 @@ func (exp *FlowExporter) addConnToSet(conn *flowexporter.Connection) error {
 		case "tcpState":
 			ie.SetStringValue(conn.TCPState)
 		case "flowType":
-			ie.SetUnsigned8Value(exp.findFlowType(*conn))
+			ie.SetUnsigned8Value(conn.FlowType)
+		case "egressName":
+			ie.SetStringValue(conn.EgressName)
+		case "egressIP":
+			ie.SetStringValue(conn.EgressIP)
+		case "appProtocolName":
+			ie.SetStringValue(conn.AppProtocolName)
+		case "httpVals":
+			ie.SetStringValue(conn.HttpVals)
+		case "egressNodeName":
+			ie.SetStringValue(conn.EgressNodeName)
 		}
 	}
 	err := exp.ipfixSet.AddRecord(eL, templateID)
@@ -547,11 +622,11 @@ func (exp *FlowExporter) findFlowType(conn flowexporter.Connection) uint8 {
 	}
 
 	if exp.nodeRouteController == nil {
-		klog.Warningf("Can't find flowType without nodeRouteController")
+		klog.V(4).InfoS("Can't find flowType without nodeRouteController")
 		return 0
 	}
-	if exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.SourceAddress) {
-		if conn.Mark&openflow.ServiceCTMark.GetRange().ToNXRange().ToUint32Mask() == openflow.ServiceCTMark.GetValue() || exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.DestinationAddress) {
+	if exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.SourceAddress.AsSlice()) {
+		if conn.Mark&openflow.ServiceCTMark.GetRange().ToNXRange().ToUint32Mask() == openflow.ServiceCTMark.GetValue() || exp.nodeRouteController.IPInPodSubnets(conn.FlowKey.DestinationAddress.AsSlice()) {
 			if conn.SourcePodName == "" || conn.DestinationPodName == "" {
 				return ipfixregistry.FlowTypeInterNode
 			}
@@ -564,7 +639,28 @@ func (exp *FlowExporter) findFlowType(conn flowexporter.Connection) uint8 {
 	return 0
 }
 
+func (exp *FlowExporter) fillEgressInfo(conn *flowexporter.Connection) {
+	egressName, egressIP, egressNodeName, err := exp.egressQuerier.GetEgress(conn.SourcePodNamespace, conn.SourcePodName)
+	if err != nil {
+		// Egress is not enabled or no Egress is applied to this Pod
+		return
+	}
+	conn.EgressName = egressName
+	conn.EgressIP = egressIP
+	conn.EgressNodeName = egressNodeName
+	klog.V(4).InfoS("Filling Egress Info for flow", "Egress", conn.EgressName, "EgressIP", conn.EgressIP, "EgressNode", conn.EgressNodeName, "SourcePod", klog.KRef(conn.SourcePodNamespace, conn.SourcePodName))
+}
+
 func (exp *FlowExporter) exportConn(conn *flowexporter.Connection) error {
+	conn.FlowType = exp.findFlowType(*conn)
+	if conn.FlowType == ipfixregistry.FlowTypeToExternal {
+		if conn.SourcePodNamespace != "" && conn.SourcePodName != "" {
+			exp.fillEgressInfo(conn)
+		} else {
+			// Skip exporting the Pod-to-External connection at the Egress Node if it's different from the Source Node
+			return nil
+		}
+	}
 	// TODO: more records per data set will be supported when go-ipfix supports size check when adding records
 	if err := exp.addConnToSet(conn); err != nil {
 		return err

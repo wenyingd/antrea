@@ -57,6 +57,7 @@ rules:
       - customresourcedefinitions
     verbs:
       - get
+      - list
       - update
   # This is the content of built-in role kube-system/extension-apiserver-authentication-reader.
   # But it doesn't have list/watch permission before K8s v1.17.0 so the extension apiserver (antrea-controller) will
@@ -90,11 +91,13 @@ rules:
     resources:
       - secrets
     resourceNames:
+      - antrea-controller-tls
       - antrea-ipsec-ca
     verbs:
       - get
       - update
       - watch
+      - list
   - apiGroups:
       - ""
     resources:
@@ -106,39 +109,16 @@ rules:
       - apiregistration.k8s.io
     resources:
       - apiservices
-    resourceNames:
-      - v1alpha1.stats.antrea.io
-      - v1beta1.system.antrea.io
-      - v1beta2.controlplane.antrea.io
     verbs:
-      - get
+      - list
       - update
-  - apiGroups:
-      - apiregistration.k8s.io
-    resources:
-      - apiservices
-    resourceNames:
-      - v1beta1.networking.antrea.tanzu.vmware.com
-      - v1beta1.controlplane.antrea.tanzu.vmware.com
-      - v1alpha1.stats.antrea.tanzu.vmware.com
-      - v1beta1.system.antrea.tanzu.vmware.com
-      - v1beta2.controlplane.antrea.tanzu.vmware.com
-    verbs:
-      - delete
   - apiGroups:
       - admissionregistration.k8s.io
     resources:
       - mutatingwebhookconfigurations
       - validatingwebhookconfigurations
-    resourceNames:
-      # always give permissions for labelsmutator.antrea.io, even when the
-      # feature is disabled, to avoid errors in antrea-controller when updating
-      # the CA cert.
-      - labelsmutator.antrea.io
-      - crdmutator.antrea.io
-      - crdvalidator.antrea.io
     verbs:
-      - get
+      - list
       - update
   - apiGroups:
     - certificates.k8s.io
@@ -245,6 +225,7 @@ rules:
     resources:
       - clustergroups/status
       - groups/status
+      - egresses/status
     verbs:
       - update
   - apiGroups:
@@ -286,6 +267,37 @@ rules:
       - apps
     resources:
       - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - crd.antrea.io
+    resources:
+      - supportbundlecollections
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - crd.antrea.io
+    resources:
+      - supportbundlecollections/status
+    verbs:
+      - update
+  - apiGroups:
+      - multicluster.crd.antrea.io
+    resources:
+      - labelidentities
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - policy.networking.k8s.io
+    resources:
+      - adminnetworkpolicies
+      - baselineadminnetworkpolicies
     verbs:
       - get
       - list

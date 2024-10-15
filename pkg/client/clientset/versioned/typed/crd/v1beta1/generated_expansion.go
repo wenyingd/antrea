@@ -1,4 +1,4 @@
-// Copyright 2021 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,3 +19,21 @@ package v1beta1
 type AntreaAgentInfoExpansion interface{}
 
 type AntreaControllerInfoExpansion interface{}
+
+type ClusterGroupExpansion interface{}
+
+type ClusterNetworkPolicyExpansion interface{}
+
+type EgressExpansion interface{}
+
+type ExternalIPPoolExpansion interface{}
+
+type GroupExpansion interface{}
+
+type IPPoolExpansion interface{}
+
+type NetworkPolicyExpansion interface{}
+
+type TierExpansion interface{}
+
+type TraceflowExpansion interface{}

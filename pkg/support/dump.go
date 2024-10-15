@@ -32,7 +32,6 @@ import (
 
 	agentquerier "antrea.io/antrea/pkg/agent/querier"
 	clusterinformationv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
-	controllerquerier "antrea.io/antrea/pkg/controller/querier"
 	"antrea.io/antrea/pkg/ovs/ovsctl"
 	"antrea.io/antrea/pkg/querier"
 	"antrea.io/antrea/pkg/util/logdir"
@@ -44,6 +43,8 @@ import (
 type AgentDumper interface {
 	// DumpFlows should create files that contains flows under the basedir.
 	DumpFlows(basedir string) error
+	// DumpGroups should create files that contains groups under the basedir
+	DumpGroups(basedir string) error
 	// DumpHostNetworkInfo should create files that contains host network
 	// information under the basedir. Host network information should include
 	// links, routes, addresses and etc.
@@ -59,9 +60,14 @@ type AgentDumper interface {
 	DumpNetworkPolicyResources(basedir string) error
 	// DumpHeapPprof should create a pprof file of heap usage of the agent.
 	DumpHeapPprof(basedir string) error
+	// DumpGoroutinePprof should create a pprof file of goroutine stacks of the agent.
+	DumpGoroutinePprof(basedir string) error
 
 	// DumpOVSPorts should create file that contains OF port descriptions under the basedir.
 	DumpOVSPorts(basedir string) error
+	// DumpMemberlist should create a file that contains state of Memberlist
+	// cluster of the agent Pod under the basedir.
+	DumpMemberlist(basedir string) error
 }
 
 // ControllerDumper is the interface for dumping runtime information of the
@@ -78,6 +84,8 @@ type ControllerDumper interface {
 	DumpNetworkPolicyResources(basedir string) error
 	// DumpHeapPprof should create a pprof file of the heap usage of the controller.
 	DumpHeapPprof(basedir string) error
+	// DumpGoroutinePprof should create a pprof file of goroutine stacks of the controller.
+	DumpGoroutinePprof(basedir string) error
 }
 
 func DumpHeapPprof(fs afero.Fs, basedir string) error {
@@ -87,6 +95,15 @@ func DumpHeapPprof(fs afero.Fs, basedir string) error {
 	}
 	defer f.Close()
 	return pprof.WriteHeapProfile(f)
+}
+
+func DumpGoroutinePprof(fs afero.Fs, basedir string) error {
+	f, err := fs.Create(filepath.Join(basedir, "goroutinestacks"))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return pprof.Lookup("goroutine").WriteTo(f, 2)
 }
 
 func dumpAntctlGet(fs afero.Fs, executor exec.Interface, name, basedir string) error {
@@ -175,13 +192,13 @@ func directoryCopy(fs afero.Fs, targetDir string, srcDir string, prefixFilter st
 		targetPath := path.Join(targetDir, info.Name())
 		targetFile, err := fs.Create(targetPath)
 		if err != nil {
-			return err
+			return fmt.Errorf("error when creating target file %s: %w", targetPath, err)
 		}
 		defer targetFile.Close()
 
 		srcFile, err := fs.Open(filePath)
 		if err != nil {
-			return err
+			return fmt.Errorf("error when opening source file %s: %w", filePath, err)
 		}
 		defer srcFile.Close()
 
@@ -245,7 +262,6 @@ func writeYAMLFile(fs afero.Fs, filePath string, resource string, data interface
 type controllerDumper struct {
 	fs       afero.Fs
 	executor exec.Interface
-	cq       controllerquerier.ControllerQuerier
 	since    string
 }
 
@@ -264,6 +280,10 @@ func (d *controllerDumper) DumpLog(basedir string) error {
 
 func (d *controllerDumper) DumpHeapPprof(basedir string) error {
 	return DumpHeapPprof(d.fs, basedir)
+}
+
+func (d *controllerDumper) DumpGoroutinePprof(basedir string) error {
+	return DumpGoroutinePprof(d.fs, basedir)
 }
 
 func NewControllerDumper(fs afero.Fs, executor exec.Interface, since string) ControllerDumper {
@@ -312,8 +332,20 @@ func (d *agentDumper) DumpFlows(basedir string) error {
 	return writeFile(d.fs, filepath.Join(basedir, "flows"), "flows", []byte(strings.Join(flows, "\n")))
 }
 
+func (d *agentDumper) DumpGroups(basedir string) error {
+	groups, err := d.ovsCtlClient.DumpGroups()
+	if err != nil {
+		return fmt.Errorf("error when dumping groups: %w", err)
+	}
+	return writeFile(d.fs, filepath.Join(basedir, "groups"), "groups", []byte(strings.Join(groups, "\n")))
+}
+
 func (d *agentDumper) DumpHeapPprof(basedir string) error {
 	return DumpHeapPprof(d.fs, basedir)
+}
+
+func (d *agentDumper) DumpGoroutinePprof(basedir string) error {
+	return DumpGoroutinePprof(d.fs, basedir)
 }
 
 func (d *agentDumper) DumpOVSPorts(basedir string) error {

@@ -38,11 +38,12 @@ type REST struct {
 }
 
 var (
-	_ rest.Storage = &REST{}
-	_ rest.Watcher = &REST{}
-	_ rest.Scoper  = &REST{}
-	_ rest.Lister  = &REST{}
-	_ rest.Getter  = &REST{}
+	_ rest.Storage              = &REST{}
+	_ rest.Watcher              = &REST{}
+	_ rest.Scoper               = &REST{}
+	_ rest.Lister               = &REST{}
+	_ rest.Getter               = &REST{}
+	_ rest.SingularNameProvider = &REST{}
 )
 
 // NewREST returns a REST object that will work against API services.
@@ -52,6 +53,9 @@ func NewREST(egressGroupStore storage.Interface) *REST {
 
 func (r *REST) New() runtime.Object {
 	return &controlplane.EgressGroup{}
+}
+
+func (r *REST) Destroy() {
 }
 
 func (r *REST) NewList() runtime.Object {
@@ -100,4 +104,8 @@ func (r *REST) Watch(ctx context.Context, options *internalversion.ListOptions) 
 
 func (r *REST) ConvertToTable(ctx context.Context, obj runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
 	return rest.NewDefaultTableConvertor(controlplane.Resource("egressgroup")).ConvertToTable(ctx, obj, tableOptions)
+}
+
+func (r *REST) GetSingularName() string {
+	return "egressgroup"
 }

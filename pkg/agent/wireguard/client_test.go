@@ -18,12 +18,15 @@
 package wireguard
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"antrea.io/antrea/pkg/agent/config"
@@ -376,5 +379,94 @@ func Test_DeletePeer(t *testing.T) {
 		_, ok := client.peerPublicKeyByNodeName.Load("fake-node-1")
 		assert.False(t, ok)
 	})
+}
 
+func Test_New(t *testing.T) {
+	_, err := New(&config.NodeConfig{Name: "test"}, &config.WireGuardConfig{})
+	require.NoError(t, err)
+}
+
+func Test_Init(t *testing.T) {
+	tests := []struct {
+		name          string
+		linkAddErr    error
+		linkSetUpErr  error
+		linkSetMTUErr error
+		utilConfigErr error
+		expectedErr   string
+		extraIPv4     net.IP
+		extraIPv6     net.IP
+	}{
+		{
+			name: "init successfully",
+		},
+		{
+			name:        "failed to init due to unix.EOPNOTSUPP error",
+			linkAddErr:  unix.EOPNOTSUPP,
+			expectedErr: "WireGuard not supported by the Linux kernel (netlink: operation not supported), make sure the WireGuard kernel module is loaded",
+		},
+		{
+			name:       "init successfully with unix.EEXIST error",
+			linkAddErr: unix.EEXIST,
+		},
+		{
+			name:          "failed to init due to linkSetMTU error",
+			linkAddErr:    unix.EEXIST,
+			linkSetMTUErr: errors.New("link set mtu failed"),
+			expectedErr:   "failed to change WireGuard link MTU to 1420: link set mtu failed",
+		},
+		{
+			name:        "failed to init due to link add error",
+			linkAddErr:  errors.New("link add failed"),
+			expectedErr: "link add failed",
+		},
+		{
+			name:         "failed to init due to link setup error",
+			linkSetUpErr: errors.New("link setup failed"),
+			expectedErr:  "link setup failed",
+		},
+		{
+			name:          "failed to init due to link address config error",
+			utilConfigErr: errors.New("link address config failed"),
+			expectedErr:   "link address config failed",
+		},
+		{
+			name:      "init successfully with provided IPv4 address",
+			extraIPv4: net.ParseIP("192.168.0.0"),
+		},
+		{
+			name:      "init successfully with provided IPv6 address",
+			extraIPv6: net.ParseIP("0000:0000:0000:0000:0000:0000:0000:0000"),
+		},
+	}
+
+	client := getFakeClient()
+	client.gatewayConfig = &config.GatewayConfig{
+		IPv4: net.ParseIP("192.168.0.2"),
+		IPv6: net.ParseIP("fd12:ab:34:a001::11"),
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			linkAdd = func(link netlink.Link) error {
+				return tt.linkAddErr
+			}
+			linkSetUp = func(link netlink.Link) error {
+				return tt.linkSetUpErr
+			}
+			linkSetMTU = func(link netlink.Link, mtu int) error {
+				return tt.linkSetMTUErr
+			}
+			utilConfigureLinkAddresses = func(idx int, ipNets []*net.IPNet) error {
+				return tt.utilConfigErr
+			}
+
+			_, err := client.Init(tt.extraIPv4, tt.extraIPv6)
+			if tt.expectedErr != "" {
+				assert.Equal(t, tt.expectedErr, err.Error())
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

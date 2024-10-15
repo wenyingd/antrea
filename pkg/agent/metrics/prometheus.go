@@ -23,6 +23,10 @@ import (
 const (
 	metricNamespaceAntrea = "antrea"
 	metricSubsystemAgent  = "agent"
+
+	LabelPacketInMeterNetworkPolicy   = "PacketInMeterNetworkPolicy"
+	LabelPacketInMeterTraceflow       = "PacketInMeterTraceflow"
+	LabelPacketInMeterDNSInterception = "PacketInMeterDNSInterception"
 )
 
 var (
@@ -79,9 +83,9 @@ var (
 		Namespace:      metricNamespaceAntrea,
 		Subsystem:      metricSubsystemAgent,
 		Name:           "ovs_flow_count",
-		Help:           "Flow count for each OVS flow table. The TableID is used as a label.",
+		Help:           "Flow count for each OVS flow table. The TableID and TableName are used as labels.",
 		StabilityLevel: metrics.STABLE,
-	}, []string{"table_id"})
+	}, []string{"table_id", "table_name"})
 
 	OVSFlowOpsCount = metrics.NewCounterVec(
 		&metrics.CounterOpts{
@@ -114,6 +118,20 @@ var (
 			StabilityLevel: metrics.ALPHA,
 		},
 		[]string{"operation"},
+	)
+
+	// OVSMeterPacketDroppedCount is defined as a Gauge and not a Counter, even though this metric is monotonically
+	// increasing (only being reset to 0 on restart).  This is because we want to set its value directly using the
+	// Set method (using the value provided by OVS), and using Inc / Add is not convenient.
+	OVSMeterPacketDroppedCount = metrics.NewGaugeVec(
+		&metrics.GaugeOpts{
+			Namespace:      metricNamespaceAntrea,
+			Subsystem:      metricSubsystemAgent,
+			Name:           "ovs_meter_packet_dropped_count",
+			Help:           "Number of packets dropped by OVS meter. The value is greater than 0 when the packets exceed the rate-limit.",
+			StabilityLevel: metrics.ALPHA,
+		},
+		[]string{"meter_id"},
 	)
 
 	TotalConnectionsInConnTrackTable = metrics.NewGauge(
@@ -213,13 +231,18 @@ func InitializeOVSMetrics() {
 	if err := legacyregistry.Register(OVSFlowOpsLatency); err != nil {
 		klog.ErrorS(err, "Failed to register metrics with Prometheus", "metrics", "antrea_agent_ovs_flow_ops_latency_milliseconds")
 	}
+	if err := legacyregistry.Register(OVSMeterPacketDroppedCount); err != nil {
+		klog.ErrorS(err, "Failed to register metrics with Prometheus", "metrics", "antrea_agent_ovs_meter_packet_dropped_count")
+	}
 	// Initialize OpenFlow operations metrics with label add, modify and delete
 	// since those metrics won't come out until observation.
-	opsArray := [3]string{"add", "modify", "delete"}
-	for _, ops := range opsArray {
+	for _, ops := range []string{"add", "modify", "delete"} {
 		OVSFlowOpsCount.WithLabelValues(ops)
 		OVSFlowOpsErrorCount.WithLabelValues(ops)
 		OVSFlowOpsLatency.WithLabelValues(ops)
+	}
+	for _, label := range []string{LabelPacketInMeterNetworkPolicy, LabelPacketInMeterTraceflow, LabelPacketInMeterDNSInterception} {
+		OVSMeterPacketDroppedCount.WithLabelValues(label)
 	}
 }
 

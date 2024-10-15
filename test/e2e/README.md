@@ -207,14 +207,14 @@ usage of this script and the options, run:
 ```
 
 You can also run the e2e tests with an existing Kind cluster. Refer to this
-[document](/docs/kind.md) for instructions on how to create a Kind cluster and
-use Antrea as the CNI. You need at least one control-plane Node and one worker
-Node. Before running the Go e2e tests, you will also need to copy the Antrea
-manifest to the control-plane Docker container:
+[document](../../docs/kind.md) for instructions on how to create a Kind cluster
+and use Antrea as the CNI. You need at least one control-plane Node and one
+worker Node. Before running the Go e2e tests, you will also need to copy the
+Antrea manifest to the control-plane Docker container:
 
 ```bash
 ./hack/generate-manifest.sh | docker exec -i kind-control-plane dd of=/root/antrea.yml
-go test -timeout=75 -v antrea.io/antrea/test/e2e -provider=kind
+go test -timeout=75m -v antrea.io/antrea/test/e2e -provider=kind
 ```
 
 The default timeout of `go test` is [10 minutes](https://pkg.go.dev/cmd/go#hdr-Testing_flags).
@@ -231,7 +231,7 @@ then make the code changes on the local repo and
 You can load the new image into the kind cluster using the command below:
 
 ```bash
-kind load docker-image projects.registry.vmware.com/antrea/antrea-ubuntu:latest --name <kind_cluster_name>
+kind load docker-image antrea/antrea-controller-ubuntu:latest antrea/antrea-agent-ubuntu:latest --name <kind_cluster_name>
 ```
 
 By default, if a test case fails, we write some useful debug information to a
@@ -270,7 +270,7 @@ To run all benchmarks, without the standard e2e tests:
 ```bash
 go test -v -timeout=30m -run=XXX -bench=. \
     antrea.io/antrea/test/e2e \
-    --performance.http.concurrency=16
+    -perf.http.concurrency=16
 ```
 
 The above command uses `-run=XXX` to deselect all `Test*` tests and uses `-bench=.` to select
@@ -282,9 +282,9 @@ If you would like to run the performance tests in a different scale, you could r
 ```bash
 go test -v -timeout=30m -run=XXX -bench=BenchmarkCustomize \
     antrea.io/antrea/test/e2e \
-    --performance.http.requests=5000 \
-    --performance.http.policy_rules=1000 \
-    --performance.http.concurrency=16
+    -perf.http.requests=5000 \
+    -perf.http.policy_rules=1000 \
+    -perf.http.concurrency=16
 ```
 
 All flags of performance tests includes:

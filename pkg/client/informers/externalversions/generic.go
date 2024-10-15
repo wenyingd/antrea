@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,7 +21,6 @@ import (
 
 	v1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
 	v1alpha2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
-	v1alpha3 "antrea.io/antrea/pkg/apis/crd/v1alpha3"
 	v1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	cache "k8s.io/client-go/tools/cache"
@@ -54,42 +53,46 @@ func (f *genericInformer) Lister() cache.GenericLister {
 func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource) (GenericInformer, error) {
 	switch resource {
 	// Group=crd.antrea.io, Version=v1alpha1
-	case v1alpha1.SchemeGroupVersion.WithResource("clusternetworkpolicies"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().ClusterNetworkPolicies().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("bgppolicies"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().BGPPolicies().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("externalnodes"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().ExternalNodes().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("networkpolicies"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().NetworkPolicies().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("tiers"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().Tiers().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("traceflows"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().Traceflows().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("nodelatencymonitors"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().NodeLatencyMonitors().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("supportbundlecollections"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha1().SupportBundleCollections().Informer()}, nil
 
 		// Group=crd.antrea.io, Version=v1alpha2
-	case v1alpha2.SchemeGroupVersion.WithResource("clustergroups"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha2().ClusterGroups().Informer()}, nil
-	case v1alpha2.SchemeGroupVersion.WithResource("egresses"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha2().Egresses().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("externalentities"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha2().ExternalEntities().Informer()}, nil
-	case v1alpha2.SchemeGroupVersion.WithResource("externalippools"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha2().ExternalIPPools().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("ippools"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha2().IPPools().Informer()}, nil
 	case v1alpha2.SchemeGroupVersion.WithResource("trafficcontrols"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha2().TrafficControls().Informer()}, nil
-
-		// Group=crd.antrea.io, Version=v1alpha3
-	case v1alpha3.SchemeGroupVersion.WithResource("clustergroups"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha3().ClusterGroups().Informer()}, nil
-	case v1alpha3.SchemeGroupVersion.WithResource("groups"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1alpha3().Groups().Informer()}, nil
 
 		// Group=crd.antrea.io, Version=v1beta1
 	case v1beta1.SchemeGroupVersion.WithResource("antreaagentinfos"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().AntreaAgentInfos().Informer()}, nil
 	case v1beta1.SchemeGroupVersion.WithResource("antreacontrollerinfos"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().AntreaControllerInfos().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("clustergroups"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().ClusterGroups().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("clusternetworkpolicies"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().ClusterNetworkPolicies().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("egresses"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().Egresses().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("externalippools"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().ExternalIPPools().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("groups"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().Groups().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("ippools"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().IPPools().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("networkpolicies"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().NetworkPolicies().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("tiers"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().Tiers().Informer()}, nil
+	case v1beta1.SchemeGroupVersion.WithResource("traceflows"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Crd().V1beta1().Traceflows().Informer()}, nil
 
 	}
 

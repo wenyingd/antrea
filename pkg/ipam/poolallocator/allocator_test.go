@@ -15,6 +15,7 @@
 package poolallocator
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"testing"
@@ -24,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	crdv1a2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
+	crdv1b1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	informers "antrea.io/antrea/pkg/client/informers/externalversions"
 	fakepoolclient "antrea.io/antrea/pkg/ipam/poolallocator/testing"
 
@@ -37,20 +38,20 @@ import (
 
 var testNamespace = "test"
 
-var fakePodOwner = crdv1a2.IPAddressOwner{
-	Pod: &crdv1a2.PodOwner{
+var fakePodOwner = crdv1b1.IPAddressOwner{
+	Pod: &crdv1b1.PodOwner{
 		Name:        "fakePod",
 		Namespace:   testNamespace,
 		ContainerID: uuid.New().String(),
 	},
 }
 
-func newTestIPPoolAllocator(pool *crdv1a2.IPPool, stopCh <-chan struct{}) *IPPoolAllocator {
+func newTestIPPoolAllocator(pool *crdv1b1.IPPool, stopCh <-chan struct{}) *IPPoolAllocator {
 
 	crdClient := fakepoolclient.NewIPPoolClient()
 
 	crdInformerFactory := informers.NewSharedInformerFactory(crdClient, 0)
-	pools := crdInformerFactory.Crd().V1alpha2().IPPools()
+	pools := crdInformerFactory.Crd().V1beta1().IPPools()
 	poolInformer := pools.Informer()
 
 	go crdInformerFactory.Start(stopCh)
@@ -60,7 +61,7 @@ func newTestIPPoolAllocator(pool *crdv1a2.IPPool, stopCh <-chan struct{}) *IPPoo
 
 	var allocator *IPPoolAllocator
 	var err error
-	wait.PollImmediate(100*time.Millisecond, 1*time.Second, func() (bool, error) {
+	wait.PollUntilContextTimeout(context.Background(), 100*time.Millisecond, 1*time.Second, true, func(ctx context.Context) (bool, error) {
 		allocator, err = NewIPPoolAllocator(pool.Name, crdClient, pools.Lister())
 		if err != nil {
 			return false, nil
@@ -70,18 +71,18 @@ func newTestIPPoolAllocator(pool *crdv1a2.IPPool, stopCh <-chan struct{}) *IPPoo
 	return allocator
 }
 
-func validateAllocationSequence(t *testing.T, allocator *IPPoolAllocator, subnetInfo crdv1a2.SubnetInfo, ipList []string) {
+func validateAllocationSequence(t *testing.T, allocator *IPPoolAllocator, subnetInfo crdv1b1.SubnetInfo, ipList []string) {
 	i := 1
 	for _, expectedIP := range ipList {
 		klog.Info("Validating allocation for ", expectedIP)
-		owner := crdv1a2.IPAddressOwner{
-			Pod: &crdv1a2.PodOwner{
+		owner := crdv1b1.IPAddressOwner{
+			Pod: &crdv1b1.PodOwner{
 				Name:        fmt.Sprintf("fakePod%d", i),
 				Namespace:   testNamespace,
 				ContainerID: uuid.New().String(),
 			},
 		}
-		ip, returnInfo, err := allocator.AllocateNext(crdv1a2.IPAddressPhaseAllocated, owner)
+		ip, returnInfo, err := allocator.AllocateNext(crdv1b1.IPAddressPhaseAllocated, owner)
 		require.NoError(t, err)
 		assert.Equal(t, net.ParseIP(expectedIP), ip)
 		assert.Equal(t, subnetInfo, *returnInfo)
@@ -94,21 +95,19 @@ func TestAllocateIP(t *testing.T) {
 	defer close(stopCh)
 
 	poolName := uuid.New().String()
-	ipRange := crdv1a2.IPRange{
+	ipRange := crdv1b1.IPRange{
 		Start: "10.2.2.100",
 		End:   "10.2.2.120",
 	}
-	subnetInfo := crdv1a2.SubnetInfo{
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.2.1",
 		PrefixLength: 24,
 		VLAN:         100,
 	}
-	subnetRange := crdv1a2.SubnetIPRange{IPRange: ipRange,
-		SubnetInfo: subnetInfo}
 
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec:       crdv1a2.IPPoolSpec{IPRanges: []crdv1a2.SubnetIPRange{subnetRange}},
+		Spec:       crdv1b1.IPPoolSpec{IPRanges: []crdv1b1.IPRange{ipRange}, SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
@@ -116,19 +115,19 @@ func TestAllocateIP(t *testing.T) {
 	assert.Equal(t, 21, allocator.Total())
 
 	// Allocate specific IP from the range
-	returnInfo, err := allocator.AllocateIP(net.ParseIP("10.2.2.101"), crdv1a2.IPAddressPhaseAllocated, fakePodOwner)
+	returnInfo, err := allocator.AllocateIP(net.ParseIP("10.2.2.101"), crdv1b1.IPAddressPhaseAllocated, fakePodOwner)
 	assert.Equal(t, subnetInfo, *returnInfo)
 	require.NoError(t, err)
 
 	// Validate IP outside the range is not allocated
-	_, err = allocator.AllocateIP(net.ParseIP("10.2.2.121"), crdv1a2.IPAddressPhaseAllocated, fakePodOwner)
+	_, err = allocator.AllocateIP(net.ParseIP("10.2.2.121"), crdv1b1.IPAddressPhaseAllocated, fakePodOwner)
 	require.Error(t, err)
 
 	// Make sure IP allocated above is not allocated again
 	validateAllocationSequence(t, allocator, subnetInfo, []string{"10.2.2.100", "10.2.2.102"})
 
 	// Validate error is returned if IP is already allocated
-	_, err = allocator.AllocateIP(net.ParseIP("10.2.2.102"), crdv1a2.IPAddressPhaseAllocated, fakePodOwner)
+	_, err = allocator.AllocateIP(net.ParseIP("10.2.2.102"), crdv1b1.IPAddressPhaseAllocated, fakePodOwner)
 	require.Error(t, err)
 }
 
@@ -137,20 +136,18 @@ func TestAllocateNext(t *testing.T) {
 	defer close(stopCh)
 
 	poolName := "fakePool"
-	ipRange := crdv1a2.IPRange{
+	ipRange := crdv1b1.IPRange{
 		Start: "10.2.2.100",
 		End:   "10.2.2.120",
 	}
-	subnetInfo := crdv1a2.SubnetInfo{
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.2.1",
 		PrefixLength: 24,
 	}
-	subnetRange := crdv1a2.SubnetIPRange{IPRange: ipRange,
-		SubnetInfo: subnetInfo}
 
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec:       crdv1a2.IPPoolSpec{IPRanges: []crdv1a2.SubnetIPRange{subnetRange}},
+		Spec:       crdv1b1.IPPoolSpec{IPRanges: []crdv1b1.IPRange{ipRange}, SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
@@ -165,24 +162,20 @@ func TestAllocateNextMultiRange(t *testing.T) {
 	defer close(stopCh)
 
 	poolName := uuid.New().String()
-	ipRange1 := crdv1a2.IPRange{
+	ipRange1 := crdv1b1.IPRange{
 		Start: "10.2.2.100",
 		End:   "10.2.2.101",
 	}
-	ipRange2 := crdv1a2.IPRange{CIDR: "10.2.2.0/28"}
-	subnetInfo := crdv1a2.SubnetInfo{
+	ipRange2 := crdv1b1.IPRange{CIDR: "10.2.2.0/28"}
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.2.1",
 		PrefixLength: 24,
 	}
-	subnetRange1 := crdv1a2.SubnetIPRange{IPRange: ipRange1,
-		SubnetInfo: subnetInfo}
-	subnetRange2 := crdv1a2.SubnetIPRange{IPRange: ipRange2,
-		SubnetInfo: subnetInfo}
 
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRange1, subnetRange2}},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges: []crdv1b1.IPRange{ipRange1, ipRange2}, SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
@@ -198,27 +191,23 @@ func TestAllocateNextMultiRangeExausted(t *testing.T) {
 	defer close(stopCh)
 
 	poolName := uuid.New().String()
-	ipRange1 := crdv1a2.IPRange{
+	ipRange1 := crdv1b1.IPRange{
 		Start: "10.2.2.100",
 		End:   "10.2.2.101",
 	}
-	ipRange2 := crdv1a2.IPRange{
+	ipRange2 := crdv1b1.IPRange{
 		Start: "10.2.2.200",
 		End:   "10.2.2.200",
 	}
-	subnetInfo := crdv1a2.SubnetInfo{
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.2.1",
 		PrefixLength: 24,
 	}
-	subnetRange1 := crdv1a2.SubnetIPRange{IPRange: ipRange1,
-		SubnetInfo: subnetInfo}
-	subnetRange2 := crdv1a2.SubnetIPRange{IPRange: ipRange2,
-		SubnetInfo: subnetInfo}
-
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRange1, subnetRange2}},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRange1, ipRange2},
+			SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
@@ -229,7 +218,7 @@ func TestAllocateNextMultiRangeExausted(t *testing.T) {
 	validateAllocationSequence(t, allocator, subnetInfo, []string{"10.2.2.100", "10.2.2.101", "10.2.2.200"})
 
 	// Allocate next IP and get error
-	_, _, err := allocator.AllocateNext(crdv1a2.IPAddressPhaseAllocated, fakePodOwner)
+	_, _, err := allocator.AllocateNext(crdv1b1.IPAddressPhaseAllocated, fakePodOwner)
 	require.Error(t, err)
 }
 
@@ -238,24 +227,21 @@ func TestAllocateReleaseSequence(t *testing.T) {
 	defer close(stopCh)
 
 	poolName := uuid.New().String()
-	ipRange1 := crdv1a2.IPRange{
+	ipRange1 := crdv1b1.IPRange{
 		Start: "2001::1000",
 		End:   "2001::1000",
 	}
-	ipRange2 := crdv1a2.IPRange{CIDR: "2001::0/124"}
-	subnetInfo := crdv1a2.SubnetInfo{
+	ipRange2 := crdv1b1.IPRange{CIDR: "2001::0/124"}
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "2001::1",
 		PrefixLength: 64,
 	}
-	subnetRange1 := crdv1a2.SubnetIPRange{IPRange: ipRange1,
-		SubnetInfo: subnetInfo}
-	subnetRange2 := crdv1a2.SubnetIPRange{IPRange: ipRange2,
-		SubnetInfo: subnetInfo}
 
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRange1, subnetRange2}},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRange1, ipRange2},
+			SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
@@ -306,24 +292,21 @@ func TestReleaseResource(t *testing.T) {
 	defer close(stopCh)
 
 	poolName := uuid.New().String()
-	ipRange1 := crdv1a2.IPRange{
+	ipRange1 := crdv1b1.IPRange{
 		Start: "2001::1000",
 		End:   "2001::1000",
 	}
-	ipRange2 := crdv1a2.IPRange{CIDR: "2001::0/124"}
-	subnetInfo := crdv1a2.SubnetInfo{
+	ipRange2 := crdv1b1.IPRange{CIDR: "2001::0/124"}
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "2001::1",
 		PrefixLength: 64,
 	}
-	subnetRange1 := crdv1a2.SubnetIPRange{IPRange: ipRange1,
-		SubnetInfo: subnetInfo}
-	subnetRange2 := crdv1a2.SubnetIPRange{IPRange: ipRange2,
-		SubnetInfo: subnetInfo}
 
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRange1, subnetRange2}},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRange1, ipRange2},
+			SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
@@ -346,8 +329,8 @@ func TestHas(t *testing.T) {
 	stopCh := make(chan struct{})
 	defer close(stopCh)
 
-	owner := crdv1a2.IPAddressOwner{
-		Pod: &crdv1a2.PodOwner{
+	owner := crdv1b1.IPAddressOwner{
+		Pod: &crdv1b1.PodOwner{
 			Name:        "fakePod",
 			Namespace:   testNamespace,
 			ContainerID: "fakeContainer",
@@ -355,33 +338,30 @@ func TestHas(t *testing.T) {
 		},
 	}
 	poolName := uuid.New().String()
-	ipRange1 := crdv1a2.IPRange{
+	ipRange1 := crdv1b1.IPRange{
 		Start: "2001::1000",
 		End:   "2001::1000",
 	}
-	subnetInfo := crdv1a2.SubnetInfo{
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "2001::1",
 		PrefixLength: 64,
 	}
-	subnetRange1 := crdv1a2.SubnetIPRange{IPRange: ipRange1,
-		SubnetInfo: subnetInfo}
-
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec: crdv1a2.IPPoolSpec{
-			IPRanges: []crdv1a2.SubnetIPRange{subnetRange1}},
+		Spec: crdv1b1.IPPoolSpec{
+			IPRanges:   []crdv1b1.IPRange{ipRange1},
+			SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
 	require.NotNil(t, allocator)
 
-	_, _, err := allocator.AllocateNext(crdv1a2.IPAddressPhaseAllocated, owner)
+	_, _, err := allocator.AllocateNext(crdv1b1.IPAddressPhaseAllocated, owner)
 	require.NoError(t, err)
-	err = wait.PollImmediate(100*time.Millisecond, 1*time.Second, func() (bool, error) {
+	require.Eventually(t, func() bool {
 		has, _ := allocator.hasPod(testNamespace, "fakePod")
-		return has, nil
-	})
-	require.NoError(t, err)
+		return has
+	}, 1*time.Second, 100*time.Millisecond)
 
 	has, err := allocator.hasPod(testNamespace, "realPod")
 	require.NoError(t, err)
@@ -404,24 +384,22 @@ func TestAllocateReleaseStatefulSet(t *testing.T) {
 
 	poolName := uuid.New().String()
 	setName := "fakeSet"
-	ipRange := crdv1a2.IPRange{
+	ipRange := crdv1b1.IPRange{
 		Start: "10.2.2.100",
 		End:   "10.2.2.120",
 	}
-	subnetInfo := crdv1a2.SubnetInfo{
+	subnetInfo := crdv1b1.SubnetInfo{
 		Gateway:      "10.2.2.1",
 		PrefixLength: 24,
 	}
-	subnetRange := crdv1a2.SubnetIPRange{IPRange: ipRange,
-		SubnetInfo: subnetInfo}
 
-	pool := crdv1a2.IPPool{
+	pool := crdv1b1.IPPool{
 		ObjectMeta: metav1.ObjectMeta{Name: poolName},
-		Spec:       crdv1a2.IPPoolSpec{IPRanges: []crdv1a2.SubnetIPRange{subnetRange}},
+		Spec:       crdv1b1.IPPoolSpec{IPRanges: []crdv1b1.IPRange{ipRange}, SubnetInfo: subnetInfo},
 	}
 
 	allocator := newTestIPPoolAllocator(&pool, stopCh)
-	err := allocator.AllocateStatefulSet(testNamespace, setName, 7)
+	err := allocator.AllocateStatefulSet(testNamespace, setName, 7, nil)
 	require.NoError(t, err)
 
 	// Make sure reserved IPs are respected for next allocate
@@ -433,4 +411,22 @@ func TestAllocateReleaseStatefulSet(t *testing.T) {
 
 	// Make sure reserved IPs are released
 	validateAllocationSequence(t, allocator, subnetInfo, []string{"10.2.2.100"})
+
+	allocator = newTestIPPoolAllocator(&pool, stopCh)
+	err = allocator.AllocateStatefulSet(testNamespace, setName, 1, net.ParseIP("10.2.2.101"))
+	require.NoError(t, err)
+
+	// Make sure specified IP is reserved
+	validateAllocationSequence(t, allocator, subnetInfo, []string{"10.2.2.100", "10.2.2.102"})
+
+	// Release the set
+	err = allocator.ReleaseStatefulSet(testNamespace, setName)
+	require.NoError(t, err)
+
+	// Make sure reserved IP is released
+	validateAllocationSequence(t, allocator, subnetInfo, []string{"10.2.2.101"})
+
+	// Invalid IP will result in an error
+	err = allocator.AllocateStatefulSet(testNamespace, setName, 1, net.ParseIP("10.2.3.103"))
+	require.Error(t, err)
 }

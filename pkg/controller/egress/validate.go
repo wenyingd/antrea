@@ -20,10 +20,11 @@ import (
 	"net"
 
 	admv1 "k8s.io/api/admission/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
-	crdv1alpha2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 )
 
 func (c *EgressController) ValidateEgress(review *admv1.AdmissionReview) *admv1.AdmissionResponse {
@@ -32,7 +33,7 @@ func (c *EgressController) ValidateEgress(review *admv1.AdmissionReview) *admv1.
 	allowed := true
 
 	klog.V(2).Info("Validating Egress", "request", review.Request)
-	var newObj, oldObj crdv1alpha2.Egress
+	var newObj, oldObj crdv1beta1.Egress
 	if review.Request.Object.Raw != nil {
 		if err := json.Unmarshal(review.Request.Object.Raw, &newObj); err != nil {
 			klog.ErrorS(err, "Error de-serializing current Egress")
@@ -46,7 +47,24 @@ func (c *EgressController) ValidateEgress(review *admv1.AdmissionReview) *admv1.
 		}
 	}
 
-	shouldAllow := func(oldEgress, newEgress *crdv1alpha2.Egress) (bool, string) {
+	shouldAllow := func(oldEgress, newEgress *crdv1beta1.Egress) (bool, string) {
+		if len(newEgress.Spec.EgressIPs) > 0 {
+			return false, "spec.egressIPs is not supported yet"
+		}
+		if len(newEgress.Spec.ExternalIPPools) > 0 {
+			return false, "spec.externalIPPools is not supported yet"
+		}
+		// Validate Egress trafficShaping
+		if newEgress.Spec.Bandwidth != nil {
+			_, err := resource.ParseQuantity(newEgress.Spec.Bandwidth.Rate)
+			if err != nil {
+				return false, fmt.Sprintf("Rate %s in Egress %s is invalid: %v", newEgress.Spec.Bandwidth.Rate, newEgress.Name, err)
+			}
+			_, err = resource.ParseQuantity(newEgress.Spec.Bandwidth.Burst)
+			if err != nil {
+				return false, fmt.Sprintf("Burst %s in Egress %s is invalid: %v", newEgress.Spec.Bandwidth.Burst, newEgress.Name, err)
+			}
+		}
 		// Allow it if EgressIP and ExternalIPPool don't change.
 		if newEgress.Spec.EgressIP == oldEgress.Spec.EgressIP && newEgress.Spec.ExternalIPPool == oldEgress.Spec.ExternalIPPool {
 			return true, ""

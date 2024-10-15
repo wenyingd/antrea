@@ -18,27 +18,30 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"antrea.io/libOpenflow/openflow15"
+	"antrea.io/ofnet/ofctrl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/openflow/cookie"
-	oftest "antrea.io/antrea/pkg/agent/openflow/testing"
+	opstest "antrea.io/antrea/pkg/agent/openflow/operations/testing"
 	"antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 	mocks "antrea.io/antrea/pkg/ovs/openflow/testing"
 	ovsctltest "antrea.io/antrea/pkg/ovs/ovsctl/testing"
-	"antrea.io/antrea/pkg/util/ip"
 )
 
 var (
@@ -62,13 +65,14 @@ var (
 	_, podIPv4CIDR, _ = net.ParseCIDR("100.100.100.0/24")
 	_, podIPv6CIDR, _ = net.ParseCIDR("fd12:ab35:34:a001::/64")
 
-	actionAllow  = crdv1alpha1.RuleActionAllow
-	actionDrop   = crdv1alpha1.RuleActionDrop
+	actionAllow  = crdv1beta1.RuleActionAllow
+	actionDrop   = crdv1beta1.RuleActionDrop
 	port8080     = intstr.FromInt(8080)
-	protocolTCP  = v1beta2.ProtocolTCP
+	port32800    = int32(32800)
 	protocolICMP = v1beta2.ProtocolICMP
 	priority100  = uint16(100)
 	priority200  = uint16(200)
+	priority201  = uint16(201)
 	icmpType8    = int32(8)
 	icmpCode0    = int32(0)
 
@@ -87,8 +91,8 @@ type expectConjunctionTimes struct {
 
 func TestPolicyRuleConjunction(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
 	preparePipelines()
+	defer resetPipelines()
 	c = prepareClient(ctrl, false)
 
 	ruleID1 := uint32(1001)
@@ -99,13 +103,13 @@ func TestPolicyRuleConjunction(t *testing.T) {
 	nClause := uint8(3)
 	clause1 := conj1.newClause(clauseID, nClause, mockEgressRuleTable, mockEgressDefaultTable)
 
-	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl)).AnyTimes()
-	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl)).AnyTimes()
-	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl)).AnyTimes()
+	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl, mockEgressDefaultTable)).AnyTimes()
+	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl, mockEgressRuleTable)).AnyTimes()
+	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl, mockEgressMetricTable)).AnyTimes()
 
 	var addedAddrs = parseAddresses([]string{"192.168.1.3", "192.168.1.30", "192.168.2.0/24", "103", "104"})
 	expectConjunctionsCount([]*expectConjunctionTimes{{5, ruleID1, clauseID, nClause}})
-	flowChanges1 := clause1.addAddrFlows(c.featureNetworkPolicy, types.SrcAddress, addedAddrs, nil, false)
+	flowChanges1 := clause1.addAddrFlows(c.featureNetworkPolicy, types.SrcAddress, addedAddrs, nil, false, false)
 	err := c.featureNetworkPolicy.applyConjunctiveMatchFlows(flowChanges1)
 	require.Nil(t, err, "Failed to invoke addAddrFlows")
 	checkFlowCount(t, len(addedAddrs))
@@ -130,7 +134,7 @@ func TestPolicyRuleConjunction(t *testing.T) {
 	var addedAddrs2 = parseAddresses([]string{"192.168.1.30", "192.168.1.50"})
 	expectConjunctionsCount([]*expectConjunctionTimes{{2, ruleID2, clauseID2, nClause}})
 	expectConjunctionsCount([]*expectConjunctionTimes{{1, ruleID1, clauseID, nClause}})
-	flowChanges3 := clause2.addAddrFlows(c.featureNetworkPolicy, types.SrcAddress, addedAddrs2, nil, false)
+	flowChanges3 := clause2.addAddrFlows(c.featureNetworkPolicy, types.SrcAddress, addedAddrs2, nil, false, false)
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(flowChanges3)
 	require.Nil(t, err, "Failed to invoke addAddrFlows")
 	testAddr := NewIPAddress(net.ParseIP("192.168.1.30"))
@@ -146,7 +150,7 @@ func TestPolicyRuleConjunction(t *testing.T) {
 	nClause3 := uint8(1)
 	clause3 := conj3.newClause(clauseID3, nClause3, mockEgressRuleTable, mockEgressDefaultTable)
 	var addedAddrs3 = parseAddresses([]string{"192.168.1.30"})
-	flowChanges4 := clause3.addAddrFlows(c.featureNetworkPolicy, types.SrcAddress, addedAddrs3, nil, false)
+	flowChanges4 := clause3.addAddrFlows(c.featureNetworkPolicy, types.SrcAddress, addedAddrs3, nil, false, false)
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(flowChanges4)
 	require.Nil(t, err, "Failed to invoke addAddrFlows")
 	checkConjMatchFlowActions(t, c, clause3, testAddr, types.SrcAddress, 2, 1)
@@ -160,18 +164,17 @@ func TestPolicyRuleConjunction(t *testing.T) {
 
 func TestInstallPolicyRuleFlows(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	preparePipelines()
+	defer resetPipelines()
 	c = prepareClient(ctrl, false)
 	c.nodeConfig = &config.NodeConfig{PodIPv4CIDR: podIPv4CIDR, PodIPv6CIDR: nil}
 	c.networkConfig = &config.NetworkConfig{}
 	c.pipelines = pipelineMap
-	defaultAction := crdv1alpha1.RuleActionAllow
+	defaultAction := crdv1beta1.RuleActionAllow
 	// Create a policyRuleConjunction for the dns response interception flows
 	// to ensure nil NetworkPolicyReference is handled correctly by GetNetworkPolicyFlowKeys.
 	dnsID := uint32(1)
-	require.NoError(t, c.NewDNSpacketInConjunction(dnsID))
+	require.NoError(t, c.NewDNSPacketInConjunction(dnsID))
 
 	ruleID1 := uint32(101)
 	rule1 := &types.PolicyRule{
@@ -189,9 +192,9 @@ func TestInstallPolicyRuleFlows(t *testing.T) {
 		},
 	}
 
-	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl)).AnyTimes()
-	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl)).AnyTimes()
-	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl)).AnyTimes()
+	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl, mockEgressDefaultTable)).AnyTimes()
+	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl, mockEgressRuleTable)).AnyTimes()
+	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl, mockEgressMetricTable)).AnyTimes()
 
 	conj := &policyRuleConjunction{id: ruleID1}
 	conj.calculateClauses(rule1)
@@ -237,11 +240,11 @@ func TestInstallPolicyRuleFlows(t *testing.T) {
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(ctxChanges2)
 	require.Nil(t, err)
 
-	assert.Equal(t, 0, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 0, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 	err = c.InstallPolicyRuleFlows(rule2)
 	require.Nil(t, err)
 	checkConjunctionConfig(t, ruleID2, 1, 2, 1, 0)
-	assert.Equal(t, 6, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 6, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 
 	ruleID3 := uint32(103)
 	port1 := intstr.FromInt(8080)
@@ -285,7 +288,7 @@ func TestInstallPolicyRuleFlows(t *testing.T) {
 	err = c.InstallPolicyRuleFlows(rule3)
 	require.Nil(t, err, "Failed to invoke InstallPolicyRuleFlows")
 	checkConjunctionConfig(t, ruleID3, 1, 2, 1, 3)
-	assert.Equal(t, 15, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 15, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 
 	ctxChanges4 := conj.calculateChangesForRuleDeletion()
 	matchFlows4, dropFlows4 := getChangedFlows(ctxChanges4)
@@ -302,16 +305,15 @@ func TestInstallPolicyRuleFlows(t *testing.T) {
 	assert.Equal(t, 2, getChangedFlowOPCount(matchFlows5, deletion))
 	assert.Equal(t, 1, getChangedFlowOPCount(matchFlows5, modification))
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(ctxChanges5)
-	assert.Equal(t, 12, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 12, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 	require.Nil(t, err)
 }
 
 func TestBatchInstallPolicyRuleFlows(t *testing.T) {
-	preparePipelines()
-	tests := []struct {
-		name            string
-		rules           []*types.PolicyRule
-		expectedFlowsFn func(c *client) []binding.Flow
+	for _, tt := range []struct {
+		name          string
+		rules         []*types.PolicyRule
+		expectedFlows []string
 	}{
 		{
 			name: "multiple K8s NetworkPolicy rules",
@@ -321,7 +323,6 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 					From:      parseAddresses([]string{"192.168.1.40", "192.168.1.50"}),
 					To:        parseAddresses([]string{"0.0.0.0/0"}),
 					FlowID:    uint32(10),
-					TableID:   EgressRuleTable.GetID(),
 					PolicyRef: &v1beta2.NetworkPolicyReference{
 						Type:      v1beta2.K8sNetworkPolicy,
 						Namespace: "ns1",
@@ -337,7 +338,6 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 					To:      parseAddresses([]string{"0.0.0.0/0"}),
 					Service: []v1beta2.Service{{Protocol: &protocolTCP, Port: &port8080}},
 					FlowID:  uint32(11),
-					TableID: EgressRuleTable.GetID(),
 					PolicyRef: &v1beta2.NetworkPolicyReference{
 						Type:      v1beta2.K8sNetworkPolicy,
 						Namespace: "ns1",
@@ -346,56 +346,21 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 					},
 				},
 			},
-			expectedFlowsFn: func(c *client) []binding.Flow {
-				cookiePolicy := c.cookieAllocator.Request(cookie.NetworkPolicy).Raw()
-				return []binding.Flow{
-					EgressRuleTable.ofTable.BuildFlow(priorityLow).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchConjID(10).
-						Action().LoadToRegField(TFEgressConjIDField, 10).
-						Action().CT(true, EgressMetricTable.GetID(), CtZone, nil).LoadToLabelField(10, EgressRuleCTLabel).CTDone().Done(),
-					EgressRuleTable.ofTable.BuildFlow(priorityLow).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchConjID(11).
-						Action().LoadToRegField(TFEgressConjIDField, 11).
-						Action().CT(true, EgressMetricTable.GetID(), CtZone, nil).LoadToLabelField(11, EgressRuleCTLabel).CTDone().Done(),
-					EgressRuleTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.40")).
-						Action().Conjunction(10, 1, 2).
-						Action().Conjunction(11, 1, 3).Done(),
-					EgressRuleTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.50")).
-						Action().Conjunction(10, 1, 2).Done(),
-					EgressRuleTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.51")).
-						Action().Conjunction(11, 1, 3).Done(),
-					EgressRuleTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchDstIPNet(*ip.MustParseCIDR("0.0.0.0/0")).
-						Action().Conjunction(10, 2, 2).
-						Action().Conjunction(11, 2, 3).Done(),
-					EgressRuleTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolTCP).MatchDstPort(8080, nil).
-						Action().Conjunction(11, 3, 3).Done(),
-					EgressDefaultTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.40")).
-						Action().Drop().Done(),
-					EgressDefaultTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.50")).
-						Action().Drop().Done(),
-					EgressDefaultTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.51")).
-						Action().Drop().Done(),
-					EgressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchCTStateNew(true).MatchCTLabelField(0, uint64(10)<<32, EgressRuleCTLabel).
-						Action().NextTable().Done(),
-					EgressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchCTStateNew(false).MatchCTLabelField(0, uint64(10)<<32, EgressRuleCTLabel).
-						Action().NextTable().Done(),
-					EgressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchCTStateNew(true).MatchCTLabelField(0, uint64(11)<<32, EgressRuleCTLabel).
-						Action().NextTable().Done(),
-					EgressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchCTStateNew(false).MatchCTLabelField(0, uint64(11)<<32, EgressRuleCTLabel).
-						Action().NextTable().Done(),
-				}
+			expectedFlows: []string{
+				"cookie=0x1020000000000, table=EgressRule, priority=190,conj_id=10,ip actions=set_field:0xa->reg5,ct(commit,table=EgressMetric,zone=65520,exec(set_field:0xa00000000/0xffffffff00000000->ct_label))",
+				"cookie=0x1020000000000, table=EgressRule, priority=190,conj_id=11,ip actions=set_field:0xb->reg5,ct(commit,table=EgressMetric,zone=65520,exec(set_field:0xb00000000/0xffffffff00000000->ct_label))",
+				"cookie=0x1020000000000, table=EgressRule, priority=200,ip,nw_src=192.168.1.40 actions=conjunction(10,1/2),conjunction(11,1/3)",
+				"cookie=0x1020000000000, table=EgressRule, priority=200,ip,nw_src=192.168.1.50 actions=conjunction(10,1/2)",
+				"cookie=0x1020000000000, table=EgressRule, priority=200,ip,nw_src=192.168.1.51 actions=conjunction(11,1/3)",
+				"cookie=0x1020000000000, table=EgressRule, priority=200,ip,nw_dst=0.0.0.0/0 actions=conjunction(10,2/2),conjunction(11,2/3)",
+				"cookie=0x1020000000000, table=EgressRule, priority=200,tcp,tp_dst=8080 actions=conjunction(11,3/3)",
+				"cookie=0x1020000000000, table=EgressDefaultRule, priority=200,ip,nw_src=192.168.1.40 actions=drop",
+				"cookie=0x1020000000000, table=EgressDefaultRule, priority=200,ip,nw_src=192.168.1.50 actions=drop",
+				"cookie=0x1020000000000, table=EgressDefaultRule, priority=200,ip,nw_src=192.168.1.51 actions=drop",
+				"cookie=0x1020000000000, table=EgressMetric, priority=200,ct_state=+new,ct_label=0xa00000000/0xffffffff00000000,ip actions=goto_table:L3Forwarding",
+				"cookie=0x1020000000000, table=EgressMetric, priority=200,ct_state=-new,ct_label=0xa00000000/0xffffffff00000000,ip actions=goto_table:L3Forwarding",
+				"cookie=0x1020000000000, table=EgressMetric, priority=200,ct_state=+new,ct_label=0xb00000000/0xffffffff00000000,ip actions=goto_table:L3Forwarding",
+				"cookie=0x1020000000000, table=EgressMetric, priority=200,ct_state=-new,ct_label=0xb00000000/0xffffffff00000000,ip actions=goto_table:L3Forwarding",
 			},
 		},
 		{
@@ -408,7 +373,6 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 					Priority:  &priority100,
 					To:        []types.Address{NewOFPortAddress(1), NewOFPortAddress(2)},
 					FlowID:    uint32(10),
-					TableID:   AntreaPolicyIngressRuleTable.GetID(),
 					PolicyRef: &v1beta2.NetworkPolicyReference{
 						Type:      v1beta2.AntreaNetworkPolicy,
 						Namespace: "ns1",
@@ -425,7 +389,6 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 					To:       []types.Address{NewOFPortAddress(1), NewOFPortAddress(3)},
 					Service:  []v1beta2.Service{{Protocol: &protocolTCP, Port: &port8080}},
 					FlowID:   uint32(11),
-					TableID:  AntreaPolicyIngressRuleTable.GetID(),
 					PolicyRef: &v1beta2.NetworkPolicyReference{
 						Type:      v1beta2.AntreaNetworkPolicy,
 						Namespace: "ns1",
@@ -442,7 +405,6 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 					To:       []types.Address{NewOFPortAddress(1)},
 					Service:  []v1beta2.Service{{Protocol: &protocolTCP, Port: &port8080}, {Protocol: &protocolICMP, ICMPType: &icmpType8, ICMPCode: &icmpCode0}},
 					FlowID:   uint32(12),
-					TableID:  AntreaPolicyIngressRuleTable.GetID(),
 					PolicyRef: &v1beta2.NetworkPolicyReference{
 						Type:      v1beta2.AntreaNetworkPolicy,
 						Namespace: "ns1",
@@ -450,114 +412,105 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 						UID:       "id3",
 					},
 				},
+				{
+					Direction: v1beta2.DirectionIn,
+					From:      parseLabelIdentityAddresses([]uint32{1, 2}),
+					Action:    &actionDrop,
+					Priority:  &priority201,
+					To:        []types.Address{NewOFPortAddress(1), NewOFPortAddress(2)},
+					Service:   []v1beta2.Service{},
+					FlowID:    uint32(13),
+					PolicyRef: &v1beta2.NetworkPolicyReference{
+						Type:      v1beta2.AntreaNetworkPolicy,
+						Namespace: "ns1",
+						Name:      "np4",
+						UID:       "id4",
+					},
+				},
+				{
+					Direction: v1beta2.DirectionIn,
+					From:      parseAddresses([]string{"192.168.1.51"}),
+					Action:    &actionDrop,
+					Priority:  &priority100,
+					To:        []types.Address{NewOFPortAddress(2)},
+					Service:   []v1beta2.Service{{Protocol: &protocolTCP, SrcPort: &port32800}},
+					FlowID:    uint32(14),
+					PolicyRef: &v1beta2.NetworkPolicyReference{
+						Type:      v1beta2.AntreaNetworkPolicy,
+						Namespace: "ns1",
+						Name:      "np5",
+						UID:       "id5",
+					},
+				},
 			},
-			expectedFlowsFn: func(c *client) []binding.Flow {
-				cookiePolicy := c.cookieAllocator.Request(cookie.NetworkPolicy).Raw()
-				return []binding.Flow{
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchConjID(10).
-						Action().LoadToRegField(TFIngressConjIDField, 10).
-						Action().CT(true, IngressMetricTable.GetID(), CtZone, nil).LoadToLabelField(10, IngressRuleCTLabel).CTDone().Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchConjID(11).
-						Action().LoadToRegField(CNPConjIDField, 11).
-						Action().LoadRegMark(CnpDenyRegMark).
-						Action().GotoTable(IngressMetricTable.GetID()).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority200).Cookie(cookiePolicy).
-						MatchConjID(12).
-						Action().LoadToRegField(CNPConjIDField, 12).
-						Action().LoadRegMark(CnpDenyRegMark).
-						Action().GotoTable(IngressMetricTable.GetID()).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.40")).
-						Action().Conjunction(10, 1, 2).
-						Action().Conjunction(11, 1, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority200).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.40")).
-						Action().Conjunction(12, 1, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.50")).
-						Action().Conjunction(10, 1, 2).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchSrcIP(net.ParseIP("192.168.1.51")).
-						Action().Conjunction(11, 1, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchRegFieldWithValue(TargetOFPortField, uint32(1)).
-						Action().Conjunction(10, 2, 2).
-						Action().Conjunction(11, 2, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority200).Cookie(cookiePolicy).
-						MatchRegFieldWithValue(TargetOFPortField, uint32(1)).
-						Action().Conjunction(12, 2, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchRegFieldWithValue(TargetOFPortField, uint32(2)).
-						Action().Conjunction(10, 2, 2).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchRegFieldWithValue(TargetOFPortField, uint32(3)).
-						Action().Conjunction(11, 2, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority100).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolTCP).MatchDstPort(8080, nil).
-						Action().Conjunction(11, 3, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority200).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolTCP).MatchDstPort(8080, nil).
-						Action().Conjunction(12, 3, 3).Done(),
-					AntreaPolicyIngressRuleTable.ofTable.BuildFlow(priority200).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolICMP).MatchICMPType(byte(icmpType8)).MatchICMPCode(byte(icmpCode0)).
-						Action().Conjunction(12, 3, 3).Done(),
-					IngressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchCTStateNew(true).MatchCTLabelField(0, 10, IngressRuleCTLabel).
-						Action().NextTable().Done(),
-					IngressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchProtocol(binding.ProtocolIP).MatchCTStateNew(false).MatchCTLabelField(0, 10, IngressRuleCTLabel).
-						Action().NextTable().Done(),
-					IngressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchRegMark(CnpDenyRegMark).MatchRegFieldWithValue(CNPConjIDField, 11).
-						Action().Drop().Done(),
-					IngressMetricTable.ofTable.BuildFlow(priorityNormal).Cookie(cookiePolicy).
-						MatchRegMark(CnpDenyRegMark).MatchRegFieldWithValue(CNPConjIDField, 12).
-						Action().Drop().Done(),
-				}
+			expectedFlows: []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,conj_id=10,ip actions=set_field:0xa->reg6,ct(commit,table=IngressMetric,zone=65520,exec(set_field:0xa/0xffffffff->ct_label))",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,conj_id=11 actions=set_field:0xb->reg3,set_field:0x400/0x400->reg0,goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=200,conj_id=12 actions=set_field:0xc->reg3,set_field:0x400/0x400->reg0,goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=201,conj_id=13 actions=set_field:0xd->reg3,set_field:0x400/0x400->reg0,goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,conj_id=14 actions=set_field:0xe->reg3,set_field:0x400/0x400->reg0,goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,ip,nw_src=192.168.1.40 actions=conjunction(10,1/2),conjunction(11,1/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,ip,nw_src=192.168.1.50 actions=conjunction(10,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,ip,nw_src=192.168.1.51 actions=conjunction(11,1/3),conjunction(14,1/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=201,tun_id=1 actions=conjunction(13,1/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=201,tun_id=2 actions=conjunction(13,1/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=201,reg1=0x1 actions=conjunction(13,2/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,reg1=0x1 actions=conjunction(11,2/3),conjunction(10,2/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,tcp,tp_dst=8080 actions=conjunction(11,3/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=200,reg1=0x1 actions=conjunction(12,2/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,reg1=0x2 actions=conjunction(10,2/2),conjunction(14,2/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=200,tcp,tp_dst=8080 actions=conjunction(12,3/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=200,icmp,icmp_type=8,icmp_code=0 actions=conjunction(12,3/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=201,reg1=0x2 actions=conjunction(13,2/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,reg1=0x3 actions=conjunction(11,2/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=200,ip,nw_src=192.168.1.40 actions=conjunction(12,1/3)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=100,tcp,tp_src=32800 actions=conjunction(14,3/3)",
+				"cookie=0x1020000000000, table=IngressDefaultRule, priority=200,reg1=0x1,tun_id=16777215 actions=drop",
+				"cookie=0x1020000000000, table=IngressDefaultRule, priority=200,reg1=0x2,tun_id=16777215 actions=drop",
+				"cookie=0x1020000000000, table=IngressMetric, priority=200,ct_state=+new,ct_label=0xa/0xffffffff,ip actions=goto_table:ConntrackCommit",
+				"cookie=0x1020000000000, table=IngressMetric, priority=200,ct_state=-new,ct_label=0xa/0xffffffff,ip actions=goto_table:ConntrackCommit",
+				"cookie=0x1020000000000, table=IngressMetric, priority=200,reg0=0x400/0x400,reg3=0xb actions=drop",
+				"cookie=0x1020000000000, table=IngressMetric, priority=200,reg0=0x400/0x400,reg3=0xc actions=drop",
+				"cookie=0x1020000000000, table=IngressMetric, priority=200,reg0=0x400/0x400,reg3=0xd actions=drop",
+				"cookie=0x1020000000000, table=IngressMetric, priority=200,reg0=0x400/0x400,reg3=0xe actions=drop",
 			},
 		},
-	}
-	for _, tt := range tests {
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-			mockOperations := oftest.NewMockOFEntryOperations(ctrl)
-			ofClient := NewClient(bridgeName, bridgeMgmtAddr, false, true, false, false, false, false, false, false, false)
-			c = ofClient.(*client)
-			c.cookieAllocator = cookie.NewAllocator(0)
-			c.ofEntryOperations = mockOperations
-			c.nodeConfig = &config.NodeConfig{PodIPv4CIDR: podIPv4CIDR, PodIPv6CIDR: nil, Type: config.K8sNode}
-			c.networkConfig = &config.NetworkConfig{IPv4Enabled: true}
-			c.ipProtocols = []binding.Protocol{binding.ProtocolIP}
-			mockFeaturePodConnectivity.cookieAllocator = c.cookieAllocator
-			mockFeaturePodConnectivity.ipProtocols = c.ipProtocols
-			mockFeatureNetworkPolicy.cookieAllocator = c.cookieAllocator
-			mockFeatureNetworkPolicy.ipProtocols = c.ipProtocols
-			mockFeatureNetworkPolicy.bridge = c.bridge
-			c.featurePodConnectivity = &mockFeaturePodConnectivity
-			c.featureNetworkPolicy = &mockFeatureNetworkPolicy
-			c.featureNetworkPolicy.deterministic = true
+			mockOperations := opstest.NewMockOFEntryOperations(ctrl)
+
+			c := newFakeClient(mockOperations, true, false, config.K8sNode, config.TrafficEncapModeEncap)
+			defer resetPipelines()
+			c.featureNetworkPolicy.egressTables = map[uint8]struct{}{EgressRuleTable.GetID(): {}, EgressDefaultTable.GetID(): {}, AntreaPolicyEgressRuleTable.GetID(): {}}
+
+			for _, r := range tt.rules {
+				if r.Direction == v1beta2.DirectionOut {
+					if r.IsAntreaNetworkPolicyRule() {
+						r.TableID = AntreaPolicyEgressRuleTable.GetID()
+					} else {
+						r.TableID = EgressRuleTable.GetID()
+					}
+				} else {
+					if r.IsAntreaNetworkPolicyRule() {
+						r.TableID = AntreaPolicyIngressRuleTable.GetID()
+					} else {
+						r.TableID = IngressRuleTable.GetID()
+					}
+				}
+			}
+			c.featureNetworkPolicy.globalConjMatchFlowCache = make(map[string]*conjMatchFlowContext)
 			c.featureNetworkPolicy.policyCache = cache.NewIndexer(policyConjKeyFunc, cache.Indexers{priorityIndex: priorityIndexFunc})
-			c.featureNetworkPolicy.globalConjMatchFlowCache = map[string]*conjMatchFlowContext{}
-
-			bridge := mocks.NewMockBridge(ctrl)
-			bridge.EXPECT().CreateTable(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
-			c.bridge = bridge
-			c.pipelines = pipelineMap
-			c.realizePipelines()
-
-			expectedFlows := tt.expectedFlowsFn(c)
+			expectedFlowStr := strings.Join(tt.expectedFlows, "; ")
 			// For better readability when debugging failure.
 			eq := gomock.GotFormatterAdapter(
 				gomock.GotFormatterFunc(
 					func(i interface{}) string {
-						return dumpFlows(i.([]binding.Flow))
+						return dumpFlows(i.([]*openflow15.FlowMod))
 					}),
 				gomock.WantFormatter(
-					gomock.StringerFunc(func() string { return dumpFlows(expectedFlows) }),
-					gomock.InAnyOrder(expectedFlows),
+					gomock.StringerFunc(func() string { return expectedFlowStr }),
+					newFlowModIgnoreTxIDMatcher(tt.expectedFlows),
 				),
 			)
 			mockOperations.EXPECT().AddAll(eq).Return(nil).Times(1)
@@ -567,14 +520,62 @@ func TestBatchInstallPolicyRuleFlows(t *testing.T) {
 	}
 }
 
-func dumpFlows(flows []binding.Flow) string {
-	lines := []string{}
-	lines = append(lines, "[")
-	for _, flow := range flows {
-		lines = append(lines, fmt.Sprintf("%s", flow))
+type flowModIgnoreTxIDMatcher struct {
+	flowMods []string
+}
+
+func newFlowModIgnoreTxIDMatcher(flowModMessages []string) gomock.Matcher {
+	return flowModIgnoreTxIDMatcher{flowMods: flowModMessages}
+}
+
+func (m flowModIgnoreTxIDMatcher) Matches(x interface{}) bool {
+	messages, ok := x.([]*openflow15.FlowMod)
+	if !ok {
+		return false
 	}
-	lines = append(lines, "]")
-	return strings.Join(lines, "\n")
+	wanted := getFlowStrings(messages)
+	if len(wanted) != len(m.flowMods) {
+		return false
+	}
+	sortFlows := func(flows []string) sets.Set[string] {
+		sort.Strings(flows)
+		flowSet := sets.New[string]()
+		getConjunctionID := func(conj string) int {
+			newStr := strings.ReplaceAll(conj, "conjunction(", "")
+			id, _ := strconv.Atoi(strings.Split(newStr, ",")[0])
+			return id
+		}
+		for _, f := range flows {
+			if !strings.Contains(f, "actions=conjunction") {
+				flowSet.Insert(f)
+				continue
+			}
+			strParts := strings.Split(f, "actions=")
+			prefix := strParts[0]
+			actionStr := strings.ReplaceAll(strParts[1], "),", ")_")
+			conjunctions := strings.Split(actionStr, "_")
+			sort.Slice(conjunctions, func(i, j int) bool {
+				c1 := getConjunctionID(conjunctions[i])
+				c2 := getConjunctionID(conjunctions[j])
+				return c1 < c2
+			})
+			newActions := strings.Join(conjunctions, ",")
+			flowSet.Insert(strings.Join([]string{prefix, newActions}, "actions="))
+		}
+		return flowSet
+	}
+	wantedSets := sortFlows(wanted)
+	givenSets := sortFlows(m.flowMods)
+	return wantedSets.Equal(givenSets)
+}
+
+func (m flowModIgnoreTxIDMatcher) String() string {
+	return fmt.Sprintf("has the same elements as %v", strings.Join(m.flowMods, "; "))
+}
+
+func dumpFlows(flows []*openflow15.FlowMod) string {
+	flowStrings := getFlowStrings(flows)
+	return strings.Join(flowStrings, "; ")
 }
 
 func BenchmarkBatchInstallPolicyRuleFlows(b *testing.B) {
@@ -582,9 +583,10 @@ func BenchmarkBatchInstallPolicyRuleFlows(b *testing.B) {
 	defer ctrl.Finish()
 
 	preparePipelines()
+	defer resetPipelines()
 	c = prepareClient(ctrl, false)
 	// Make it return error so no change gets committed to cache.
-	mockOperations := oftest.NewMockOFEntryOperations(ctrl)
+	mockOperations := opstest.NewMockOFEntryOperations(ctrl)
 	mockOperations.EXPECT().AddAll(gomock.Any()).Return(errors.New("fake error")).AnyTimes()
 	c.ofEntryOperations = mockOperations
 
@@ -624,12 +626,11 @@ func BenchmarkBatchInstallPolicyRuleFlows(b *testing.B) {
 
 func TestConjMatchFlowContextKeyConflict(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	preparePipelines()
+	defer resetPipelines()
 	c = prepareClient(ctrl, false)
-	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl)).AnyTimes()
-	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl)).AnyTimes()
+	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl, mockEgressDefaultTable)).AnyTimes()
+	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl, mockEgressRuleTable)).AnyTimes()
 	ruleAction.EXPECT().Conjunction(gomock.Any(), gomock.Any(), gomock.Any()).Return(ruleFlowBuilder).MaxTimes(3)
 
 	ip, ipNet, _ := net.ParseCIDR("192.168.2.30/32")
@@ -643,7 +644,7 @@ func TestConjMatchFlowContextKeyConflict(t *testing.T) {
 		id: ruleID1,
 	}
 	clause1 := conj1.newClause(1, 3, mockEgressRuleTable, mockEgressDefaultTable)
-	flowChange1 := clause1.addAddrFlows(c.featureNetworkPolicy, types.DstAddress, parseAddresses([]string{ip.String()}), nil, false)
+	flowChange1 := clause1.addAddrFlows(c.featureNetworkPolicy, types.DstAddress, parseAddresses([]string{ip.String()}), nil, false, false)
 	err := c.featureNetworkPolicy.applyConjunctiveMatchFlows(flowChange1)
 	require.Nil(t, err, "no error expect in applyConjunctiveMatchFlows")
 
@@ -652,7 +653,7 @@ func TestConjMatchFlowContextKeyConflict(t *testing.T) {
 		id: ruleID2,
 	}
 	clause2 := conj2.newClause(1, 3, mockEgressRuleTable, mockEgressDefaultTable)
-	flowChange2 := clause2.addAddrFlows(c.featureNetworkPolicy, types.DstAddress, parseAddresses([]string{ipNet.String()}), nil, false)
+	flowChange2 := clause2.addAddrFlows(c.featureNetworkPolicy, types.DstAddress, parseAddresses([]string{ipNet.String()}), nil, false, false)
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(flowChange2)
 	require.Nil(t, err, "no error expect in applyConjunctiveMatchFlows")
 	expectedMatchKey := fmt.Sprintf("table:%d,priority:%s,matchPair:%s", EgressRuleTable.GetID(), strconv.Itoa(int(priorityNormal)), singleMatchPair.KeyString())
@@ -669,14 +670,13 @@ func TestConjMatchFlowContextKeyConflict(t *testing.T) {
 
 func TestInstallPolicyRuleFlowsInDualStackCluster(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	preparePipelines()
+	defer resetPipelines()
 	c = prepareClient(ctrl, true)
 	c.nodeConfig = &config.NodeConfig{PodIPv4CIDR: podIPv4CIDR, PodIPv6CIDR: podIPv6CIDR}
 	c.networkConfig = &config.NetworkConfig{IPv4Enabled: true, IPv6Enabled: true}
 	c.ipProtocols = []binding.Protocol{binding.ProtocolIP, binding.ProtocolIPv6}
-	defaultAction := crdv1alpha1.RuleActionAllow
+	defaultAction := crdv1beta1.RuleActionAllow
 	ruleID1 := uint32(101)
 	rule1 := &types.PolicyRule{
 		Direction: v1beta2.DirectionOut,
@@ -693,9 +693,9 @@ func TestInstallPolicyRuleFlowsInDualStackCluster(t *testing.T) {
 		},
 	}
 
-	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl)).AnyTimes()
-	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl)).AnyTimes()
-	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl)).AnyTimes()
+	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl, mockEgressDefaultTable)).AnyTimes()
+	mockEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl, mockEgressRuleTable)).AnyTimes()
+	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl, mockEgressMetricTable)).AnyTimes()
 
 	conj := &policyRuleConjunction{id: ruleID1}
 	conj.calculateClauses(rule1)
@@ -741,11 +741,11 @@ func TestInstallPolicyRuleFlowsInDualStackCluster(t *testing.T) {
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(ctxChanges2)
 	require.Nil(t, err)
 
-	assert.Equal(t, 0, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 0, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 	err = c.InstallPolicyRuleFlows(rule2)
 	require.Nil(t, err)
 	checkConjunctionConfig(t, ruleID2, 2, 3, 1, 0)
-	assert.Equal(t, 9, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 9, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 
 	ruleID3 := uint32(103)
 	port1 := intstr.FromInt(8080)
@@ -788,7 +788,7 @@ func TestInstallPolicyRuleFlowsInDualStackCluster(t *testing.T) {
 	err = c.InstallPolicyRuleFlows(rule3)
 	require.Nil(t, err, "Failed to invoke InstallPolicyRuleFlows")
 	checkConjunctionConfig(t, ruleID3, 2, 2, 1, 4)
-	assert.Equal(t, 20, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 20, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 
 	ctxChanges4 := conj.calculateChangesForRuleDeletion()
 	matchFlows4, dropFlows4 := getChangedFlows(ctxChanges4)
@@ -805,7 +805,7 @@ func TestInstallPolicyRuleFlowsInDualStackCluster(t *testing.T) {
 	assert.Equal(t, 3, getChangedFlowOPCount(matchFlows5, deletion))
 	assert.Equal(t, 1, getChangedFlowOPCount(matchFlows5, modification))
 	err = c.featureNetworkPolicy.applyConjunctiveMatchFlows(ctxChanges5)
-	assert.Equal(t, 15, len(c.GetNetworkPolicyFlowKeys("np1", "ns1")))
+	assert.Equal(t, 15, len(c.GetNetworkPolicyFlowKeys("np1", "ns1", v1beta2.K8sNetworkPolicy)))
 	require.Nil(t, err)
 }
 
@@ -886,7 +886,7 @@ func expectConjunctionsCount(conjs []*expectConjunctionTimes) {
 	}
 }
 
-func newMockDropFlowBuilder(ctrl *gomock.Controller) *mocks.MockFlowBuilder {
+func newMockDropFlowBuilder(ctrl *gomock.Controller, flowTable *mocks.MockTable) *mocks.MockFlowBuilder {
 	dropFlowBuilder = mocks.NewMockFlowBuilder(ctrl)
 	dropFlowBuilder.EXPECT().Cookie(gomock.Any()).Return(dropFlowBuilder).AnyTimes()
 	dropFlowBuilder.EXPECT().MatchProtocol(gomock.Any()).Return(dropFlowBuilder).AnyTimes()
@@ -902,11 +902,15 @@ func newMockDropFlowBuilder(ctrl *gomock.Controller) *mocks.MockFlowBuilder {
 	dropFlowBuilder.EXPECT().Action().Return(action).AnyTimes()
 	dropFlow = mocks.NewMockFlow(ctrl)
 	dropFlowBuilder.EXPECT().Done().Return(dropFlow).AnyTimes()
+	flowModMessages := []ofctrl.OpenFlowModMessage{
+		&ofctrl.FlowBundleMessage{},
+	}
+	dropFlow.EXPECT().GetBundleMessages(binding.AddMessage).Return(flowModMessages, nil).AnyTimes()
 	dropFlow.EXPECT().MatchString().Return("").AnyTimes()
 	return dropFlowBuilder
 }
 
-func newMockRuleFlowBuilder(ctrl *gomock.Controller) *mocks.MockFlowBuilder {
+func newMockRuleFlowBuilder(ctrl *gomock.Controller, flowTable *mocks.MockTable) *mocks.MockFlowBuilder {
 	ruleFlowBuilder = mocks.NewMockFlowBuilder(ctrl)
 	ruleFlowBuilder.EXPECT().Cookie(gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
 	ruleFlowBuilder.EXPECT().MatchProtocol(gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
@@ -928,13 +932,15 @@ func newMockRuleFlowBuilder(ctrl *gomock.Controller) *mocks.MockFlowBuilder {
 	ruleFlowBuilder.EXPECT().Action().Return(ruleAction).AnyTimes()
 	ruleFlow = mocks.NewMockFlow(ctrl)
 	ruleFlowBuilder.EXPECT().Done().Return(ruleFlow).AnyTimes()
-	ruleFlow.EXPECT().CopyToBuilder(gomock.Any(), gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
-	ruleFlow.EXPECT().FlowPriority().Return(uint16(priorityNormal)).AnyTimes()
+	flowModMessages := []ofctrl.OpenFlowModMessage{
+		&ofctrl.FlowBundleMessage{},
+	}
+	ruleFlow.EXPECT().GetBundleMessages(binding.AddMessage).Return(flowModMessages, nil).AnyTimes()
 	ruleFlow.EXPECT().MatchString().Return("").AnyTimes()
 	return ruleFlowBuilder
 }
 
-func newMockMetricFlowBuilder(ctrl *gomock.Controller) *mocks.MockFlowBuilder {
+func newMockMetricFlowBuilder(ctrl *gomock.Controller, flowTable *mocks.MockTable) *mocks.MockFlowBuilder {
 	metricFlowBuilder = mocks.NewMockFlowBuilder(ctrl)
 	metricFlowBuilder.EXPECT().Cookie(gomock.Any()).Return(metricFlowBuilder).AnyTimes()
 	metricFlowBuilder.EXPECT().MatchProtocol(gomock.Any()).Return(metricFlowBuilder).AnyTimes()
@@ -948,8 +954,10 @@ func newMockMetricFlowBuilder(ctrl *gomock.Controller) *mocks.MockFlowBuilder {
 	metricFlowBuilder.EXPECT().Action().Return(metricAction).AnyTimes()
 	metricFlow = mocks.NewMockFlow(ctrl)
 	metricFlowBuilder.EXPECT().Done().Return(metricFlow).AnyTimes()
-	metricFlow.EXPECT().CopyToBuilder(gomock.Any(), gomock.Any()).Return(metricFlowBuilder).AnyTimes()
-	metricFlow.EXPECT().FlowPriority().Return(uint16(priorityNormal)).AnyTimes()
+	flowModMessages := []ofctrl.OpenFlowModMessage{
+		&ofctrl.FlowBundleMessage{},
+	}
+	metricFlow.EXPECT().GetBundleMessages(binding.AddMessage).Return(flowModMessages, nil).AnyTimes()
 	metricFlow.EXPECT().MatchString().Return("").AnyTimes()
 	return metricFlowBuilder
 }
@@ -958,8 +966,7 @@ func parseAddresses(addrs []string) []types.Address {
 	var addresses = make([]types.Address, 0)
 	for _, addr := range addrs {
 		if !strings.Contains(addr, ".") && !strings.Contains(addr, ":") {
-			// #nosec G109: parseAddresses is only called on constant test inputs, no potential integer overflow
-			ofPort, _ := strconv.Atoi(addr)
+			ofPort, _ := strconv.ParseInt(addr, 10, 32)
 			addresses = append(addresses, NewOFPortAddress(int32(ofPort)))
 		} else if strings.Contains(addr, "/") {
 			_, ipnet, _ := net.ParseCIDR(addr)
@@ -968,6 +975,14 @@ func parseAddresses(addrs []string) []types.Address {
 			ip := net.ParseIP(addr)
 			addresses = append(addresses, NewIPAddress(ip))
 		}
+	}
+	return addresses
+}
+
+func parseLabelIdentityAddresses(labelIdentities []uint32) []types.Address {
+	var addresses = make([]types.Address, 0)
+	for _, labelIdentity := range labelIdentities {
+		addresses = append(addresses, NewLabelIDAddress(labelIdentity))
 	}
 	return addresses
 }
@@ -988,6 +1003,12 @@ func preparePipelines() {
 		}
 	}
 	pipelineMap[pipelineID] = generatePipeline(pipelineID, requiredTables)
+	// Set ofctrl.Table with a valid TableID to ensure the OpenFlow Modification messages can be generated successfully
+	// in tests.
+	for _, obj := range tableCache.List() {
+		t := obj.(*Table)
+		t.ofTable.SetTable()
+	}
 
 	mockFeatureNetworkPolicy.egressTables = map[uint8]struct{}{EgressRuleTable.GetID(): {}, EgressDefaultTable.GetID(): {}}
 	if mockFeatureNetworkPolicy.enableAntreaPolicy {
@@ -1009,7 +1030,7 @@ func prepareClient(ctrl *gomock.Controller, dualStack bool) *client {
 		ipProtocols: ipProtocols,
 	}
 	c.cookieAllocator = cookie.NewAllocator(0)
-	m := oftest.NewMockOFEntryOperations(ctrl)
+	m := opstest.NewMockOFEntryOperations(ctrl)
 	m.EXPECT().AddAll(gomock.Any()).Return(nil).AnyTimes()
 	m.EXPECT().DeleteAll(gomock.Any()).Return(nil).AnyTimes()
 	c.ofEntryOperations = m
@@ -1122,8 +1143,8 @@ func TestNetworkPolicyMetrics(t *testing.T) {
 		{
 			name: "Flows with traceflow flows",
 			egressFlows: []string{
-				"table=61, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0x4,nw_tos=28 actions=controller(max_len=128,id=15768)",
-				"table=61, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0x8,nw_tos=28 actions=controller(max_len=128,id=15768)",
+				"table=61, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0x4,nw_tos=28 actions=controller(max_len=65535,id=15768)",
+				"table=61, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0x8,nw_tos=28 actions=controller(max_len=65535,id=15768)",
 				"table=61, n_packets=1, n_bytes=74, priority=200,ct_state=+new,ct_label=0x200000000/0xffffffff00000000,ip actions=goto_table:70",
 				"table=61, n_packets=11, n_bytes=1661, priority=200,ct_state=-new,ct_label=0x200000000/0xffffffff00000000,ip actions=goto_table:70",
 				"table=61, n_packets=0, n_bytes=0, priority=200,ct_state=+new,ct_label=0x600000000/0xffffffff00000000,ip actions=goto_table:70",
@@ -1133,8 +1154,8 @@ func TestNetworkPolicyMetrics(t *testing.T) {
 				"table=61, n_packets=1502362, n_bytes=601635949, priority=0 actions=goto_table:70",
 			},
 			ingressFlows: []string{
-				"table=101, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0x3,nw_tos=28 actions=controller(max_len=128,id=15768)",
-				"table=101, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0xb,nw_tos=28 actions=controller(max_len=128,id=15768)",
+				"table=101, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0x3,nw_tos=28 actions=controller(max_len=65535,id=15768)",
+				"table=101, n_packets=0, n_bytes=0, hard_timeout=300, priority=202,ip,reg0=0x100000/0x100000,reg3=0xb,nw_tos=28 actions=controller(max_len=65535,id=15768)",
 				"table=101, n_packets=1, n_bytes=74, priority=200,ct_state=+new,ct_label=0x1/0xffffffff,ip actions=resubmit(,105)",
 				"table=101, n_packets=11, n_bytes=1661, priority=200,ct_state=-new,ct_label=0x1/0xffffffff,ip actions=resubmit(,105)",
 				"table=101, n_packets=2, n_bytes=148, priority=200,ct_state=+new,ct_label=0x5/0xffffffff,ip actions=resubmit(,105)",
@@ -1158,9 +1179,8 @@ func TestNetworkPolicyMetrics(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
 			preparePipelines()
+			defer resetPipelines()
 			c = prepareClient(ctrl, false)
 			mockOVSClient := ovsctltest.NewMockOVSCtlClient(ctrl)
 			c.ovsctlClient = mockOVSClient
@@ -1176,19 +1196,19 @@ func TestNetworkPolicyMetrics(t *testing.T) {
 
 func TestGetMatchFlowUpdates(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
 	preparePipelines()
+	defer resetPipelines()
 	c = prepareClient(ctrl, false)
 	c.nodeConfig = &config.NodeConfig{PodIPv4CIDR: podIPv4CIDR, PodIPv6CIDR: nil}
 	c.networkConfig = &config.NetworkConfig{TrafficEncapMode: config.TrafficEncapModeEncap, IPv4Enabled: true}
 	c.ipProtocols = []binding.Protocol{binding.ProtocolIP}
-	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl)).AnyTimes()
-	mockAntreaPolicyEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl)).AnyTimes()
+	mockEgressDefaultTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockDropFlowBuilder(ctrl, mockEgressDefaultTable)).AnyTimes()
+	mockAntreaPolicyEgressRuleTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockRuleFlowBuilder(ctrl, mockAntreaPolicyEgressRuleTable)).AnyTimes()
 	ruleFlowBuilder.EXPECT().MatchRegFieldWithValue(gomock.Any(), gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
 	ruleAction.EXPECT().LoadRegMark(gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
 	ruleAction.EXPECT().Conjunction(gomock.Any(), gomock.Any(), gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
 	ruleAction.EXPECT().ResubmitToTables(gomock.Any()).Return(ruleFlowBuilder).AnyTimes()
-	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl)).AnyTimes()
+	mockEgressMetricTable.EXPECT().BuildFlow(gomock.Any()).Return(newMockMetricFlowBuilder(ctrl, mockEgressMetricTable)).AnyTimes()
 	metricFlowBuilder.EXPECT().MatchRegMark(gomock.Any()).Return(metricFlowBuilder).AnyTimes()
 	metricFlowBuilder.EXPECT().MatchRegFieldWithValue(gomock.Any(), gomock.Any()).Return(metricFlowBuilder).AnyTimes()
 	rules := []*types.PolicyRule{
@@ -1263,4 +1283,280 @@ func setMockOFTables(ctrl *gomock.Controller, tableMap map[*Table]**mocks.MockTa
 		tableCache.Update(table)
 		*mockTable = t // Update the value with generated mock table.
 	}
+}
+
+func TestClient_GetPolicyInfoFromConjunction(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	preparePipelines()
+	defer resetPipelines()
+	c = prepareClient(ctrl, false)
+
+	ruleID1 := uint32(101)
+	ruleID2 := uint32(102)
+	npRef := &v1beta2.NetworkPolicyReference{
+		Type:      v1beta2.K8sNetworkPolicy,
+		Namespace: "ns1",
+		Name:      "np1",
+		UID:       "id1",
+	}
+	conj1 := &policyRuleConjunction{
+		id:       ruleID1,
+		npRef:    npRef,
+		ruleName: fmt.Sprint(ruleID1),
+	}
+	flow := EgressRuleTable.ofTable.BuildFlow(priority100).MatchCTSrcIP(net.ParseIP("1.1.1.10")).Action().Drop().Done()
+	msg := getFlowModMessage(flow, binding.AddMessage)
+	conj2 := &policyRuleConjunction{
+		id:           ruleID2,
+		actionFlows:  []*openflow15.FlowMod{msg},
+		npRef:        npRef,
+		ruleName:     fmt.Sprint(ruleID2),
+		ruleLogLabel: "test-log-label",
+	}
+	c.featureNetworkPolicy.policyCache.Add(conj1)
+	c.featureNetworkPolicy.policyCache.Add(conj2)
+
+	tests := []struct {
+		name             string
+		ruleID           uint32
+		valid            bool
+		wantNpRef        string
+		wantPriority     string
+		wantRuleName     string
+		wantRuleLogLabel string
+	}{
+		{
+			name:   "conjunction not found",
+			ruleID: uint32(100),
+			valid:  false,
+		},
+		{
+			name:   "conjunction empty priorities",
+			ruleID: ruleID1,
+			valid:  false,
+		},
+		{
+			name:             "conjunction no error",
+			ruleID:           ruleID2,
+			valid:            true,
+			wantNpRef:        "K8sNetworkPolicy:ns1/np1",
+			wantPriority:     "100",
+			wantRuleName:     fmt.Sprint(ruleID2),
+			wantRuleLogLabel: "test-log-label",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, gotNpRef, gotPriority, gotRuleName, gotRuleLogLabel := c.GetPolicyInfoFromConjunction(tc.ruleID)
+			require.Equal(t, tc.valid, ok)
+			if tc.valid {
+				assert.Equal(t, tc.wantNpRef, gotNpRef.ToString())
+				assert.Equal(t, tc.wantPriority, gotPriority)
+				assert.Equal(t, tc.wantRuleName, gotRuleName)
+				assert.Equal(t, tc.wantRuleLogLabel, gotRuleLogLabel)
+			}
+		})
+	}
+}
+
+func networkPolicyInitFlows(ovsMeterSupported, externalNodeEnabled, l7NetworkPolicyEnabled bool) []string {
+	loggingFlows := []string{
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0x2400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.01,max_len=65535)",
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0x4400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.02,max_len=65535)",
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0x6400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.03,max_len=65535)",
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0x8400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.04,max_len=65535)",
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0xa400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.05,max_len=65535)",
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0xc400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.06,max_len=65535)",
+		"cookie=0x1020000000000, table=Output, priority=200,reg0=0xe400000/0xfe600000 actions=controller(id=32776,reason=no_match,userdata=01.07,max_len=65535)",
+	}
+	if ovsMeterSupported {
+		loggingFlows = []string{
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0x2400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.01,max_len=65535)",
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0x4400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.02,max_len=65535)",
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0x6400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.03,max_len=65535)",
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0x8400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.04,max_len=65535)",
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0xa400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.05,max_len=65535)",
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0xc400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.06,max_len=65535)",
+			"cookie=0x1020000000000, table=Output, priority=200,reg0=0xe400000/0xfe600000 actions=meter:256,controller(id=32776,reason=no_match,userdata=01.07,max_len=65535)",
+		}
+	}
+	if externalNodeEnabled {
+		return append(loggingFlows,
+			"cookie=0x1020000000000, table=AntreaPolicyEgressRule, priority=64990,ct_state=-new+est,ip actions=goto_table:EgressMetric",
+			"cookie=0x1020000000000, table=AntreaPolicyEgressRule, priority=64990,ct_state=-new+rel,ip actions=goto_table:EgressMetric",
+			"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64990,ct_state=-new+est,ip actions=goto_table:IngressMetric",
+			"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64990,ct_state=-new+rel,ip actions=goto_table:IngressMetric",
+		)
+	}
+	initFlows := append(loggingFlows,
+		"cookie=0x1020000000000, table=IngressSecurityClassifier, priority=200,reg0=0x20/0xf0 actions=goto_table:IngressMetric",
+		"cookie=0x1020000000000, table=IngressSecurityClassifier, priority=200,reg0=0x10/0xf0 actions=goto_table:IngressMetric",
+		"cookie=0x1020000000000, table=IngressSecurityClassifier, priority=200,reg0=0x40/0xf0 actions=goto_table:IngressMetric",
+		"cookie=0x1020000000000, table=IngressSecurityClassifier, priority=200,ct_mark=0x40/0x40 actions=goto_table:ConntrackCommit",
+		"cookie=0x1020000000000, table=AntreaPolicyEgressRule, priority=64990,ct_state=-new+est,ip actions=goto_table:EgressMetric",
+		"cookie=0x1020000000000, table=AntreaPolicyEgressRule, priority=64990,ct_state=-new+rel,ip actions=goto_table:EgressMetric",
+		"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64990,ct_state=-new+est,ip actions=goto_table:IngressMetric",
+		"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64990,ct_state=-new+rel,ip actions=goto_table:IngressMetric",
+	)
+	if l7NetworkPolicyEnabled {
+		initFlows = append(initFlows,
+			"cookie=0x1020000000000, table=Classifier, priority=200,in_port=11,vlan_tci=0x1000/0x1000 actions=pop_vlan,set_field:0x6/0xf->reg0,goto_table:L3Forwarding",
+			"cookie=0x1020000000000, table=TrafficControl, priority=210,reg0=0x200006/0x60000f actions=goto_table:Output",
+			"cookie=0x1020000000000, table=Output, priority=212,ct_mark=0x80/0x80,reg0=0x200000/0x600000 actions=push_vlan:0x8100,move:NXM_NX_CT_LABEL[64..75]->OXM_OF_VLAN_VID[0..11],output:10",
+		)
+	}
+	return initFlows
+}
+
+func Test_featureNetworkPolicy_initFlows(t *testing.T) {
+	runTests := func(t *testing.T, ovsMetersSupported bool) {
+		testCases := []struct {
+			name          string
+			nodeType      config.NodeType
+			clientOptions []clientOptionsFn
+			expectedFlows []string
+		}{
+			{
+				name:          "K8s Node with Multicast and L7NetworkPolicy",
+				nodeType:      config.K8sNode,
+				clientOptions: []clientOptionsFn{enableMulticast, enableL7NetworkPolicy},
+				expectedFlows: networkPolicyInitFlows(ovsMetersSupported, false, true),
+			},
+			{
+				name:          "K8s Node with Multicast",
+				nodeType:      config.K8sNode,
+				clientOptions: []clientOptionsFn{enableMulticast},
+				expectedFlows: networkPolicyInitFlows(ovsMetersSupported, false, false),
+			},
+			{
+				name:          "External Node",
+				nodeType:      config.ExternalNode,
+				expectedFlows: networkPolicyInitFlows(ovsMetersSupported, true, false),
+			},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				options := append(tc.clientOptions, setEnableOVSMeters(ovsMetersSupported))
+				fc := newFakeClient(nil, true, false, tc.nodeType, config.TrafficEncapModeEncap, options...)
+				defer resetPipelines()
+
+				assert.ElementsMatch(t, tc.expectedFlows, getFlowStrings(fc.featureNetworkPolicy.initFlows()))
+			})
+		}
+	}
+
+	t.Run("With OVS meters", func(t *testing.T) { runTests(t, true) })
+	t.Run("Without OVS meters", func(t *testing.T) { runTests(t, false) })
+}
+
+func Test_NewDNSPacketInConjunction(t *testing.T) {
+	ipv4ExpFlows := func(ovsMetersSupported bool) []string {
+		if ovsMetersSupported {
+			return []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,conj_id=1 actions=meter:258,controller(id=32776,reason=no_match,userdata=02,max_len=65535),goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp,tp_src=53 actions=conjunction(1,1/2)",
+			}
+		} else {
+			return []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,conj_id=1 actions=controller(id=32776,reason=no_match,userdata=02,max_len=65535),goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp,tp_src=53 actions=conjunction(1,1/2)",
+			}
+		}
+	}
+
+	ipv6ExpFlows := func(ovsMetersSupported bool) []string {
+		if ovsMetersSupported {
+			return []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,conj_id=1 actions=meter:258,controller(id=32776,reason=no_match,userdata=02,max_len=65535),goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp6,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp6,tp_src=53 actions=conjunction(1,1/2)",
+			}
+		} else {
+			return []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,conj_id=1 actions=controller(id=32776,reason=no_match,userdata=02,max_len=65535),goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp6,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp6,tp_src=53 actions=conjunction(1,1/2)",
+			}
+		}
+	}
+
+	dsExpFlows := func(ovsMetersSupported bool) []string {
+		if ovsMetersSupported {
+			return []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,conj_id=1 actions=meter:258,controller(id=32776,reason=no_match,userdata=02,max_len=65535),goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp6,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp6,tp_src=53 actions=conjunction(1,1/2)",
+			}
+		} else {
+			return []string{
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,conj_id=1 actions=controller(id=32776,reason=no_match,userdata=02,max_len=65535),goto_table:IngressMetric",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,udp6,tp_src=53 actions=conjunction(1,1/2)",
+				"cookie=0x1020000000000, table=AntreaPolicyIngressRule, priority=64991,ct_state=+rpl+trk,tcp6,tp_src=53 actions=conjunction(1,1/2)",
+			}
+		}
+	}
+
+	runTests := func(t *testing.T, ovsMetersSupported bool) {
+		for _, tc := range []struct {
+			name          string
+			enableIPv4    bool
+			enableIPv6    bool
+			conjID        uint32
+			expectedFlows []string
+		}{
+			{
+				name:          "IPv4 only",
+				enableIPv4:    true,
+				enableIPv6:    false,
+				conjID:        1,
+				expectedFlows: ipv4ExpFlows(ovsMetersSupported),
+			},
+			{
+				name:          "IPv6 only",
+				enableIPv4:    false,
+				enableIPv6:    true,
+				conjID:        1,
+				expectedFlows: ipv6ExpFlows(ovsMetersSupported),
+			},
+			{
+				name:          "dual stack",
+				enableIPv4:    true,
+				enableIPv6:    true,
+				conjID:        1,
+				expectedFlows: dsExpFlows(ovsMetersSupported),
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ctrl := gomock.NewController(t)
+				m := opstest.NewMockOFEntryOperations(ctrl)
+				bridge := mocks.NewMockBridge(ctrl)
+				fc := newFakeClient(m, tc.enableIPv4, tc.enableIPv6, config.K8sNode, config.TrafficEncapModeEncap, setEnableOVSMeters(ovsMetersSupported))
+				defer resetPipelines()
+				fc.featureNetworkPolicy.bridge = bridge
+				actualFlows := make([]string, 0)
+				m.EXPECT().AddAll(gomock.Any()).Do(func(flowMessages []*openflow15.FlowMod) {
+					flowStrings := getFlowStrings(flowMessages)
+					actualFlows = append(actualFlows, flowStrings...)
+				}).Return(nil).AnyTimes()
+				bridge.EXPECT().AddFlowsInBundle(gomock.Any(), gomock.Any(), gomock.Any()).Do(func(addflows, modFlows, delFlows []*openflow15.FlowMod) {
+					flowStrings := getFlowStrings(addflows)
+					actualFlows = append(actualFlows, flowStrings...)
+				}).Return(nil).Times(1)
+				err := fc.NewDNSPacketInConjunction(tc.conjID)
+				assert.NoError(t, err)
+				assert.ElementsMatch(t, tc.expectedFlows, actualFlows)
+			})
+		}
+	}
+
+	t.Run("With OVS meters", func(t *testing.T) { runTests(t, true) })
+	t.Run("Without OVS meters", func(t *testing.T) { runTests(t, false) })
 }

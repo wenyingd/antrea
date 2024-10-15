@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"math/rand"
 	"net"
+	"time"
 
 	"antrea.io/libOpenflow/openflow15"
 	"antrea.io/libOpenflow/protocol"
@@ -25,6 +26,9 @@ import (
 	"antrea.io/ofnet/ofctrl"
 	"k8s.io/klog/v2"
 )
+
+// #nosec G404: random number generator not used for security purposes
+var pktRand = rand.New(rand.NewSource(time.Now().UnixNano()))
 
 type ofPacketOutBuilder struct {
 	pktOut  *ofctrl.PacketOut
@@ -207,6 +211,30 @@ func (b *ofPacketOutBuilder) SetTCPAckNum(ackNum uint32) PacketOutBuilder {
 	return b
 }
 
+func (b *ofPacketOutBuilder) SetTCPHdrLen(hdrLen uint8) PacketOutBuilder {
+	if b.pktOut.TCPHeader == nil {
+		b.pktOut.TCPHeader = new(protocol.TCP)
+	}
+	b.pktOut.TCPHeader.HdrLen = hdrLen
+	return b
+}
+
+func (b *ofPacketOutBuilder) SetTCPWinSize(winSize uint16) PacketOutBuilder {
+	if b.pktOut.TCPHeader == nil {
+		b.pktOut.TCPHeader = new(protocol.TCP)
+	}
+	b.pktOut.TCPHeader.WinSize = winSize
+	return b
+}
+
+func (b *ofPacketOutBuilder) SetTCPData(data []byte) PacketOutBuilder {
+	if b.pktOut.TCPHeader == nil {
+		b.pktOut.TCPHeader = new(protocol.TCP)
+	}
+	b.pktOut.TCPHeader.Data = data
+	return b
+}
+
 // SetUDPSrcPort sets the source port in the packet's UDP header.
 func (b *ofPacketOutBuilder) SetUDPSrcPort(port uint16) PacketOutBuilder {
 	if b.pktOut.UDPHeader == nil {
@@ -252,7 +280,7 @@ func (b *ofPacketOutBuilder) SetICMPID(id uint16) PacketOutBuilder {
 	return b
 }
 
-//SetICMPSequence sets the sequence number in the packet's ICMP header.
+// SetICMPSequence sets the sequence number in the packet's ICMP header.
 func (b *ofPacketOutBuilder) SetICMPSequence(seq uint16) PacketOutBuilder {
 	if b.pktOut.ICMPHeader == nil {
 		b.pktOut.ICMPHeader = new(protocol.ICMP)
@@ -297,7 +325,12 @@ func (b *ofPacketOutBuilder) SetL4Packet(packet util.Message) PacketOutBuilder {
 	return b
 }
 
-// AddSetIPToSAction sets the IP_TOS field in the packet-out message. The action clears the two ECN bits as 0,
+func (b *ofPacketOutBuilder) SetEthPacket(packet *protocol.Ethernet) PacketOutBuilder {
+	b.pktOut.EthernetPacket = packet
+	return b
+}
+
+// AddSetIPTOSAction sets the IP_TOS field in the packet-out message. The action clears the two ECN bits as 0,
 // and only 2-7 bits of the DSCP field in IP header is set.
 func (b *ofPacketOutBuilder) AddSetIPTOSAction(data uint8) PacketOutBuilder {
 	field, _ := openflow15.FindFieldHeaderByName(NxmFieldIPToS, true)
@@ -328,6 +361,10 @@ func (b *ofPacketOutBuilder) AddResubmitAction(inPort *uint16, table *uint8) Pac
 }
 
 func (b *ofPacketOutBuilder) Done() *ofctrl.PacketOut {
+	if b.pktOut.EthernetPacket != nil {
+		// Entire ethernet packet is provided. No need to fill L3/L4 header.
+		return b.pktOut
+	}
 	if b.pktOut.IPHeader != nil && b.pktOut.IPv6Header != nil {
 		klog.Errorf("Invalid PacketOutBuilder: IP header and IPv6 header are not allowed to exist at the same time")
 		return nil
@@ -340,12 +377,16 @@ func (b *ofPacketOutBuilder) Done() *ofctrl.PacketOut {
 			b.pktOut.ICMPHeader.Checksum = b.icmpHeaderChecksum()
 			b.pktOut.IPHeader.Length = 20 + b.pktOut.ICMPHeader.Len()
 		} else if b.pktOut.TCPHeader != nil {
-			b.pktOut.TCPHeader.HdrLen = 5
-			// #nosec G404: random number generator not used for security purposes
-			b.pktOut.TCPHeader.SeqNum = rand.Uint32()
+			if b.pktOut.TCPHeader.HdrLen == 0 {
+				b.pktOut.TCPHeader.HdrLen = 5
+			}
+			if b.pktOut.TCPHeader.SeqNum == 0 {
+				// #nosec G404: random number generator not used for security purposes
+				b.pktOut.TCPHeader.SeqNum = pktRand.Uint32()
+			}
 			if b.pktOut.TCPHeader.AckNum == 0 {
 				// #nosec G404: random number generator not used for security purposes
-				b.pktOut.TCPHeader.AckNum = rand.Uint32()
+				b.pktOut.TCPHeader.AckNum = pktRand.Uint32()
 			}
 			b.pktOut.TCPHeader.Checksum = b.tcpHeaderChecksum()
 			b.pktOut.IPHeader.Length = 20 + b.pktOut.TCPHeader.Len()
@@ -368,7 +409,7 @@ func (b *ofPacketOutBuilder) Done() *ofctrl.PacketOut {
 		}
 		if b.pktOut.IPHeader.Id == 0 {
 			// #nosec G404: random number generator not used for security purposes
-			b.pktOut.IPHeader.Id = uint16(rand.Uint32())
+			b.pktOut.IPHeader.Id = uint16(pktRand.Uint32())
 		}
 		// Set IP version in the IP Header.
 		b.pktOut.IPHeader.Version = 0x4
@@ -381,12 +422,16 @@ func (b *ofPacketOutBuilder) Done() *ofctrl.PacketOut {
 			b.pktOut.ICMPHeader.Checksum = b.icmpHeaderChecksum()
 			b.pktOut.IPv6Header.Length = b.pktOut.ICMPHeader.Len()
 		} else if b.pktOut.TCPHeader != nil {
-			b.pktOut.TCPHeader.HdrLen = 5
-			// #nosec G404: random number generator not used for security purposes
-			b.pktOut.TCPHeader.SeqNum = rand.Uint32()
+			if b.pktOut.TCPHeader.HdrLen == 0 {
+				b.pktOut.TCPHeader.HdrLen = 5
+			}
+			if b.pktOut.TCPHeader.SeqNum == 0 {
+				// #nosec G404: random number generator not used for security purposes
+				b.pktOut.TCPHeader.SeqNum = pktRand.Uint32()
+			}
 			if b.pktOut.TCPHeader.AckNum == 0 {
 				// #nosec G404: random number generator not used for security purposes
-				b.pktOut.TCPHeader.AckNum = rand.Uint32()
+				b.pktOut.TCPHeader.AckNum = pktRand.Uint32()
 			}
 			b.pktOut.TCPHeader.Checksum = b.tcpHeaderChecksum()
 			b.pktOut.IPv6Header.Length = b.pktOut.TCPHeader.Len()

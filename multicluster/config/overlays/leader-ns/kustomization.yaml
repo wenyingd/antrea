@@ -51,6 +51,8 @@ resources:
   - service_account.yaml
   - role.yaml
   - role_binding.yaml
+  - secret.yaml
 
 patchesStrategicMerge:
   - manager_command_patch.yaml
+  - webhook_patch.yaml

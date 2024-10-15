@@ -17,6 +17,7 @@ package networkpolicystats
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,6 +59,13 @@ func (p *fakeStatsProvider) GetNetworkPolicyStats(namespace, name string) (*stat
 		return nil, false
 	}
 	return &m, true
+}
+
+func TestREST(t *testing.T) {
+	r := NewREST(nil)
+	assert.Equal(t, &statsv1alpha1.NetworkPolicyStats{}, r.New())
+	assert.Equal(t, &statsv1alpha1.NetworkPolicyStatsList{}, r.NewList())
+	assert.True(t, r.NamespaceScoped())
 }
 
 func TestRESTGet(t *testing.T) {
@@ -118,7 +126,7 @@ func TestRESTGet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, features.DefaultFeatureGate, features.NetworkPolicyStats, tt.networkPolicyStatsEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, features.DefaultFeatureGate, features.NetworkPolicyStats, tt.networkPolicyStatsEnabled)
 
 			r := &REST{
 				statsProvider: &fakeStatsProvider{stats: tt.stats},
@@ -284,7 +292,7 @@ func TestRESTList(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer featuregatetesting.SetFeatureGateDuringTest(t, features.DefaultFeatureGate, features.NetworkPolicyStats, tt.networkPolicyStatsEnabled)()
+			featuregatetesting.SetFeatureGateDuringTest(t, features.DefaultFeatureGate, features.NetworkPolicyStats, tt.networkPolicyStatsEnabled)
 
 			r := &REST{
 				statsProvider: &fakeStatsProvider{stats: tt.stats},
@@ -301,6 +309,62 @@ func TestRESTList(t *testing.T) {
 			} else {
 				assert.ElementsMatch(t, tt.expectedObj.(*statsv1alpha1.NetworkPolicyStatsList).Items, actualObj.(*statsv1alpha1.NetworkPolicyStatsList).Items)
 			}
+		})
+	}
+}
+
+func TestRESTConvertToTable(t *testing.T) {
+	stats := &statsv1alpha1.NetworkPolicyStats{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         "foo",
+			Name:              "bar",
+			CreationTimestamp: metav1.Time{Time: time.Now()},
+		},
+		TrafficStats: statsv1alpha1.TrafficStats{
+			Packets:  10,
+			Bytes:    2000,
+			Sessions: 5,
+		},
+	}
+	expectedFormattedCreationTimestamp := stats.CreationTimestamp.UTC().Format(time.RFC3339)
+	tests := []struct {
+		name          string
+		object        runtime.Object
+		expectedTable *metav1.Table
+	}{
+		{
+			name:   "one object",
+			object: stats,
+			expectedTable: &metav1.Table{
+				ColumnDefinitions: tableColumnDefinitions,
+				Rows: []metav1.TableRow{
+					{
+						Cells:  []interface{}{"bar", int64(5), int64(10), int64(2000), expectedFormattedCreationTimestamp},
+						Object: runtime.RawExtension{Object: stats},
+					},
+				},
+			},
+		},
+		{
+			name:   "multiple objects",
+			object: &statsv1alpha1.NetworkPolicyStatsList{Items: []statsv1alpha1.NetworkPolicyStats{*stats}},
+			expectedTable: &metav1.Table{
+				ColumnDefinitions: tableColumnDefinitions,
+				Rows: []metav1.TableRow{
+					{
+						Cells:  []interface{}{"bar", int64(5), int64(10), int64(2000), expectedFormattedCreationTimestamp},
+						Object: runtime.RawExtension{Object: stats},
+					},
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &REST{}
+			actualTable, err := r.ConvertToTable(context.TODO(), tt.object, &metav1.TableOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedTable, actualTable)
 		})
 	}
 }

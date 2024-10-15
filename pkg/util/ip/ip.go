@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 
 	utilnet "k8s.io/utils/net"
@@ -45,7 +46,7 @@ func (ips DualStackIPs) Equal(x DualStackIPs) bool {
 // can be changed.
 func DiffFromCIDRs(allowCIDR *net.IPNet, exceptCIDRs []*net.IPNet) ([]*net.IPNet, error) {
 	// Remove the redundant CIDRs
-	exceptCIDRs = mergeCIDRs(exceptCIDRs)
+	exceptCIDRs = MergeCIDRs(exceptCIDRs)
 	newCIDRs := []*net.IPNet{allowCIDR}
 	for _, exceptCIDR := range exceptCIDRs {
 	beginLoop:
@@ -95,7 +96,7 @@ func diffFromCIDR(allowCIDR, exceptCIDR *net.IPNet) []*net.IPNet {
 	remainingCIDRs := make([]*net.IPNet, 0, exceptPrefix-allowPrefix)
 	for i := allowPrefix + 1; i <= exceptPrefix; i++ {
 		// Flip the (ipBitLen - i)th bit from LSB in exceptCIDR to get the IP which is not in exceptCIDR
-		ipOfNewCIDR := flipSingleBit(&exceptStartIP, uint8(bits-i))
+		ipOfNewCIDR := flipSingleBit(&exceptStartIP, bits-i)
 		newCIDRMask := net.CIDRMask(i, bits)
 		for j := range allowStartIP {
 			ipOfNewCIDR[j] = allowStartIP[j] | ipOfNewCIDR[j]
@@ -107,10 +108,10 @@ func diffFromCIDR(allowCIDR, exceptCIDR *net.IPNet) []*net.IPNet {
 	return remainingCIDRs
 }
 
-func flipSingleBit(ip *net.IP, bitIndex uint8) net.IP {
+func flipSingleBit(ip *net.IP, bitIndex int) net.IP {
 	newIP := make(net.IP, len(*ip))
 	copy(newIP, *ip)
-	byteIndex := uint8(len(newIP)) - (bitIndex / 8) - 1
+	byteIndex := len(newIP) - (bitIndex / 8) - 1
 	// XOR bit operation to flip
 	newIP[byteIndex] = newIP[byteIndex] ^ (1 << (bitIndex % 8))
 	return newIP
@@ -118,7 +119,7 @@ func flipSingleBit(ip *net.IP, bitIndex uint8) net.IP {
 
 // This function is to check for redundant CIDRs in the list that are
 // covered by other CIDRs and remove them. Input array can be modified.
-func mergeCIDRs(cidrBlocks []*net.IPNet) []*net.IPNet {
+func MergeCIDRs(cidrBlocks []*net.IPNet) []*net.IPNet {
 	// Sort the list by netmask in ascending order
 	sort.Slice(cidrBlocks, func(i, j int) bool {
 		return bytes.Compare(cidrBlocks[i].Mask, cidrBlocks[j].Mask) < 0
@@ -195,6 +196,57 @@ func MustParseCIDR(cidr string) *net.IPNet {
 	return ipNet
 }
 
+func MustParseMAC(mac string) net.HardwareAddr {
+	addr, err := net.ParseMAC(mac)
+	if err != nil {
+		panic(fmt.Errorf("cannot parse '%v': %v", mac, err))
+	}
+	return addr
+}
+
+// IPNetEqual returns if the provided IPNets are the same subnet.
+func IPNetEqual(ipNet1, ipNet2 *net.IPNet) bool {
+	if ipNet1 == nil && ipNet2 == nil {
+		return true
+	}
+	if ipNet1 == nil || ipNet2 == nil {
+		return false
+	}
+	if !bytes.Equal(ipNet1.Mask, ipNet2.Mask) {
+		return false
+	}
+	if !ipNet1.IP.Equal(ipNet2.IP) {
+		return false
+	}
+	return true
+}
+
+// IPNetContains returns if the first IPNet contains the second IPNet.
+// For example:
+//
+// 10.0.0.0/24 contains 10.0.0.0/24.
+// 10.0.0.0/24 contains 10.0.0.0/25.
+// 10.0.0.0/24 contains 10.0.0.128/25.
+// 10.0.0.0/24 does not contain 10.0.0.0/23.
+// 10.0.0.0/24 does not contain 10.0.1.0/25.
+func IPNetContains(ipNet1, ipNet2 *net.IPNet) bool {
+	if ipNet1 == nil || ipNet2 == nil {
+		return false
+	}
+	ones1, bits1 := ipNet1.Mask.Size()
+	ones2, bits2 := ipNet2.Mask.Size()
+	if bits1 != bits2 {
+		return false
+	}
+	if ones1 > ones2 {
+		return false
+	}
+	if !ipNet1.Contains(ipNet2.IP) {
+		return false
+	}
+	return true
+}
+
 func MustIPv6(s string) net.IP {
 	ip := net.ParseIP(s)
 	if !utilnet.IsIPv6(ip) {
@@ -225,4 +277,29 @@ func AppendPortIfMissing(addr, port string) string {
 	}
 
 	return net.JoinHostPort(addr, port)
+}
+
+// GetStartAndEndOfPrefix retrieves the start and end addresses of a netip.Prefix.
+// For example:  10.10.40.0/24 -> 10.10.40.0, 10.10.40.255
+func GetStartAndEndOfPrefix(prefix netip.Prefix) (netip.Addr, netip.Addr) {
+	var start, end netip.Addr
+	var mask net.IPMask
+
+	if prefix.Addr().Is4() {
+		mask = net.CIDRMask(prefix.Bits(), 32)
+	} else {
+		mask = net.CIDRMask(prefix.Bits(), 128)
+	}
+
+	// use gateway address, of canonical form of prefix, as start address.
+	start = prefix.Masked().Addr()
+
+	// calculate the end address by performing bitwise OR with the complement of the mask.
+	slice := start.AsSlice()
+	for i := 0; i < len(slice); i++ {
+		slice[i] |= ^mask[i]
+	}
+
+	end, _ = netip.AddrFromSlice(slice)
+	return start, end
 }

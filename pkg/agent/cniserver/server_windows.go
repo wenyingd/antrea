@@ -18,9 +18,10 @@
 package cniserver
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/containernetworking/cni/pkg/types/current"
+	current "github.com/containernetworking/cni/pkg/types/100"
 	"k8s.io/klog/v2"
 )
 
@@ -50,7 +51,7 @@ func (s *CNIServer) hostNetNsPath(netNS string) string {
 // isInfraContainer returns true if a container is infra container according to the network namespace path.
 // On Windows platform:
 //   - When using Docker as CRI runtime, the network namespace of infra container is "none".
-//   - When using Containerd as CRI runtime, the network namespace of infra container is
+//   - When using containerd as CRI runtime, the network namespace of infra container is
 //     a string which does not contains ":".
 func isInfraContainer(netNS string) bool {
 	return netNS == dockerInfraContainerNetNS || !strings.Contains(netNS, ":")
@@ -62,6 +63,15 @@ func isInfraContainer(netNS string) bool {
 //   - Workload container: "container:$infra_container_id"
 func isDockerContainer(netNS string) bool {
 	return netNS == dockerInfraContainerNetNS || strings.Contains(netNS, ":")
+}
+
+// validateRuntime returns error if a container is created by Docker with the provided network namespace
+// because the Docker support has been removed since Antrea 2.0.
+func validateRuntime(netNS string) error {
+	if isDockerContainer(netNS) {
+		return fmt.Errorf("Docker runtime is not supported after Antrea 2.0 for Windows Nodes")
+	}
+	return nil
 }
 
 func getInfraContainer(containerID, netNS string) string {

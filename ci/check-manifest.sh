@@ -31,17 +31,24 @@ YAMLS=(
     "build/yamls/antrea-eks.yml"
     "build/yamls/antrea-gke.yml"
     "build/yamls/antrea-aks.yml"
-    "build/yamls/antrea-octant.yml"
-    "build/yamls/antrea-windows.yml"
     "build/yamls/flow-aggregator.yml"
 )
+
+YAMLS+=($(ls build/yamls/antrea-windows*.yml))
 
 rm "${YAMLS[@]}"
 make manifest
 diff="$(git status --porcelain ${YAMLS[@]})"
 
-if [ ! -z "$diff" ]; then
+MULTICLUSTER_YAMLS=($(ls multicluster/build/yamls/*.yml))
+
+rm "${MULTICLUSTER_YAMLS[@]}"
+cd multicluster; make manifests; cd ..
+mcdiff="$(git status --porcelain ${MULTICLUSTER_YAMLS[@]})"
+
+if [[ ! -z "$diff" || ! -z "$mcdiff" ]]; then
     echoerr "The generated manifest YAMLs are not up-to-date"
-    echoerr "You can regenerate them with 'make manifest' and commit the changes"
+    echoerr "Out-of-date manifests are: \n${diff}${mcdiff}"
+    echoerr "You can regenerate them with 'make manifest' or 'cd multicluster; make manifests', and commit the changes"
     exit 1
 fi

@@ -19,16 +19,18 @@
 
 set -eo pipefail
 
-function echoerr {
-    >&2 echo "$@"
-}
+THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 
-_usage="Usage: $0 [--pull] [--push] [--platform <PLATFORM>] [--distro [ubuntu|ubi]]
-Build the antrea/base-ubuntu:<OVS_VERSION> image.
+source $THIS_DIR/../build-utils.sh
+
+_usage="Usage: $0 [--pull] [--push] [--platform <PLATFORM>] [--distro [ubuntu|ubi|windows]]
+Build the antrea openvswitch image.
         --pull                  Always attempt to pull a newer version of the base images
         --push                  Push the built image to the registry
         --platform <PLATFORM>   Target platform for the image if server is multi-platform capable
-        --distro <distro>       Target Linux distribution"
+        --distro <distro>       Target distribution. If distro is 'windows', platform should be empty. The script uses 'windows/amd64' automatically
+        --no-cache              Do not use the local build cache nor the cached image from the registry
+        --build-tag             Custom build tag for images."
 
 function print_usage {
     echoerr "$_usage"
@@ -36,8 +38,10 @@ function print_usage {
 
 PULL=false
 PUSH=false
+NO_CACHE=false
 PLATFORM=""
 DISTRO="ubuntu"
+BUILD_TAG=""
 
 while [[ $# -gt 0 ]]
 do
@@ -60,6 +64,14 @@ case $key in
     DISTRO="$2"
     shift 2
     ;;
+    --no-cache)
+    NO_CACHE=true
+    shift
+    ;;
+    --build-tag)
+    BUILD_TAG="$2"
+    shift 2
+    ;;
     -h|--help)
     print_usage
     exit 0
@@ -71,9 +83,28 @@ case $key in
 esac
 done
 
+# When --push is provided, we assume that we want to use --cache-to, which will
+# push the "cache image" to the registry. This functionality is not supported
+# with the default docker driver.
+# See https://docs.docker.com/build/cache/backends/registry/
+if $PUSH && [ "$DISTRO" != "windows" ] && ! check_docker_build_driver "docker-container"; then
+    echoerr "--push requires the docker-container build driver"
+    exit 1
+fi
+
 if [ "$PLATFORM" != "" ] && $PUSH; then
     echoerr "Cannot use --platform with --push"
     exit 1
+fi
+
+if [ "$DISTRO" != "ubuntu" ] && [ "$DISTRO" != "ubi" ] && [ "$DISTRO" != "windows" ]; then
+    echoerr "Invalid distribution $DISTRO"
+    exit 1
+fi
+
+OVS_VERSION_FILE="../deps/ovs-version"
+if [ "$DISTRO" == "windows" ]; then
+  OVS_VERSION_FILE="../deps/ovs-version-windows"
 fi
 
 PLATFORM_ARG=""
@@ -81,89 +112,60 @@ if [ "$PLATFORM" != "" ]; then
     PLATFORM_ARG="--platform $PLATFORM"
 fi
 
-if [ "$DISTRO" != "ubuntu" ] && [ "$DISTRO" != "ubi" ]; then
-    echoerr "Invalid distribution $DISTRO"
-    exit 1
-fi
-
-THIS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
-
 pushd $THIS_DIR > /dev/null
 
-OVS_VERSION=$(head -n 1 ../deps/ovs-version)
+OVS_VERSION=$(head -n 1 ${OVS_VERSION_FILE})
 
-# This is a bit complicated but we make sure that we only build OVS if
-# necessary, and at the moment --cache-from does not play nicely with multistage
-# builds: we need to push the intermediate image to the registry. Note that the
-# --cache-from option will have no effect if the image doesn't exist
-# locally.
-# See https://github.com/moby/moby/issues/34715.
+BUILD_CACHE_TAG=$(../build-tag.sh)
+
+if [[ $BUILD_TAG == "" ]]; then
+    BUILD_TAG=$BUILD_CACHE_TAG
+fi
 
 if $PULL; then
-    if [[ ${DOCKER_REGISTRY} == "" ]]; then
-        docker pull $PLATFORM_ARG ubuntu:20.04
-    else
-        docker pull ${DOCKER_REGISTRY}/antrea/ubuntu:20.04
-        docker tag ${DOCKER_REGISTRY}/antrea/ubuntu:20.04 ubuntu:20.04
-    fi
     if [ "$DISTRO" == "ubuntu" ]; then
-        IMAGES_LIST=(
-            "antrea/openvswitch-debs:$OVS_VERSION"
-            "antrea/openvswitch:$OVS_VERSION"
-        )
-    elif [ "$DISTRO" == "ubi" ]; then
-        IMAGES_LIST=(
-            "antrea/openvswitch-rpms:$OVS_VERSION"
-            "antrea/openvswitch-ubi:$OVS_VERSION"
-        )
-    fi
-    for image in "${IMAGES_LIST[@]}"; do
         if [[ ${DOCKER_REGISTRY} == "" ]]; then
-            docker pull $PLATFORM_ARG "${image}" || true
+            docker pull $PLATFORM_ARG ubuntu:24.04
         else
-            rc=0
-            docker pull "${DOCKER_REGISTRY}/${image}" || rc=$?
-            if [[ $rc -eq 0 ]]; then
-                docker tag "${DOCKER_REGISTRY}/${image}" "${image}"
-            fi
+            docker pull ${DOCKER_REGISTRY}/antrea/ubuntu:24.04
+            docker tag ${DOCKER_REGISTRY}/antrea/ubuntu:24.04 ubuntu:24.04
         fi
-    done
+    elif [ "$DISTRO" == "ubi" ]; then
+        docker pull $PLATFORM_ARG quay.io/centos/centos:stream9
+        docker pull $PLATFORM_ARG registry.access.redhat.com/ubi9
+    elif [ "$DISTRO" == "windows" ]; then
+        docker pull --platform linux/amd64 ubuntu:24.04
+    fi
 fi
+
+function docker_build_and_push() {
+    local image="$1"
+    local dockerfile="$2"
+    local build_args="--build-arg OVS_VERSION=$OVS_VERSION"
+    local cache_args=""
+    if $PUSH; then
+        cache_args="$cache_args --cache-to type=registry,ref=$image-cache:$BUILD_CACHE_TAG,mode=max"
+    fi
+    if $NO_CACHE; then
+        cache_args="$cache_args --no-cache"
+    else
+        cache_args="$cache_args --cache-from type=registry,ref=$image-cache:$BUILD_CACHE_TAG,mode=max"
+    fi
+    docker buildx build $PLATFORM_ARG -o type=docker -t $image:$BUILD_TAG $cache_args $build_args -f $dockerfile .
+
+    if $PUSH; then
+        docker push $image:$BUILD_TAG
+    fi
+}
 
 if [ "$DISTRO" == "ubuntu" ]; then
-    docker build $PLATFORM_ARG --target ovs-debs \
-           --cache-from antrea/openvswitch-debs:$OVS_VERSION \
-           -t antrea/openvswitch-debs:$OVS_VERSION \
-           --build-arg OVS_VERSION=$OVS_VERSION .
-
-    docker build $PLATFORM_ARG \
-           --cache-from antrea/openvswitch-debs:$OVS_VERSION \
-           --cache-from antrea/openvswitch:$OVS_VERSION \
-           -t antrea/openvswitch:$OVS_VERSION \
-           --build-arg OVS_VERSION=$OVS_VERSION .
+    docker_build_and_push "antrea/openvswitch" "Dockerfile"
 elif [ "$DISTRO" == "ubi" ]; then
-    docker build $PLATFORM_ARG --target ovs-rpms \
-           --cache-from antrea/openvswitch-rpms:$OVS_VERSION \
-           -t antrea/openvswitch-rpms:$OVS_VERSION \
-           --build-arg OVS_VERSION=$OVS_VERSION \
-           -f Dockerfile.ubi .
-
-    docker build \
-           --cache-from antrea/openvswitch-rpms:$OVS_VERSION \
-           --cache-from antrea/openvswitch-ubi:$OVS_VERSION \
-           -t antrea/openvswitch-ubi:$OVS_VERSION \
-           --build-arg OVS_VERSION=$OVS_VERSION \
-           -f Dockerfile.ubi .
-fi
-
-if $PUSH; then
-    if [ "$DISTRO" == "ubuntu" ]; then
-        docker push antrea/openvswitch-debs:$OVS_VERSION
-        docker push antrea/openvswitch:$OVS_VERSION
-    elif [ "$DISTRO" == "ubi" ]; then
-        docker push antrea/openvswitch-rpms:$OVS_VERSION
-        docker push antrea/openvswitch-ubi:$OVS_VERSION
-    fi
+    docker_build_and_push "antrea/openvswitch-ubi" "Dockerfile.ubi"
+elif [ "$DISTRO" == "windows" ]; then
+    image="antrea/windows-ovs"
+    build_args="--build-arg OVS_VERSION=$OVS_VERSION"
+    docker_build_and_push_windows "${image}" "Dockerfile.windows" "${build_args}" "${OVS_VERSION}" $PUSH ""
 fi
 
 popd > /dev/null

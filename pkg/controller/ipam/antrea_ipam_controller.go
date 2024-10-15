@@ -12,15 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package networkpolicy provides AntreaIPAMController implementation to manage
-// and synchronize the GroupMembers and Namespaces affected by Network Policies and enforce
-// their rules.
 package ipam
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -31,18 +29,17 @@ import (
 	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/informers"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	crdv1a2 "antrea.io/antrea/pkg/apis/crd/v1alpha2"
+	crdv1b1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/pkg/client/clientset/versioned"
-	"antrea.io/antrea/pkg/client/informers/externalversions"
-	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha2"
-	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1alpha2"
+	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1beta1"
+	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1beta1"
 	annotation "antrea.io/antrea/pkg/ipam"
 	"antrea.io/antrea/pkg/ipam/poolallocator"
 	"antrea.io/antrea/pkg/util/k8s"
@@ -71,7 +68,7 @@ type AntreaIPAMController struct {
 	crdClient versioned.Interface
 
 	// Pool cleanup events triggered by StatefulSet add/delete
-	statefulSetQueue workqueue.RateLimitingInterface
+	statefulSetQueue workqueue.TypedRateLimitingInterface[string]
 
 	// follow changes for Namespace objects
 	namespaceLister       corelisters.NamespaceLister
@@ -91,15 +88,15 @@ type AntreaIPAMController struct {
 	ipPoolListerSynced cache.InformerSynced
 
 	// statusQueue maintains the IPPool objects that need to be synced.
-	statusQueue workqueue.RateLimitingInterface
+	statusQueue workqueue.TypedRateLimitingInterface[string]
 }
 
 func statefulSetIndexFunc(obj interface{}) ([]string, error) {
-	ipPool, ok := obj.(*crdv1a2.IPPool)
+	ipPool, ok := obj.(*crdv1b1.IPPool)
 	if !ok {
 		return nil, fmt.Errorf("obj is not IPPool: %+v", obj)
 	}
-	statefulSetNames := sets.NewString()
+	statefulSetNames := sets.New[string]()
 	for _, address := range ipPool.Status.IPAddresses {
 		if address.Owner.StatefulSet != nil {
 			statefulSetNames.Insert(k8s.NamespacedName(address.Owner.StatefulSet.Namespace, address.Owner.StatefulSet.Name))
@@ -109,20 +106,21 @@ func statefulSetIndexFunc(obj interface{}) ([]string, error) {
 }
 
 func NewAntreaIPAMController(crdClient versioned.Interface,
-	informerFactory informers.SharedInformerFactory,
-	crdInformerFactory externalversions.SharedInformerFactory) *AntreaIPAMController {
+	ipPoolInformer crdinformers.IPPoolInformer,
+	namespaceInformer coreinformers.NamespaceInformer,
+	podInformer coreinformers.PodInformer,
+	statefulSetInformer appsinformers.StatefulSetInformer) *AntreaIPAMController {
 
-	ipPoolInformer := crdInformerFactory.Crd().V1alpha2().IPPools()
 	ipPoolInformer.Informer().AddIndexers(cache.Indexers{statefulSetIndex: statefulSetIndexFunc})
 
-	namespaceInformer := informerFactory.Core().V1().Namespaces()
-	podInformer := informerFactory.Core().V1().Pods()
-
-	statefulSetInformer := informerFactory.Apps().V1().StatefulSets()
-
 	c := &AntreaIPAMController{
-		crdClient:               crdClient,
-		statefulSetQueue:        workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "statefulSetPreallocationAndCleanup"),
+		crdClient: crdClient,
+		statefulSetQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "statefulSetPreallocationAndCleanup",
+			},
+		),
 		namespaceLister:         namespaceInformer.Lister(),
 		namespaceListerSynced:   namespaceInformer.Informer().HasSynced,
 		statefulSetInformer:     statefulSetInformer,
@@ -132,7 +130,12 @@ func NewAntreaIPAMController(crdClient versioned.Interface,
 		ipPoolInformer:          ipPoolInformer,
 		ipPoolLister:            ipPoolInformer.Lister(),
 		ipPoolListerSynced:      ipPoolInformer.Informer().HasSynced,
-		statusQueue:             workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "IPPoolStatus"),
+		statusQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "IPPoolStatus",
+			},
+		),
 	}
 
 	// Add handlers for Stateful Set events.
@@ -187,7 +190,7 @@ func (c *AntreaIPAMController) cleanupStaleAddresses() {
 	for _, ipPool := range pools {
 		updateNeeded := false
 		ipPoolCopy := ipPool.DeepCopy()
-		var newList []crdv1a2.IPAddressState
+		var newList []crdv1b1.IPAddressState
 		for _, address := range ipPoolCopy.Status.IPAddresses {
 			// Cleanup reserved addresses
 			if address.Owner.Pod != nil {
@@ -196,7 +199,7 @@ func (c *AntreaIPAMController) cleanupStaleAddresses() {
 					klog.InfoS("IPPool contains stale IPAddress for Pod that no longer exists", "IPPool", ipPool.Name, "Namespace", address.Owner.Pod.Namespace, "Pod", address.Owner.Pod.Name)
 					address.Owner.Pod = nil
 					if address.Owner.StatefulSet != nil {
-						address.Phase = crdv1a2.IPAddressPhaseReserved
+						address.Phase = crdv1b1.IPAddressPhaseReserved
 					}
 					updateNeeded = true
 				}
@@ -219,7 +222,7 @@ func (c *AntreaIPAMController) cleanupStaleAddresses() {
 
 		if updateNeeded {
 			ipPoolCopy.Status.IPAddresses = newList
-			_, err := c.crdClient.CrdV1alpha2().IPPools().UpdateStatus(context.TODO(), ipPoolCopy, metav1.UpdateOptions{})
+			_, err := c.crdClient.CrdV1beta1().IPPools().UpdateStatus(context.TODO(), ipPoolCopy, metav1.UpdateOptions{})
 			if err != nil {
 				// Next cleanup job will retry
 				klog.ErrorS(err, "Updating IP Pool status failed", "IPPool", ipPool.Name)
@@ -240,7 +243,7 @@ func (c *AntreaIPAMController) cleanIPPoolForStatefulSet(namespacedName string) 
 	ipPools, _ := c.ipPoolInformer.Informer().GetIndexer().ByIndex(statefulSetIndex, namespacedName)
 
 	for _, item := range ipPools {
-		ipPool := item.(*crdv1a2.IPPool)
+		ipPool := item.(*crdv1b1.IPPool)
 		allocator, err := poolallocator.NewIPPoolAllocator(ipPool.Name, c.crdClient, c.ipPoolLister)
 		if err != nil {
 			// This is not a transient error - log and forget
@@ -261,7 +264,24 @@ func (c *AntreaIPAMController) cleanIPPoolForStatefulSet(namespacedName string) 
 }
 
 // Find IP Pools annotated to StatefulSet via direct annotation or Namespace annotation
-func (c *AntreaIPAMController) getIPPoolsForStatefulSet(ss *appsv1.StatefulSet) []string {
+func (c *AntreaIPAMController) getIPPoolsForStatefulSet(ss *appsv1.StatefulSet) ([]string, []net.IP) {
+
+	// Inspect IP annotation for the Pods
+	ipStrings, _ := ss.Spec.Template.Annotations[annotation.AntreaIPAMPodIPAnnotationKey]
+	ipStrings = strings.ReplaceAll(ipStrings, " ", "")
+	var ips []net.IP
+	if ipStrings != "" {
+		splittedIPStrings := strings.Split(ipStrings, annotation.AntreaIPAMAnnotationDelimiter)
+		for _, ipString := range splittedIPStrings {
+			ip := net.ParseIP(ipString)
+			if ip == nil {
+				klog.ErrorS(nil, "Ignored invalid Pod IP annotation in the StatefulSet template", "annotation", ipStrings, "statefulSet", klog.KObj(ss))
+				ips = nil
+				break
+			}
+			ips = append(ips, ip)
+		}
+	}
 
 	// Inspect pool annotation for the Pods
 	// In order to avoid extra API call in IPAM driver, IPAM annotations are defined
@@ -269,7 +289,7 @@ func (c *AntreaIPAMController) getIPPoolsForStatefulSet(ss *appsv1.StatefulSet) 
 	annotations, exists := ss.Spec.Template.Annotations[annotation.AntreaIPAMAnnotationKey]
 	if exists {
 		// Stateful Set Pod is annotated with dedicated IP pool
-		return strings.Split(annotations, annotation.AntreaIPAMAnnotationDelimiter)
+		return strings.Split(annotations, annotation.AntreaIPAMAnnotationDelimiter), ips
 	}
 
 	// Inspect Namespace
@@ -277,15 +297,15 @@ func (c *AntreaIPAMController) getIPPoolsForStatefulSet(ss *appsv1.StatefulSet) 
 	if err != nil {
 		// Should never happen
 		klog.Errorf("Namespace %s not found for StatefulSet %s", ss.Namespace, ss.Name)
-		return nil
+		return nil, nil
 	}
 
 	annotations, exists = namespace.Annotations[annotation.AntreaIPAMAnnotationKey]
 	if exists {
-		return strings.Split(annotations, annotation.AntreaIPAMAnnotationDelimiter)
+		return strings.Split(annotations, annotation.AntreaIPAMAnnotationDelimiter), ips
 	}
 
-	return nil
+	return nil, nil
 
 }
 
@@ -295,7 +315,11 @@ func (c *AntreaIPAMController) getIPPoolsForStatefulSet(ss *appsv1.StatefulSet) 
 func (c *AntreaIPAMController) preallocateIPPoolForStatefulSet(ss *appsv1.StatefulSet) error {
 	klog.InfoS("Processing create notification", "Namespace", ss.Namespace, "StatefulSet", ss.Name)
 
-	ipPools := c.getIPPoolsForStatefulSet(ss)
+	ipPools, ips := c.getIPPoolsForStatefulSet(ss)
+	var ip net.IP
+	if len(ips) > 0 {
+		ip = ips[0]
+	}
 
 	if ipPools == nil {
 		// nothing to preallocate
@@ -318,7 +342,7 @@ func (c *AntreaIPAMController) preallocateIPPoolForStatefulSet(ss *appsv1.Statef
 	// in the pool. This safeguards us from double allocation in case agent allocated IP by the time
 	// controller task is executed. Note also that StatefulSet resize will not be handled.
 	if size > 0 {
-		err = allocator.AllocateStatefulSet(ss.Namespace, ss.Name, size)
+		err = allocator.AllocateStatefulSet(ss.Namespace, ss.Name, size, ip)
 		if err != nil {
 			return fmt.Errorf("failed to preallocate continuous IP space of size %d from Pool %s: %s", size, ipPoolName, err)
 		}
@@ -339,14 +363,13 @@ func (c *AntreaIPAMController) processNextStatefulSetWorkItem() bool {
 
 	defer c.statefulSetQueue.Done(key)
 
-	namespacedName := key.(string)
-	namespace, name := k8s.SplitNamespacedName(namespacedName)
+	namespace, name := k8s.SplitNamespacedName(key)
 	ss, err := c.statefulSetInformer.Lister().StatefulSets(namespace).Get(name)
 
 	if err != nil {
 		if errors.IsNotFound(err) {
 			// StatefulSet no longer present - clean up reserved pool IPs
-			err = c.cleanIPPoolForStatefulSet(namespacedName)
+			err = c.cleanIPPoolForStatefulSet(key)
 			if err != nil {
 				// Put the item back on the workqueue to handle any transient errors.
 				c.statefulSetQueue.AddRateLimited(key)
@@ -406,7 +429,7 @@ func (c *AntreaIPAMController) updateIPPoolCounters(poolName string) error {
 		},
 	})
 
-	_, err = c.crdClient.CrdV1alpha2().IPPools().Patch(context.TODO(), ipPool.Name, apitypes.MergePatchType, patch, metav1.PatchOptions{}, "status")
+	_, err = c.crdClient.CrdV1beta1().IPPools().Patch(context.TODO(), ipPool.Name, apitypes.MergePatchType, patch, metav1.PatchOptions{}, "status")
 	if err != nil {
 		return fmt.Errorf("failed to update IPPool %s counters, error: %v", poolName, err)
 	}
@@ -415,12 +438,12 @@ func (c *AntreaIPAMController) updateIPPoolCounters(poolName string) error {
 }
 
 func (c *AntreaIPAMController) createHandler(obj interface{}) {
-	ipPool := obj.(*crdv1a2.IPPool)
+	ipPool := obj.(*crdv1b1.IPPool)
 	c.statusQueue.Add(ipPool.Name)
 }
 
 func (c *AntreaIPAMController) updateHandler(oldObj, newObj interface{}) {
-	ipPool := newObj.(*crdv1a2.IPPool)
+	ipPool := newObj.(*crdv1b1.IPPool)
 	c.statusQueue.Add(ipPool.Name)
 }
 
@@ -431,8 +454,7 @@ func (c *AntreaIPAMController) processNextWorkItem() bool {
 	}
 	defer c.statusQueue.Done(key)
 
-	err := c.updateIPPoolCounters(key.(string))
-	if err != nil {
+	if err := c.updateIPPoolCounters(key); err != nil {
 		// Put the item back in the workqueue to handle any transient errors.
 		c.statusQueue.AddRateLimited(key)
 		klog.ErrorS(err, "Failed to sync IPPool status", "IPPool", key)

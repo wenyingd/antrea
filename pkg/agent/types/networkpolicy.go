@@ -15,8 +15,10 @@
 package types
 
 import (
+	"k8s.io/apimachinery/pkg/util/sets"
+
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
-	secv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	secv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
@@ -56,6 +58,9 @@ const (
 	ICMPAddr
 	ServiceGroupIDAddr
 	IGMPAddr
+	LabelIDAddr
+	TCPFlagsAddr
+	CTStateAddr
 	UnSupported
 )
 
@@ -72,19 +77,33 @@ type Address interface {
 	GetValue() interface{}
 }
 
+type NodePolicyRule struct {
+	IPSet           string
+	IPSetMembers    sets.Set[string]
+	Priority        *Priority
+	ServiceIPTChain string
+	ServiceIPTRules []string
+	CoreIPTChain    string
+	CoreIPTRules    []string
+	IsIPv6          bool
+}
+
 // PolicyRule groups configurations to set up conjunctive match for egress/ingress policy rules.
 type PolicyRule struct {
 	Direction     v1beta2.Direction
 	From          []Address
 	To            []Address
 	Service       []v1beta2.Service
-	Action        *secv1alpha1.RuleAction
+	L7Protocols   []v1beta2.L7Protocol
+	L7RuleVlanID  *uint32
+	Action        *secv1beta1.RuleAction
 	Priority      *uint16
 	Name          string
 	FlowID        uint32
 	TableID       uint8
 	PolicyRef     *v1beta2.NetworkPolicyReference
 	EnableLogging bool
+	LogLabel      string
 }
 
 // IsAntreaNetworkPolicyRule returns if a PolicyRule is created for Antrea NetworkPolicy types.

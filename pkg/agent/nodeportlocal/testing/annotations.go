@@ -1,6 +1,3 @@
-//go:build !windows
-// +build !windows
-
 // Copyright 2021 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,17 +38,17 @@ func NewExpectedNPLAnnotations(nodeIP *string, nplStartPort, nplEndPort int) *Ex
 }
 
 func (a *ExpectedNPLAnnotations) find(podPort int, protocol string) *types.NPLAnnotation {
-	for _, annotation := range a.annotations {
+	for idx := range a.annotations {
+		annotation := &a.annotations[idx]
 		if annotation.PodPort == podPort && annotation.Protocol == protocol {
-			return &annotation
+			return annotation
 		}
 	}
 	return nil
 }
 
 func (a *ExpectedNPLAnnotations) Add(nodePort *int, podPort int, protocol string) *ExpectedNPLAnnotations {
-	protocols := []string{protocol}
-	annotation := types.NPLAnnotation{PodPort: podPort, Protocol: protocol, Protocols: protocols}
+	annotation := types.NPLAnnotation{PodPort: podPort, Protocol: protocol}
 	if nodePort != nil {
 		annotation.NodePort = *nodePort
 	}
@@ -69,7 +66,6 @@ func (a *ExpectedNPLAnnotations) Check(t *testing.T, nplValue []types.NPLAnnotat
 		if !assert.NotNilf(t, expectedAnnotation, "Unexpected annotation with PodPort %d", nplAnnotation.PodPort) {
 			continue
 		}
-		assert.ElementsMatch(t, expectedAnnotation.Protocols, nplAnnotation.Protocols, "Protocols mismatch in annotation")
 		if expectedAnnotation.NodeIP != "" {
 			assert.Equal(t, expectedAnnotation.NodeIP, nplAnnotation.NodeIP, "NodeIP mismatch in annotation")
 		}

@@ -52,61 +52,10 @@ func (c *fakeNDPConn) LeaveGroup(ip net.IP) error {
 	return c.leaveGroup(ip)
 }
 
-func TestNDPResponder_Advertise(t *testing.T) {
-	buffer := bytes.NewBuffer(nil)
-	fakeConn := &fakeNDPConn{
-		writeTo: func(msg ndp.Message, _ *ipv6.ControlMessage, _ net.IP) error {
-			bs, err := ndp.MarshalMessage(msg)
-			assert.NoError(t, err)
-			buffer.Write(bs)
-			return nil
-		},
-	}
-	responder := &ndpResponder{
-		iface: newFakeNetworkInterface(),
-		conn:  fakeConn,
-	}
-	err := responder.advertise(net.ParseIP("fe80::250:56ff:fea7:e29d"))
-	assert.NoError(t, err)
-	//  Neighbor Advertisement Message Format - RFC 4861 Section 4.4.
-	//   0                   1                   2                   3
-	//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	//  |     Type      |     Code      |          Checksum             |
-	//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	//  |R|S|O|                     Reserved                            |
-	//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	//  |                                                               |
-	//  +                                                               +
-	//  |                                                               |
-	//  +                       Target Address                          +
-	//  |                                                               |
-	//  +                                                               +
-	//  |                                                               |
-	//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	//  |   Options ...
-	//  +-+-+-+-+-+-+-+-+-+-+-+-
-	//
-	//  Options formats - Source/Target Link-layer Address. RFC 4861 Section 4.6.1.
-	//   0                   1                   2                   3
-	//   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-	//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	//  |     Type      |    Length     |    Link-Layer Address ...
-	//  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	expectedBytes := []byte{
-		0x88,       // type - 136 for Neighbor Advertisement
-		0x00,       // code
-		0x00, 0x00, // checksum
-		0x20, 0x00, 0x00, 0x00, // flags and reserved bits. Override bit is set.
-		0xfe, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x50, 0x56, 0xff, 0xfe, 0xa7, 0xe2, 0x9d, // IPv6 address
-		0x02,                               // option - 2 for Target Link-layer Address
-		0x01,                               // length (units of 8 octets including type and length fields)
-		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, // hardware address
-	}
-	assert.Equal(t, expectedBytes, buffer.Bytes())
-}
-
 func TestNDPResponder_handleNeighborSolicitation(t *testing.T) {
+	hwAddr := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	iface := newFakeNetworkInterface(hwAddr)
+
 	tests := []struct {
 		name           string
 		requestMessage []byte
@@ -180,14 +129,14 @@ func TestNDPResponder_handleNeighborSolicitation(t *testing.T) {
 					return msg, nil, tt.requestIP, err
 				},
 			}
-			assignedIPs := sets.NewString()
+			assignedIPs := sets.New[string]()
 			for _, ip := range tt.assignedIPs {
 				assignedIPs.Insert(ip.String())
 			}
 			responder := &ndpResponder{
-				iface:       newFakeNetworkInterface(),
+				iface:       iface,
 				conn:        fakeConn,
-				assignedIPs: sets.NewString(),
+				assignedIPs: sets.New[string](),
 			}
 			for _, ip := range tt.assignedIPs {
 				responder.assignedIPs[ip.String()] = struct{}{}
@@ -239,46 +188,49 @@ func Test_parseIPv6SolicitedNodeMulticastAddress(t *testing.T) {
 }
 
 func Test_ndpResponder_addIP(t *testing.T) {
+	hwAddr := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	iface := newFakeNetworkInterface(hwAddr)
+
 	tests := []struct {
 		name                    string
 		ip                      net.IP
 		conn                    ndpConn
-		assignedIPs             sets.String
+		assignedIPs             sets.Set[string]
 		multicastGroups         map[int]int
 		expectedJoinedGroups    []net.IP
 		expectedLeftGroups      []net.IP
 		expectedMulticastGroups map[int]int
-		expectedAssigndIPs      sets.String
+		expectedAssigndIPs      sets.Set[string]
 		expectedError           bool
 	}{
 		{
 			name:                 "Add new IP from a new multicast group 1",
 			ip:                   net.ParseIP("2022::beaf"),
-			assignedIPs:          sets.NewString(),
+			assignedIPs:          sets.New[string](),
 			multicastGroups:      map[int]int{},
 			expectedJoinedGroups: []net.IP{net.ParseIP("ff02::1:ff00:beaf")},
 			expectedLeftGroups:   nil,
 			expectedMulticastGroups: map[int]int{
 				0xbeaf: 1,
 			},
-			expectedAssigndIPs: sets.NewString("2022::beaf"),
+			expectedAssigndIPs: sets.New[string]("2022::beaf"),
 		},
 		{
 			name:                 "Add new IP from a new multicast group 2",
 			ip:                   net.ParseIP("2022::beaf:beaf"),
-			assignedIPs:          sets.NewString(),
+			assignedIPs:          sets.New[string](),
 			multicastGroups:      map[int]int{},
 			expectedJoinedGroups: []net.IP{net.ParseIP("ff02::1:ffaf:beaf")},
 			expectedLeftGroups:   nil,
 			expectedMulticastGroups: map[int]int{
 				0xafbeaf: 1,
 			},
-			expectedAssigndIPs: sets.NewString("2022::beaf:beaf"),
+			expectedAssigndIPs: sets.New[string]("2022::beaf:beaf"),
 		},
 		{
 			name:        "Add new IP from an existing multicast group",
 			ip:          net.ParseIP("2021::beaf"),
-			assignedIPs: sets.NewString("2022::beaf"),
+			assignedIPs: sets.New[string]("2022::beaf"),
 			multicastGroups: map[int]int{
 				0xbeaf: 1,
 			},
@@ -287,23 +239,23 @@ func Test_ndpResponder_addIP(t *testing.T) {
 			expectedMulticastGroups: map[int]int{
 				0xbeaf: 2,
 			},
-			expectedAssigndIPs: sets.NewString("2021::beaf", "2022::beaf"),
+			expectedAssigndIPs: sets.New[string]("2021::beaf", "2022::beaf"),
 		},
 		{
 			name:                    "Add invalid IP",
 			ip:                      net.ParseIP("1.2.3.4"),
-			assignedIPs:             sets.NewString(),
+			assignedIPs:             sets.New[string](),
 			multicastGroups:         map[int]int{},
 			expectedError:           true,
 			expectedMulticastGroups: map[int]int{},
-			expectedAssigndIPs:      sets.NewString(),
+			expectedAssigndIPs:      sets.New[string](),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var joinedGroup, leftGroup []net.IP
 			r := &ndpResponder{
-				iface: newFakeNetworkInterface(),
+				iface: iface,
 				conn: &fakeNDPConn{
 					joinGroup: func(ip net.IP) error {
 						joinedGroup = append(joinedGroup, ip)
@@ -335,34 +287,37 @@ func Test_ndpResponder_addIP(t *testing.T) {
 }
 
 func Test_ndpResponder_removeIP(t *testing.T) {
+	hwAddr := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	iface := newFakeNetworkInterface(hwAddr)
+
 	tests := []struct {
 		name                    string
 		ip                      net.IP
 		conn                    ndpConn
-		assignedIPs             sets.String
+		assignedIPs             sets.Set[string]
 		multicastGroups         map[int]int
 		expectedJoinedGroups    []net.IP
 		expectedLeftGroups      []net.IP
 		expectedMulticastGroups map[int]int
-		expectedAssigndIPs      sets.String
+		expectedAssigndIPs      sets.Set[string]
 		expectedError           bool
 	}{
 		{
 			name:        "Remove IP and leave multicast group",
 			ip:          net.ParseIP("2022::beaf"),
-			assignedIPs: sets.NewString("2022::beaf"),
+			assignedIPs: sets.New[string]("2022::beaf"),
 			multicastGroups: map[int]int{
 				0xbeaf: 1,
 			},
 			expectedJoinedGroups:    nil,
 			expectedLeftGroups:      []net.IP{net.ParseIP("ff02::1:ff00:beaf")},
 			expectedMulticastGroups: map[int]int{},
-			expectedAssigndIPs:      sets.NewString(),
+			expectedAssigndIPs:      sets.New[string](),
 		},
 		{
 			name:        "Remove IP and should not leave multicast group",
 			ip:          net.ParseIP("2022::beaf"),
-			assignedIPs: sets.NewString("2022::beaf", "2021::beaf"),
+			assignedIPs: sets.New[string]("2022::beaf", "2021::beaf"),
 			multicastGroups: map[int]int{
 				0xbeaf: 2,
 			},
@@ -371,12 +326,12 @@ func Test_ndpResponder_removeIP(t *testing.T) {
 			expectedMulticastGroups: map[int]int{
 				0xbeaf: 1,
 			},
-			expectedAssigndIPs: sets.NewString("2021::beaf"),
+			expectedAssigndIPs: sets.New[string]("2021::beaf"),
 		},
 		{
 			name:        "Remove non-existent IP",
 			ip:          net.ParseIP("2022::beaf"),
-			assignedIPs: sets.NewString("2021::beaf"),
+			assignedIPs: sets.New[string]("2021::beaf"),
 			multicastGroups: map[int]int{
 				0xbeaf: 1,
 			},
@@ -385,11 +340,11 @@ func Test_ndpResponder_removeIP(t *testing.T) {
 			expectedMulticastGroups: map[int]int{
 				0xbeaf: 1,
 			},
-			expectedAssigndIPs: sets.NewString("2021::beaf"),
+			expectedAssigndIPs: sets.New[string]("2021::beaf"),
 		}, {
 			name:        "Remove invalid IP",
 			ip:          net.ParseIP("1.2.3.4"),
-			assignedIPs: sets.NewString("2021::beaf"),
+			assignedIPs: sets.New[string]("2021::beaf"),
 			multicastGroups: map[int]int{
 				0xbeaf: 1,
 			},
@@ -398,7 +353,7 @@ func Test_ndpResponder_removeIP(t *testing.T) {
 			expectedMulticastGroups: map[int]int{
 				0xbeaf: 1,
 			},
-			expectedAssigndIPs: sets.NewString("2021::beaf"),
+			expectedAssigndIPs: sets.New[string]("2021::beaf"),
 			expectedError:      true,
 		},
 	}
@@ -406,7 +361,7 @@ func Test_ndpResponder_removeIP(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var joinedGroup, leftGroup []net.IP
 			r := &ndpResponder{
-				iface: newFakeNetworkInterface(),
+				iface: iface,
 				conn: &fakeNDPConn{
 					joinGroup: func(ip net.IP) error {
 						joinedGroup = append(joinedGroup, ip)

@@ -13,6 +13,8 @@
   - [Installation on Linux VM](#installation-on-linux-vm)
     - [Prerequisites on Linux VM](#prerequisites-on-linux-vm)
     - [Installation steps on Linux VM](#installation-steps-on-linux-vm)
+      - [Service Installation](#service-installation)
+      - [Container Installation](#container-installation)
   - [Installation on Windows VM](#installation-on-windows-vm)
     - [Prerequisites on Windows VM](#prerequisites-on-windows-vm)
     - [Installation steps on Windows VM](#installation-steps-on-windows-vm)
@@ -66,7 +68,7 @@ configuration. The configuration for `antrea-controller` is modified in the
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: antrea-config-dcfb6k2hkm
+  name: antrea-config
   namespace: kube-system
 data:
   antrea-controller.conf: |
@@ -194,21 +196,23 @@ spec:
    change `vm-ns` to the right Namespace.
 
    ```bash
-   kubectl apply -f https://raw.githubusercontent.com/antrea-io/antrea/feature/externalnode/build/yamls/externalnode/vm-agent-rbac.yml
+   kubectl apply -f https://raw.githubusercontent.com/antrea-io/antrea/main/build/yamls/externalnode/vm-agent-rbac.yml
    ```
 
 4. Create `antrea-agent.kubeconfig` file for `antrea-agent` to access the K8S
    API server.
 
    ```bash
-   export CLUSTER_NAME="kubernetes"
-   export SERVICE_ACCOUNT="vm-agent"
+   CLUSTER_NAME="kubernetes"
+   SERVICE_ACCOUNT="vm-agent"
+   NAMESPACE="vm-ns"
+   KUBECONFIG="antrea-agent.kubeconfig"
    APISERVER=$(kubectl config view -o jsonpath="{.clusters[?(@.name==\"$CLUSTER_NAME\")].cluster.server}")
-   TOKEN=$(kubectl -n vm-ns get secrets -o jsonpath="{.items[?(@.metadata.annotations['kubernetes\.io/service-account\.name']=='$SERVICE_ACCOUNT')].data.token}"|base64 --decode)
-   kubectl config --kubeconfig=antrea-agent.kubeconfig set-cluster $CLUSTER_NAME --server=$APISERVER --insecure-skip-tls-verify=true
-   kubectl config --kubeconfig=antrea-agent.kubeconfig set-credentials antrea-agent --token=$TOKEN
-   kubectl config --kubeconfig=antrea-agent.kubeconfig set-context antrea-agent@$CLUSTER_NAME --cluster=$CLUSTER_NAME --user=antrea-agent
-   kubectl config --kubeconfig=antrea-agent.kubeconfig use-context antrea-agent@$CLUSTER_NAME
+   TOKEN=$(kubectl -n $NAMESPACE get secrets -o jsonpath="{.items[?(@.metadata.name=='${SERVICE_ACCOUNT}-service-account-token')].data.token}"|base64 --decode)
+   kubectl config --kubeconfig=$KUBECONFIG set-cluster $CLUSTER_NAME --server=$APISERVER --insecure-skip-tls-verify=true
+   kubectl config --kubeconfig=$KUBECONFIG set-credentials antrea-agent --token=$TOKEN
+   kubectl config --kubeconfig=$KUBECONFIG set-context antrea-agent@$CLUSTER_NAME --cluster=$CLUSTER_NAME --user=antrea-agent
+   kubectl config --kubeconfig=$KUBECONFIG use-context antrea-agent@$CLUSTER_NAME
    # Copy antrea-agent.kubeconfig to the VM
    ```
 
@@ -216,15 +220,17 @@ spec:
    the `antrea-controller` API server.
 
    ```bash
-   # Specify the antrea-controller API server endpoint. Antrea-Controller needs to be exposed via the Node IP or a
-   # public IP that is reachable from the VM
-   export ANTREA_API_SERVER="https://172.18.0.1:443"
-   export ANTREA_CLUSTER_NAME="antrea"
-   TOKEN=$(kubectl -n vm-ns get secrets -o jsonpath="{.items[?(@.metadata.annotations['kubernetes\.io/service-account\.name']=='$SERVICE_ACCOUNT')].data.token}"|base64 --decode)
-   kubectl config --kubeconfig=antrea-agent.antrea.kubeconfig set-cluster $ANTREA_CLUSTER_NAME --server=$ANTREA_API_SERVER --insecure-skip-tls-verify=true
-   kubectl config --kubeconfig=antrea-agent.antrea.kubeconfig set-credentials antrea-agent --token=$TOKEN
-   kubectl config --kubeconfig=antrea-agent.antrea.kubeconfig set-context antrea-agent@$ANTREA_CLUSTER_NAME --cluster=$ANTREA_CLUSTER_NAME --user=antrea-agent
-   kubectl config --kubeconfig=antrea-agent.antrea.kubeconfig use-context antrea-agent@$ANTREA_CLUSTER_NAME
+   # Specify the antrea-controller API server endpoint. Antrea-Controller needs
+   # to be exposed via the Node IP or a public IP that is reachable from the VM
+   ANTREA_API_SERVER="https://172.18.0.1:443"
+   ANTREA_CLUSTER_NAME="antrea"
+   NAMESPACE="vm-ns"
+   KUBECONFIG="antrea-agent.antrea.kubeconfig"
+   TOKEN=$(kubectl -n $NAMESPACE get secrets -o jsonpath="{.items[?(@.metadata.name=='${SERVICE_ACCOUNT}-service-account-token')].data.token}"|base64 --decode)
+   kubectl config --kubeconfig=$KUBECONFIG set-cluster $ANTREA_CLUSTER_NAME --server=$ANTREA_API_SERVER --insecure-skip-tls-verify=true
+   kubectl config --kubeconfig=$KUBECONFIG set-credentials antrea-agent --token=$TOKEN
+   kubectl config --kubeconfig=$KUBECONFIG set-context antrea-agent@$ANTREA_CLUSTER_NAME --cluster=$ANTREA_CLUSTER_NAME --user=antrea-agent
+   kubectl config --kubeconfig=$KUBECONFIG use-context antrea-agent@$ANTREA_CLUSTER_NAME
    # Copy antrea-agent.antrea.kubeconfig to the VM
    ```
 
@@ -234,7 +240,7 @@ spec:
    apply it in the cluster.
 
    ```bash
-   $ cat << EOF | kubectl apply -f -
+   cat << EOF | kubectl apply -f -
    apiVersion: crd.antrea.io/v1alpha1
    kind: ExternalNode
    metadata:
@@ -258,63 +264,141 @@ please refer to the [getting-started guide](getting-started.md#open-vswitch).
 
 #### Installation steps on Linux VM
 
-1. Build `antrea-agent` binary in the root of the antrea code tree and copy the
+`Antrea Agent` can be installed as a native service or can be installed in a container.
+
+##### Service Installation
+
+1. Build `antrea-agent` binary in the root of the Antrea code tree and copy the
    `antrea-agent` binary from the `bin` directory to the Linux VM.
 
    ```bash
    make docker-bin
    ```
 
-2. The `antrea-agent.conf` file specifies agent configuration parameters. Copy
-   the [agent configuration file](../build/yamls/externalnode/conf/antrea-agent.conf)
-   to the VM and edit the `antrea-agent.conf` file to set `clientConnection`,
-   `antreaClientConnection` and `externalNodeNamespace` with the correct values.
-   Copy `antrea-agent.antrea.kubeconfig` and `antrea-agent.kubeconfig` files to
-   the VM, that were generated in the step 4 and step 5 of
-   [Prerequisites on Kubernetes cluster](#prerequisites-on-kubernetes-cluster).
+2. Copy configuration files to the VM, including [antrea-agent.conf](../build/yamls/externalnode/conf/antrea-agent.conf),
+   which specifies agent configuration parameters;
+   `antrea-agent.antrea.kubeconfig` and `antrea-agent.kubeconfig`, which were
+   generated in steps 4 and 5 of [Prerequisites on Kubernetes cluster](#prerequisites-on-kubernetes-cluster).
 
-   ```bash
-   AGENT_NAMESPACE="vm-ns"
-   AGENT_CONF_PATH="/etc/antrea"
-   mkdir -p $AGENT_CONF_PATH
-   # Copy antrea-agent kubeconfig files
-   cp ./antrea-agent.kubeconfig $AGENT_CONF_PATH
-   cp ./antrea-agent.antrea.kubeconfig $AGENT_CONF_PATH
-   # Update clientConnection and antreaClientConnection
-   sed -i "s|kubeconfig: |kubeconfig: $AGENT_CONF_PATH/|g" antrea-agent.conf
-   sed -i "s|#externalNodeNamespace: default|externalNodeNamespace: $AGENT_NAMESPACE|g" antrea-agent.conf
-   # Copy antrea-agent configuration file
-   cp ./antrea-agent.conf $AGENT_CONF_PATH
-   ```
+3. Bootstrap `antrea-agent` using one of these 2 methods:
 
-3. Create `antrea-agent` service. Note: environment variable `NODE_NAME` is set
-   in the service configuration, if the VM's hostname is different from the name
-   defined in the `ExternalNode` resource. Below is a sample snippet to start
-   `antrea-agent` as a service on Ubuntu 18.04 or later:
+   1. Bootstrap `antrea-agent` using the [installation script](../hack/externalnode/install-vm.sh)
+      as shown below (Ubuntu 18.04 and 20.04, and Red Hat Enterprise Linux 8.4).
 
-   ```bash
-   AGENT_BIN_PATH="/usr/sbin"
-   AGENT_LOG_PATH="/var/log/antrea"
-   mkdir -p $AGENT_BIN_PATH
-   mkdir -p $AGENT_LOG_PATH
-   cat << EOF > /etc/systemd/system/antrea-agent.service
-   Description="antrea-agent as a systemd service"
-   After=network.target
-   [Service]
-   Environment="NODE_NAME=vm1"
-   ExecStart=$AGENT_BIN_PATH/antrea-agent \
-   --config=$AGENT_CONF_PATH/antrea-agent.conf \
-   --logtostderr=false \
-   --log_file=$AGENT_LOG_PATH/antrea-agent.log
-   Restart=on-failure
-   [Install]
-   WantedBy=multi-user.target
-   EOF
+      ```bash
+      ./install-vm.sh --ns vm-ns --bin ./antrea-agent --config ./antrea-agent.conf \
+      --kubeconfig ./antrea-agent.kubeconfig \
+      --antrea-kubeconfig ./antrea-agent.antrea.kubeconfig --nodename vm1
+      ```
+
+   2. Bootstrap `antrea-agent` manually. First edit the `antrea-agent.conf` file
+      to set `clientConnection`, `antreaClientConnection` and `externalNodeNamespace`
+      to the correct values.
+
+      ```bash
+      AGENT_NAMESPACE="vm-ns"
+      AGENT_CONF_PATH="/etc/antrea"
+      mkdir -p $AGENT_CONF_PATH
+      # Copy antrea-agent kubeconfig files
+      cp ./antrea-agent.kubeconfig $AGENT_CONF_PATH
+      cp ./antrea-agent.antrea.kubeconfig $AGENT_CONF_PATH
+      # Update clientConnection and antreaClientConnection
+      sed -i "s|kubeconfig: |kubeconfig: $AGENT_CONF_PATH/|g" antrea-agent.conf
+      sed -i "s|#externalNodeNamespace: default|externalNodeNamespace: $AGENT_NAMESPACE|g" antrea-agent.conf
+      # Copy antrea-agent configuration file
+      cp ./antrea-agent.conf $AGENT_CONF_PATH
+      ```
+
+      Then create `antrea-agent` service. Below is a sample snippet to start
+      `antrea-agent` as a service on Ubuntu 18.04 or later:
+
+      Note: Environment variable `NODE_NAME` needs to be set in the service
+      configuration, if the VM's hostname is different from the name defined in
+      the `ExternalNode` resource.
+
+      ```bash
+      AGENT_BIN_PATH="/usr/sbin"
+      AGENT_LOG_PATH="/var/log/antrea"
+      mkdir -p $AGENT_BIN_PATH
+      mkdir -p $AGENT_LOG_PATH
+      cat << EOF > /etc/systemd/system/antrea-agent.service
+      Description="antrea-agent as a systemd service"
+      After=network.target
+      [Service]
+      Environment="NODE_NAME=vm1"
+      ExecStart=$AGENT_BIN_PATH/antrea-agent \
+      --config=$AGENT_CONF_PATH/antrea-agent.conf \
+      --logtostderr=false \
+      --log_file=$AGENT_LOG_PATH/antrea-agent.log
+      Restart=on-failure
+      [Install]
+      WantedBy=multi-user.target
+      EOF
    
-   sudo systemctl daemon-reload
-   sudo systemctl enable antrea-agent
-   sudo systemctl start antrea-agent
-   ```
+      sudo systemctl daemon-reload
+      sudo systemctl enable antrea-agent
+      sudo systemctl start antrea-agent
+      ```
+
+##### Container Installation
+
+1. `Docker` is used as the container runtime for Linux VMs. The Docker image can be built from source code
+   or can be downloaded from the Antrea repository.
+
+   1. From Source
+
+      Build `antrea-agent-ubuntu` Docker image in the root of the Antrea code tree.
+
+      ```bash
+      make build-agent-ubuntu
+      ```
+
+      Note: The image repository name should be `antrea/antrea-agent-ubuntu` and tag should be `latest`.
+
+      Copy the `antrea/antrea-agent-ubuntu:latest` image to the target VM. Please follow
+      the below steps.
+
+      ```bash
+      # Save it in a tar file
+      docker save -o <tar file path in source host machine> antrea/antrea-agent-ubuntu:latest
+
+      # Copy this tar file to the target VM.
+      # Then load that image on the target VM.
+      docker load -i <path to image tar file>
+      ```
+
+   2. Docker Repository
+
+      The released version of `antrea-agent-ubuntu` Docker image can be downloaded from Antrea `Dockerhub`
+      repository. Pick a version from the [list of releases](https://github.com/antrea-io/antrea/releases). For any given
+      release `<TAG>` (e.g. `v1.15.0`), download `antrea-agent-ubuntu` Docker image as follows:
+
+      ```bash
+      docker pull antrea/antrea-agent-ubuntu:<TAG>
+      ```
+
+      The [installation script](../hack/externalnode/install-vm.sh) automatically downloads the specific released
+      version of `antrea-agent-ubuntu` Docker image on VM by specifying the installation argument `--antrea-version`.
+      Also, the script automatically loads that image into Docker. For any given release `<TAG>` (e.g. `v1.15.0`),
+      specify it in the --antrea-version argument as follows.
+
+      ```bash
+         --antrea-version <TAG>
+      ```
+
+2. Copy configuration files to the VM, including [antrea-agent.conf](../build/yamls/externalnode/conf/antrea-agent.conf),
+   which specifies agent configuration parameters;
+   `antrea-agent.antrea.kubeconfig` and `antrea-agent.kubeconfig`, which were
+   generated in steps 4 and 5 of [Prerequisites on Kubernetes cluster](#prerequisites-on-kubernetes-cluster).
+
+3. Bootstrap `antrea-agent` using the [installation script](../hack/externalnode/install-vm.sh)
+   as shown below (Ubuntu 18.04, 20.04, and Rhel 8.4).
+
+    ```bash
+      ./install-vm.sh --ns vm-ns --config ./antrea-agent.conf \
+      --kubeconfig ./antrea-agent.kubeconfig \
+      --antrea-kubeconfig ./antrea-agent.antrea.kubeconfig --containerize --antrea-version v1.9.0
+    ```
 
 ### Installation on Windows VM
 
@@ -344,8 +428,9 @@ Note: Only Windows Server 2019 is supported in the first release at the moment.
    make docker-windows-bin
    ```
 
-2. Copy `antrea-agent.conf`, `antrea-agent.kubeconfig` and `antrea-agent.antrea.kubeconfig`
-   files to the VM. Please refer to the step 2 of [Installation on Linux VM](#installation-steps-on-linux-vm)
+2. Copy [antrea-agent.conf](../build/yamls/externalnode/conf/antrea-agent.conf),
+   `antrea-agent.kubeconfig` and `antrea-agent.antrea.kubeconfig` files to the
+   VM. Please refer to the step 2 of [Installation on Linux VM](#installation-steps-on-linux-vm)
    section for more information.
 
    ```powershell
@@ -358,26 +443,41 @@ Note: Only Windows Server 2019 is supported in the first release at the moment.
    Copy-Item .\antrea-agent.conf $WIN_AGENT_CONF_PATH
    ```
 
-3. Configure environment variable `NODE_NAME` if the VM's hostname is different
-   from the name defined in the `ExternalNode` resource.
+3. Bootstrap `antrea-agent` using one of these 2 methods:
 
-   ```powershell
-   [Environment]::SetEnvironmentVariable("NODE_NAME", "vm1")
-   [Environment]::SetEnvironmentVariable("NODE_NAME", "vm1", [System.EnvironmentVariableTarget]::Machine)
-   ```
+   1. Bootstrap `antrea-agent` using the [installation script](../hack/externalnode/install-vm.ps1)
+      as shown below (only Windows Server 2019 is tested and supported).
 
-4. Create `antrea-agent` service using nssm. Below is a sample snippet to start
-   `antrea-agent` as a service:
+      ```powershell
+      .\Install-vm.ps1 -Namespace vm-ns -BinaryPath .\antrea-agent.exe `
+      -ConfigPath .\antrea-agent.conf -KubeConfigPath .\antrea-agent.kubeconfig `
+      -AntreaKubeConfigPath .\antrea-agent.antrea.kubeconfig `
+      -InstallDir C:\antrea-agent -NodeName vm1
+      ```
 
-   ```powershell
-   $WIN_AGENT_BIN_PATH="C:\antrea-agent"
-   $WIN_AGENT_LOG_PATH="C:\antrea-agent\logs"
-   New-Item -ItemType Directory -Force -Path $WIN_AGENT_BIN_PATH
-   New-Item -ItemType Directory -Force -Path $WIN_AGENT_LOG_PATH
-   Copy-Item .\antrea-agent.exe $WIN_AGENT_BIN_PATH
-   nssm.exe install antrea-agent $WIN_AGENT_BIN_PATH\antrea-agent.exe --config $WIN_AGENT_CONF_PATH\antrea-agent.conf --log_file $WIN_AGENT_LOG_PATH\antrea-agent.log --logtostderr=false
-   nssm.exe start antrea-agent
-   ```
+   2. Bootstrap `antrea-agent` manually. First edit the `antrea-agent.conf` file to
+      set `clientConnection`, `antreaClientConnection` and `externalNodeNamespace`
+      to the correct values.
+      Configure environment variable `NODE_NAME` if the VM's hostname is different
+      from the name defined in the `ExternalNode` resource.
+
+      ```powershell
+      [Environment]::SetEnvironmentVariable("NODE_NAME", "vm1")
+      [Environment]::SetEnvironmentVariable("NODE_NAME", "vm1", [System.EnvironmentVariableTarget]::Machine)
+      ```
+
+      Then create `antrea-agent` service using nssm. Below is a sample snippet to start
+      `antrea-agent` as a service:
+
+      ```powershell
+      $WIN_AGENT_BIN_PATH="C:\antrea-agent"
+      $WIN_AGENT_LOG_PATH="C:\antrea-agent\logs"
+      New-Item -ItemType Directory -Force -Path $WIN_AGENT_BIN_PATH
+      New-Item -ItemType Directory -Force -Path $WIN_AGENT_LOG_PATH
+      Copy-Item .\antrea-agent.exe $WIN_AGENT_BIN_PATH
+      nssm.exe install antrea-agent $WIN_AGENT_BIN_PATH\antrea-agent.exe --config $WIN_AGENT_CONF_PATH\antrea-agent.conf --log_file $WIN_AGENT_LOG_PATH\antrea-agent.log --logtostderr=false
+      nssm.exe start antrea-agent
+      ```
 
 ## VM network configuration
 
@@ -410,7 +510,7 @@ running on an external Node is as follows:
 - Only `update` permission is given on resource `antreaagentinfos`, and `create`
   permission is moved to `antrea-controller`
 
-For more details please refer to [vm-agent-rbac.yml](/build/yamls/externalnode/vm-agent-rbac.yml)
+For more details please refer to [vm-agent-rbac.yml](../build/yamls/externalnode/vm-agent-rbac.yml)
 
 `antrea-agent` reports its status by updating the `antreaagentinfo` resource
 which is created with the same name as the `ExternalNode`. `antrea-controller`
@@ -448,9 +548,10 @@ labeled with `role=db` to reject SSH connections from IP "172.16.100.5" or from
 other external Nodes labeled with `role=front`:
 
 ```yaml
+apiVersion: crd.antrea.io/v1beta1
 kind: NetworkPolicy
 metadata:
-  name: anp1
+  name: annp1
   namespace: vm-ns
 spec:
   priority: 9000.0
@@ -542,7 +643,7 @@ OVS bridge, and both interfaces are configured with the same MAC address, the
 match condition of an OpenFlow entry in `L2ForwardingCalcTable` uses the input
 port number but not the MAC address of the packet. The flow actions are:
 
-1) set flag `OFPortFoundRegMark`, and
+1) set flag `OutputToOFPortRegMark`, and
 2) set the peer port as the `TargetOFPortField`, and
 3) enforce the packet to go to stageIngressSecurity.
 

@@ -17,46 +17,36 @@ package featuregates
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	"antrea.io/antrea/pkg/features"
 )
 
-type Response struct {
-	Component string `json:"component,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Version   string `json:"version,omitempty"`
-}
-
 // HandleFunc returns the function which can handle queries issued by 'antctl get featuregates' command.
 // The handler function populates Antrea Agent feature gates information to the response.
-// For now, it will return all feature gates included in features.DefaultAntreaFeatureGates for agent
-// We need to exclude any new feature gates which is not consumed by agent in the future.
 func HandleFunc() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var featureGates []Response
-		status, version := "", ""
+		var featureGates []apis.FeatureGateResponse
 		for df := range features.DefaultAntreaFeatureGates {
-			if features.DefaultMutableFeatureGate.Enabled(df) {
-				status = "Enabled"
-			} else {
-				status = "Disabled"
+			if features.AgentGates.Has(df) {
+				featureGates = append(featureGates, apis.FeatureGateResponse{
+					Component: "agent",
+					Name:      string(df),
+					Status:    features.GetStatus(features.DefaultFeatureGate.Enabled(df)),
+					Version:   features.GetVersion(string(features.DefaultAntreaFeatureGates[df].PreRelease)),
+				})
 			}
-			version = string(features.DefaultAntreaFeatureGates[df].PreRelease)
-			featureGates = append(featureGates, Response{
-				Component: "agent",
-				Name:      string(df),
-				Status:    status,
-				Version:   version,
-			})
 		}
-
+		sort.Slice(featureGates, func(i, j int) bool {
+			return featureGates[i].Name < featureGates[j].Name
+		})
 		err := json.NewEncoder(w).Encode(featureGates)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			klog.Errorf("Error when encoding FeatureGates to json: %v", err)
+			klog.ErrorS(err, "Error when encoding FeatureGates to json")
 		}
 	}
 }

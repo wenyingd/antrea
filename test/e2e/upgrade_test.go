@@ -34,10 +34,11 @@ func skipIfNotUpgradeTest(t *testing.T) {
 // TestUpgrade tests that some basic functionalities are not broken when
 // upgrading from one version of Antrea to another. At the moment it checks
 // that:
-//  * connectivity (intra and inter Node) is not broken
-//  * NetworkPolicy can take effect
-//  * namespaces can be deleted
-//  * Pod deletion leads to correct resource cleanup
+//   - connectivity (intra and inter Node) is not broken
+//   - NetworkPolicy can take effect
+//   - namespaces can be deleted
+//   - Pod deletion leads to correct resource cleanup
+//
 // To run the test, provide the -upgrade.toYML flag.
 func TestUpgrade(t *testing.T) {
 	skipIfNotUpgradeTest(t)
@@ -53,9 +54,9 @@ func TestUpgrade(t *testing.T) {
 	nodeName := nodeName(0)
 	podName := randName("test-pod-")
 
-	t.Logf("Creating a busybox test Pod on '%s'", nodeName)
-	if err := data.createBusyboxPodOnNode(podName, data.testNamespace, nodeName, false); err != nil {
-		t.Fatalf("Error when creating busybox test Pod: %v", err)
+	t.Logf("Creating a toolbox test Pod on '%s'", nodeName)
+	if err := data.createToolboxPodOnNode(podName, data.testNamespace, nodeName, false); err != nil {
+		t.Fatalf("Error when creating toolbox test Pod: %v", err)
 	}
 	if err := data.podWaitForRunning(defaultTimeout, podName, data.testNamespace); err != nil {
 		t.Fatalf("Error when waiting for Pod '%s' to be in the Running state", podName)
@@ -93,7 +94,7 @@ func TestUpgrade(t *testing.T) {
 	}
 	if *controllerOnly == false {
 		t.Logf("Restarting all Antrea DaemonSet Pods")
-		if err := data.restartAntreaAgentPods(defaultTimeout); err != nil {
+		if err := data.RestartAntreaAgentPods(defaultTimeout); err != nil {
 			t.Fatalf("Error when restarting Antrea: %v", err)
 		}
 	}

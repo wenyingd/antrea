@@ -26,7 +26,10 @@ import (
 
 	"github.com/blang/semver"
 	"github.com/coreos/go-iptables/iptables"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
+
+	"antrea.io/antrea/pkg/agent/util/ipset"
 )
 
 const (
@@ -36,7 +39,7 @@ const (
 	RawTable    = "raw"
 
 	AcceptTarget     = "ACCEPT"
-	DROPTarget       = "DROP"
+	DropTarget       = "DROP"
 	MasqueradeTarget = "MASQUERADE"
 	MarkTarget       = "MARK"
 	ReturnTarget     = "RETURN"
@@ -44,8 +47,12 @@ const (
 	NoTrackTarget    = "NOTRACK"
 	SNATTarget       = "SNAT"
 	DNATTarget       = "DNAT"
+	RejectTarget     = "REJECT"
+	NotrackTarget    = "NOTRACK"
+	LOGTarget        = "LOG"
 
 	PreRoutingChain  = "PREROUTING"
+	InputChain       = "INPUT"
 	ForwardChain     = "FORWARD"
 	PostRoutingChain = "POSTROUTING"
 	OutputChain      = "OUTPUT"
@@ -71,26 +78,97 @@ const (
 	ProtocolIPv6
 )
 
-// https://netfilter.org/projects/iptables/files/changes-iptables-1.6.2.txt:
-// iptables-restore: support acquiring the lock.
-var restoreWaitSupportedMinVersion = semver.Version{Major: 1, Minor: 6, Patch: 2}
+const (
+	ProtocolTCP    = "tcp"
+	ProtocolUDP    = "udp"
+	ProtocolSCTP   = "sctp"
+	ProtocolICMP   = "icmp"
+	ProtocolICMPv6 = "icmp6"
+)
+
+var (
+	// https://netfilter.org/projects/iptables/files/changes-iptables-1.6.2.txt:
+	// iptables-restore: support acquiring the lock.
+	restoreWaitSupportedMinVersion = semver.Version{Major: 1, Minor: 6, Patch: 2}
+
+	// https://netfilter.org/projects/iptables/files/changes-iptables-1.6.0.txt:
+	// iptables: snat: add randomize-full support
+	// https://netfilter.org/projects/iptables/files/changes-iptables-1.6.2.txt:
+	// iptables: masquerade: add randomize-full support
+	// In our case, we do not differentiate between SNAT and MASQUERADE support for the option,
+	// and we use 1.6.2 as the common minimum version number.
+	randomFullySupportedMinVersion = semver.Version{Major: 1, Minor: 6, Patch: 2}
+)
+
+type Interface interface {
+	EnsureChain(protocol Protocol, table string, chain string) error
+
+	ChainExists(protocol Protocol, table string, chain string) (bool, error)
+
+	AppendRule(protocol Protocol, table string, chain string, ruleSpec []string) error
+
+	InsertRule(protocol Protocol, table string, chain string, ruleSpec []string) error
+
+	DeleteRule(protocol Protocol, table string, chain string, ruleSpec []string) error
+
+	DeleteChain(protocol Protocol, table string, chain string) error
+
+	ListRules(protocol Protocol, table string, chain string) (map[Protocol][]string, error)
+
+	Restore(data string, flush bool, useIPv6 bool) error
+
+	Save() ([]byte, error)
+
+	HasRandomFully() bool
+}
+
+type IPTablesRuleBuilder interface {
+	MatchCIDRSrc(cidr string) IPTablesRuleBuilder
+	MatchCIDRDst(cidr string) IPTablesRuleBuilder
+	MatchIPSetSrc(ipset string, ipsetType ipset.SetType) IPTablesRuleBuilder
+	MatchIPSetDst(ipset string, ipsetType ipset.SetType) IPTablesRuleBuilder
+	MatchTransProtocol(protocol string) IPTablesRuleBuilder
+	MatchPortDst(port *intstr.IntOrString, endPort *int32) IPTablesRuleBuilder
+	MatchPortSrc(port, endPort *int32) IPTablesRuleBuilder
+	MatchICMP(icmpType, icmpCode *int32, ipProtocol Protocol) IPTablesRuleBuilder
+	MatchEstablishedOrRelated() IPTablesRuleBuilder
+	MatchInputInterface(interfaceName string) IPTablesRuleBuilder
+	MatchOutputInterface(interfaceName string) IPTablesRuleBuilder
+	SetLogPrefix(prefix string) IPTablesRuleBuilder
+	SetTarget(target string) IPTablesRuleBuilder
+	SetTargetDNATToDst(dnatIP string, dnatPort *int32) IPTablesRuleBuilder
+	SetComment(comment string) IPTablesRuleBuilder
+	CopyBuilder() IPTablesRuleBuilder
+	Done() IPTablesRule
+}
+
+type IPTablesRule interface {
+	GetRule() string
+}
 
 type Client struct {
 	ipts map[Protocol]*iptables.IPTables
 	// restoreWaitSupported indicates whether iptables-restore (or ip6tables-restore) supports --wait flag.
 	restoreWaitSupported bool
+	// randomFullySupported indicates whether --random-fully is supported for SNAT and MASQUERADE rules.
+	randomFullySupported bool
 }
 
 func New(enableIPV4, enableIPV6 bool) (*Client, error) {
 	ipts := make(map[Protocol]*iptables.IPTables)
-	var restoreWaitSupported bool
+	var restoreWaitSupported, randomFullySupported bool
+	if enableIPV4 || enableIPV6 {
+		restoreWaitSupported = true
+		randomFullySupported = true
+	}
 	if enableIPV4 {
 		ipt, err := iptables.New()
 		if err != nil {
 			return nil, fmt.Errorf("error creating IPTables instance: %v", err)
 		}
 		ipts[ProtocolIPv4] = ipt
-		restoreWaitSupported = isRestoreWaitSupported(ipt)
+		restoreWaitSupported = restoreWaitSupported && isRestoreWaitSupported(ipt)
+		randomFullySupported = randomFullySupported && isRandomFullySupported(ipt)
 	}
 	if enableIPV6 {
 		ip6t, err := iptables.NewWithProtocol(iptables.ProtocolIPv6)
@@ -98,17 +176,27 @@ func New(enableIPV4, enableIPV6 bool) (*Client, error) {
 			return nil, fmt.Errorf("error creating IPTables instance for IPv6: %v", err)
 		}
 		ipts[ProtocolIPv6] = ip6t
-		if !restoreWaitSupported {
-			restoreWaitSupported = isRestoreWaitSupported(ip6t)
-		}
+		restoreWaitSupported = restoreWaitSupported && isRestoreWaitSupported(ip6t)
+		randomFullySupported = randomFullySupported && isRandomFullySupported(ip6t)
 	}
-	return &Client{ipts: ipts, restoreWaitSupported: restoreWaitSupported}, nil
+	return &Client{ipts: ipts, restoreWaitSupported: restoreWaitSupported, randomFullySupported: randomFullySupported}, nil
 }
 
 func isRestoreWaitSupported(ipt *iptables.IPTables) bool {
 	major, minor, patch := ipt.GetIptablesVersion()
 	version := semver.Version{Major: uint64(major), Minor: uint64(minor), Patch: uint64(patch)}
 	return version.GE(restoreWaitSupportedMinVersion)
+}
+
+func isRandomFullySupported(ipt *iptables.IPTables) bool {
+	// Note that even if the iptables version supports it, the kernel version may not.
+	// For SNAT rules, kernel >= 3.14 is required. For MASQUERADE rules, kernel >= 3.13 is required.
+	// Given how old these kernel releases are, we do not check the version here. This is
+	// consistent with how K8s checks for --random-fully support:
+	// https://github.com/kubernetes/kubernetes/blob/60c4c2b2521fb454ce69dee737e3eb91a25e0535/pkg/util/iptables/iptables.go#L239
+	major, minor, patch := ipt.GetIptablesVersion()
+	version := semver.Version{Major: uint64(major), Minor: uint64(minor), Patch: uint64(patch)}
+	return version.GE(randomFullySupportedMinVersion)
 }
 
 // EnsureChain checks if target chain already exists, creates it if not.
@@ -256,14 +344,18 @@ func (c *Client) DeleteChain(protocol Protocol, table string, chain string) erro
 }
 
 // ListRules lists all rules from a chain in a table.
-func (c *Client) ListRules(table string, chain string) ([]string, error) {
-	var allRules []string
+func (c *Client) ListRules(protocol Protocol, table string, chain string) (map[Protocol][]string, error) {
+	allRules := make(map[Protocol][]string)
 	for p := range c.ipts {
-		rules, err := c.ipts[p].List(table, chain)
-		if err != nil {
-			return rules, fmt.Errorf("error getting rules from table %s chain %s protocol %s: %v", table, chain, p, err)
+		ipt := c.ipts[p]
+		if !matchProtocol(ipt, protocol) {
+			continue
 		}
-		allRules = append(allRules, rules...)
+		rules, err := ipt.List(table, chain)
+		if err != nil {
+			return nil, fmt.Errorf("error getting rules from table %s chain %s protocol %s: %v", table, chain, p, err)
+		}
+		allRules[p] = rules
 	}
 	return allRules, nil
 }
@@ -271,7 +363,7 @@ func (c *Client) ListRules(table string, chain string) ([]string, error) {
 // Restore calls iptable-restore to restore iptables with the provided content.
 // If flush is true, all previous contents of the respective tables will be flushed.
 // Otherwise only involved chains will be flushed. Restore supports "ip6tables-restore" for IPv6.
-func (c *Client) Restore(data []byte, flush bool, useIPv6 bool) error {
+func (c *Client) Restore(data string, flush bool, useIPv6 bool) error {
 	var args []string
 	if !flush {
 		args = append(args, "--noflush")
@@ -281,7 +373,7 @@ func (c *Client) Restore(data []byte, flush bool, useIPv6 bool) error {
 		iptablesCmd = "ip6tables-restore"
 	}
 	cmd := exec.Command(iptablesCmd, args...)
-	cmd.Stdin = bytes.NewBuffer(data)
+	cmd.Stdin = bytes.NewBuffer([]byte(data))
 	stderr := &bytes.Buffer{}
 	cmd.Stderr = stderr
 	// We acquire xtables lock for iptables-restore to prevent it from conflicting
@@ -329,6 +421,16 @@ func (c *Client) Save() ([]byte, error) {
 	return output, nil
 }
 
+// HasRandomFully returns true if the iptables version supports --random-fully for SNAT and
+// MASQUERADE rules.
+func (c *Client) HasRandomFully() bool {
+	return c.randomFullySupported
+}
+
 func MakeChainLine(chain string) string {
 	return fmt.Sprintf(":%s - [0:0]", chain)
+}
+
+func IsIPv6Protocol(protocol Protocol) bool {
+	return protocol == ProtocolIPv6
 }

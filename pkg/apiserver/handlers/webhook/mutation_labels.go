@@ -17,7 +17,7 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	admv1 "k8s.io/api/admission/v1"
@@ -50,7 +50,7 @@ func HandleMutationLabels() http.HandlerFunc {
 		klog.V(2).Info("Received request to mutate resource labels")
 		var reqBody []byte
 		if r.Body != nil {
-			reqBody, _ = ioutil.ReadAll(r.Body)
+			reqBody, _ = io.ReadAll(r.Body)
 		}
 		if len(reqBody) == 0 {
 			klog.Errorf("Mutation webhook labelsmutator received empty request body")
@@ -161,7 +161,7 @@ func createLabelsReplacePatch(l map[string]string) ([]byte, error) {
 	var patch []jsonPatch
 	patch = append(patch, jsonPatch{
 		Op:    jsonPatchReplaceOp,
-		Path:  fmt.Sprintf("/metadata/labels"),
+		Path:  "/metadata/labels",
 		Value: l,
 	})
 	return json.Marshal(patch)

@@ -1,0 +1,1621 @@
+- project:
+    # ghpr_auth, antrea_admin_list, antrea_org_list, antrea_white_list
+    # should be defined as global variables somewhere else
+    name: antrea
+    git_credentials_id: ANTREA_GIT_CREDENTIAL
+    org_repo: antrea-io/antrea
+    jobs:
+      - '{name}-{test_name}-for-period':
+          test_name: job-updater
+          node: 'antrea-test-node'
+          description: 'This is for updating all antrea jobs.'
+          builders:
+            - builder-job-updater:
+                jenkins_location: lab
+          branches:
+          - '*/main'
+          included_regions:
+          - ci/jenkins/jobs/.*
+          cron: 'H/15 * * * *'
+          ignore_post_commit_hooks: false
+          publishers: []
+          wrappers: []
+      - '{name}-{test_name}-for-period':
+          test_name: jenkins-backup
+          node: 'backup-node'
+          description: 'This is for backing up all jenkins files.'
+          builders:
+            - builder-jenkins-backup
+          branches: []
+          included_regions: []
+          cron: 'H 0 1 * *'
+          ignore_post_commit_hooks: false
+          publishers: []
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 30
+              type: absolute
+          - credentials-binding:
+              - text:
+                  credential-id: RDIFF_USERNAME
+                  variable: RDIFF_USERNAME
+              - text:
+                  credential-id: RDIFF_IP
+                  variable: RDIFF_IP
+              - text:
+                  credential-id: RDIFF_PATH
+                  variable: RDIFF_PATH
+      - '{name}-{test_name}-no-scm':
+          test_name: flexible-ipam-e2e-pending-label
+          node: null
+          description: 'This is for marking PR as pending for e2e test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-flexible-ipam-e2e
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-flexible-ipam-e2e to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-flexible-ipam-e2e to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-flexible-ipam-e2e to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: flexible-ipam-e2e
+          node: 'antrea-flexible-ipam-jumper'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-flexible-ipam-e2e
+          trigger_phrase: ^(?!Thanks for your PR).*/test-flexible-ipam-e2e.*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-flexible-ipam-e2e
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-flexible-ipam-e2e to re-trigger.
+          error_status: Failed. Add comment /test-flexible-ipam-e2e to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: 'antrea-test-logs.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: ipv6-ds-e2e-pending-label
+          node: null
+          description: 'This is for marking PR as pending for e2e test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-ipv6-ds-e2e
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-ipv6-e2e to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-ipv6-e2e to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-ipv6-e2e to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: ipv6-ds-e2e
+          node: 'antrea-ipv6-ds-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-e2e-jumper
+          trigger_phrase: ^(?!Thanks for your PR).*/test-ipv6-(e2e|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-ipv6-ds-e2e
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-ipv6-e2e to re-trigger.
+          error_status: Failed. Add comment /test-ipv6-e2e to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: antrea-test-logs.tar.gz
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: ipv6-ds-conformance-pending-label
+          node: null
+          description: 'This is for marking PR as pending for conformance test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-ipv6-ds-conformance
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-ipv6-conformance to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-ipv6-conformance to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-ipv6-conformance to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: ipv6-ds-conformance
+          node: 'antrea-ipv6-ds-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-jumper:
+                conformance_type: 'conformance'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-ipv6-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-ipv6-ds-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-ipv6-conformance to re-trigger.
+          error_status: Failed. Add comment /test-ipv6-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: ipv6-ds-networkpolicy-pending-label
+          node: null
+          description: 'This is for marking PR as pending for networkpolicy test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-ipv6-ds-networkpolicy
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-ipv6-networkpolicy to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-ipv6-networkpolicy to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-ipv6-networkpolicy to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: ipv6-ds-networkpolicy
+          node: 'antrea-ipv6-ds-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-jumper:
+                conformance_type: 'networkpolicy'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-ipv6-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-ipv6-ds-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-ipv6-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-ipv6-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: ipv6-only-e2e-pending-label
+          node: null
+          description: 'This is for marking PR as pending for e2e test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-ipv6-only-e2e
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-ipv6-only-e2e to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-ipv6-only-e2e to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-ipv6-only-e2e to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: ipv6-only-e2e
+          node: 'antrea-ipv6-only-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-e2e-jumper
+          trigger_phrase: ^(?!Thanks for your PR).*/test-ipv6-only-(e2e|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-ipv6-only-e2e
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-ipv6-only-e2e to re-trigger.
+          error_status: Failed. Add comment /test-ipv6-only-e2e to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: antrea-test-logs.tar.gz
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: ipv6-only-conformance-pending-label
+          node: null
+          description: 'This is for marking PR as pending for conformance test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-ipv6-only-conformance
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-ipv6-only-conformance to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-ipv6-only-conformance to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-ipv6-only-conformance to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: ipv6-only-conformance
+          node: 'antrea-ipv6-only-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-jumper:
+                conformance_type: 'conformance'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-ipv6-only-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-ipv6-only-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-ipv6-only-conformance to re-trigger.
+          error_status: Failed. Add comment /test-ipv6-only-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: ipv6-only-networkpolicy-pending-label
+          node: null
+          description: 'This is for marking PR as pending for networkpolicy test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-ipv6-only-networkpolicy
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-ipv6-only-networkpolicy to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-ipv6-only-networkpolicy to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-ipv6-only-networkpolicy to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: ipv6-only-networkpolicy
+          node: 'antrea-ipv6-only-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-jumper:
+                conformance_type: 'networkpolicy'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-ipv6-only-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-ipv6-only-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-ipv6-only-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-ipv6-only-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-regioned-for-pull-request':
+          test_name: windows-ovs
+          node: 'antrea-windows-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          builders:
+            - builder-install-ovs
+          trigger_phrase: null
+          included_regions:
+          - hack/windows/Install-OVS.ps1
+          allow_whitelist_orgs_as_admins: false
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: false
+          trigger_permit_all: false
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-windows-ovs
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed.
+          error_status: Failed.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 15
+              type: absolute
+          - credentials-binding:
+              - text:
+                  credential-id: GOVC_URL
+                  variable: GOVC_URL
+              - text:
+                  credential-id: GOVC_USERNAME
+                  variable: GOVC_USERNAME
+              - text:
+                  credential-id: GOVC_PASSWORD
+                  variable: GOVC_PASSWORD
+              - text:
+                  credential-id: GOVC_DATACENTER
+                  variable: GOVC_DATACENTER
+              - text:
+                  credential-id: GOVC_DATASTORE
+                  variable: GOVC_DATASTORE
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: 'openvswitch.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: windows-conformance-pending-label
+          node: null
+          description: 'This is for marking PR as pending for conformance test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-windows-conformance
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-windows-conformance to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-windows-conformance to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-windows-conformance to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-no-scm':
+          test_name: windows-networkpolicy-pending-label
+          node: null
+          description: 'This is for marking PR as pending for networkpolicy test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-windows-networkpolicy
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-windows-networkpolicy to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-windows-networkpolicy to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-windows-networkpolicy to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-no-scm':
+          test_name: windows-e2e-pending-label
+          node: null
+          description: 'This is for marking PR as pending for e2e test.'
+          builders:
+            - builder-pending-label
+          trigger_phrase: null
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: false
+          admin_list: []
+          org_list: []
+          white_list: []
+          only_trigger_phrase: false
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+          throttle_concurrent_builds_enabled: 'false'
+          status_context: jenkins-windows-e2e
+          status_url: --none--
+          success_status: Pending test. Mark as failure. Add comment /test-windows-e2e to trigger.
+          failure_status: Pending test. Mark as failure. Add comment /test-windows-e2e to trigger.
+          error_status: Pending test. Mark as failure. Add comment /test-windows-e2e to trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-for-pull-request':
+            test_name: windows-conformance
+            node: 'antrea-windows-testbed'
+            description: 'This is the {test_name} test for {name}.'
+            branches:
+                - ${{sha1}}
+            builders:
+                - builder-conformance-win:
+                      conformance_type: 'windows-conformance'
+            trigger_phrase: ^(?!Thanks for your PR).*/test-windows-(conformance|all).*
+            white_list_target_branches: [ ]
+            allow_whitelist_orgs_as_admins: true
+            admin_list: '{antrea_admin_list}'
+            org_list: '{antrea_org_list}'
+            white_list: '{antrea_white_list}'
+            only_trigger_phrase: true
+            trigger_permit_all: true
+            throttle_concurrent_builds_category:
+                - e2e-lock-per-testbed
+            throttle_concurrent_builds_enabled: 'true'
+            status_context: jenkins-windows-conformance
+            status_url: --none--
+            success_status: Build finished.
+            failure_status: Failed. Add comment /test-windows-conformance to re-trigger.
+            error_status: Failed. Add comment /test-windows-conformance to re-trigger.
+            triggered_status: null
+            started_status: null
+            wrappers:
+                - timeout:
+                      fail: true
+                      timeout: 120
+                      type: absolute
+                - credentials-binding:
+                      - text:
+                            credential-id: GOVC_URL
+                            variable: GOVC_URL
+                      - text:
+                            credential-id: GOVC_USERNAME
+                            variable: GOVC_USERNAME
+                      - text:
+                            credential-id: GOVC_PASSWORD
+                            variable: GOVC_PASSWORD
+                      - text:
+                            credential-id: GOVC_DATACENTER
+                            variable: GOVC_DATACENTER
+                      - text:
+                            credential-id: GOVC_DATASTORE
+                            variable: GOVC_DATASTORE
+                      - text:
+                            credential-id: DOCKER_USERNAME
+                            variable: DOCKER_USERNAME
+                      - text:
+                            credential-id: DOCKER_PASSWORD
+                            variable: DOCKER_PASSWORD
+            publishers:
+                - archive:
+                      allow-empty: true
+                      artifacts: 'windows_conformance_result_no_color.txt,network_info.tar.gz,antrea_agent_log.tar.gz,debug_logs.tar.gz'
+                      case-sensitive: true
+                      default-excludes: true
+                      fingerprint: false
+                      only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+            test_name: windows-networkpolicy
+            node: 'antrea-windows-testbed'
+            description: 'This is the {test_name} test for {name}.'
+            branches:
+                - ${{sha1}}
+            builders:
+                - builder-conformance-win:
+                      conformance_type: 'windows-networkpolicy'
+            trigger_phrase: ^(?!Thanks for your PR).*/test-windows-(networkpolicy|all).*
+            white_list_target_branches: [ ]
+            allow_whitelist_orgs_as_admins: true
+            admin_list: '{antrea_admin_list}'
+            org_list: '{antrea_org_list}'
+            white_list: '{antrea_white_list}'
+            only_trigger_phrase: true
+            trigger_permit_all: true
+            throttle_concurrent_builds_category:
+                - e2e-lock-per-testbed
+            throttle_concurrent_builds_enabled: 'true'
+            status_context: jenkins-windows-networkpolicy
+            status_url: --none--
+            success_status: Build finished.
+            failure_status: Failed. Add comment /test-windows-networkpolicy to re-trigger.
+            error_status: Failed. Add comment /test-windows-networkpolicy to re-trigger.
+            triggered_status: null
+            started_status: null
+            wrappers:
+                - timeout:
+                      fail: true
+                      timeout: 135
+                      type: absolute
+                - credentials-binding:
+                      - text:
+                            credential-id: GOVC_URL
+                            variable: GOVC_URL
+                      - text:
+                            credential-id: GOVC_USERNAME
+                            variable: GOVC_USERNAME
+                      - text:
+                            credential-id: GOVC_PASSWORD
+                            variable: GOVC_PASSWORD
+                      - text:
+                            credential-id: GOVC_DATACENTER
+                            variable: GOVC_DATACENTER
+                      - text:
+                            credential-id: GOVC_DATASTORE
+                            variable: GOVC_DATASTORE
+                      - text:
+                            credential-id: DOCKER_USERNAME
+                            variable: DOCKER_USERNAME
+                      - text:
+                            credential-id: DOCKER_PASSWORD
+                            variable: DOCKER_PASSWORD
+            publishers:
+                - archive:
+                      allow-empty: true
+                      artifacts: 'windows_conformance_result_no_color.txt,network_info.tar.gz,antrea_agent_log.tar.gz,debug_logs.tar.gz'
+                      case-sensitive: true
+                      default-excludes: true
+                      fingerprint: false
+                      only-if-success: false
+      - '{name}-{test_name}-no-scm':
+          test_name: windows-e2e-skip
+          node: null
+          description: 'This is for marking PR as passed.'
+          branches:
+          - ${{sha1}}
+          builders: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: false
+          trigger_phrase: ^(?!Thanks for your PR).*/skip-(windows-e2e|all).*
+          white_list_target_branches: []
+          status_context: jenkins-windows-e2e
+          status_url: --none--
+          success_status: Skipped test. Mark as succeeded.
+          failure_status: Skipped test. Mark as succeeded.
+          error_status: Skipped test. Mark as succeeded.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-no-scm':
+          test_name: windows-conformance-skip
+          node: null
+          description: 'This is for marking PR as passed.'
+          branches:
+          - ${{sha1}}
+          builders: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: false
+          trigger_phrase: ^(?!Thanks for your PR).*/skip-(windows-conformance|all).*
+          white_list_target_branches: []
+          status_context: jenkins-windows-conformance
+          status_url: --none--
+          success_status: Skipped test. Mark as succeeded.
+          failure_status: Skipped test. Mark as succeeded.
+          error_status: Skipped test. Mark as succeeded.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []
+      - '{name}-{test_name}-no-scm':
+          test_name: windows-networkpolicy-skip
+          node: null
+          description: 'This is for marking PR as passed.'
+          branches:
+          - ${{sha1}}
+          builders: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: false
+          trigger_phrase: ^(?!Thanks for your PR).*/skip-(windows-networkpolicy|all).*
+          white_list_target_branches: []
+          status_context: jenkins-windows-networkpolicy
+          status_url: --none--
+          success_status: Skipped test. Mark as succeeded.
+          failure_status: Skipped test. Mark as succeeded.
+          error_status: Skipped test. Mark as succeeded.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers: []         
+      - '{name}-{test_name}-for-pull-request':
+            test_name: windows-e2e
+            node: 'antrea-windows-testbed'
+            description: 'This is the {test_name} test for {name}.'
+            branches:
+                - ${{sha1}}
+            builders:
+                - builder-e2e-win:
+                      e2e_type: 'windows-e2e'
+            trigger_phrase: ^(?!Thanks for your PR).*/test-windows-(e2e|all).*
+            white_list_target_branches: [ ]
+            allow_whitelist_orgs_as_admins: true
+            admin_list: '{antrea_admin_list}'
+            org_list: '{antrea_org_list}'
+            white_list: '{antrea_white_list}'
+            only_trigger_phrase: true
+            trigger_permit_all: true
+            throttle_concurrent_builds_category:
+                - e2e-lock-per-testbed
+            throttle_concurrent_builds_enabled: 'true'
+            status_context: jenkins-windows-e2e
+            status_url: --none--
+            success_status: Build finished.
+            failure_status: Failed. Add comment /test-windows-e2e to re-trigger.
+            error_status: Failed. Add comment /test-windows-e2e to re-trigger.
+            triggered_status: null
+            started_status: null
+            wrappers:
+                - timeout:
+                      fail: true
+                      timeout: 120
+                      type: absolute
+                - credentials-binding:
+                      - text:
+                            credential-id: GOVC_URL
+                            variable: GOVC_URL
+                      - text:
+                            credential-id: GOVC_USERNAME
+                            variable: GOVC_USERNAME
+                      - text:
+                            credential-id: GOVC_PASSWORD
+                            variable: GOVC_PASSWORD
+                      - text:
+                            credential-id: GOVC_DATACENTER
+                            variable: GOVC_DATACENTER
+                      - text:
+                            credential-id: GOVC_DATASTORE
+                            variable: GOVC_DATASTORE
+                      - text:
+                            credential-id: DOCKER_USERNAME
+                            variable: DOCKER_USERNAME
+                      - text:
+                            credential-id: DOCKER_PASSWORD
+                            variable: DOCKER_PASSWORD
+            publishers:
+                - archive:
+                      allow-empty: true
+                      artifacts: antrea-test-logs.tar.gz
+                      case-sensitive: true
+                      default-excludes: true
+                      fingerprint: false
+                      only-if-success: false
+      - '{name}-{test_name}-for-period':
+          test_name: windows-e2e-ovs-as-service
+          node: 'antrea-windows-testbed'
+          description: 'This is for running e2e tests with OVS daemons running as Windows services.'
+          builders:
+            - builder-e2e-win:
+                e2e_type: 'windows-e2e-ovs-as-service'
+          branches:
+          - '*/main'
+          included_regions: []
+          cron: 'H H * * *'
+          ignore_post_commit_hooks: false
+          publishers:
+          - email:
+              recipients: projectantrea-dev@googlegroups.com
+          - archive:
+              allow-empty: true
+              artifacts: 'antrea-test-logs.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          - credentials-binding:
+            - text:
+                credential-id: GOVC_URL
+                variable: GOVC_URL
+            - text:
+                credential-id: GOVC_USERNAME
+                variable: GOVC_USERNAME
+            - text:
+                credential-id: GOVC_PASSWORD
+                variable: GOVC_PASSWORD
+            - text:
+                credential-id: GOVC_DATACENTER
+                variable: GOVC_DATACENTER
+            - text:
+                credential-id: GOVC_DATASTORE
+                variable: GOVC_DATASTORE
+            - text:
+                credential-id: DOCKER_USERNAME
+                variable: DOCKER_USERNAME
+            - text:
+                credential-id: DOCKER_PASSWORD
+                variable: DOCKER_PASSWORD
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-e2e
+          node: 'antrea-kind-testbed'
+          description: 'This is for running e2e tests on kind.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-e2e-kind:
+               ip_version: 'ipv4'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-(e2e|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-kind-e2e
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-e2e to re-trigger.
+          error_status: Failed. Add comment /test-kind-e2e to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: antrea-test-logs.tar.gz
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-conformance
+          node: 'antrea-kind-testbed'
+          description: 'This is for running conformance tests on kind.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-kind:
+               conformance_type: 'conformance'
+               ip_version: 'ipv4'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-kind-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-conformance to re-trigger.
+          error_status: Failed. Add comment /test-kind-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-networkpolicy
+          node: 'antrea-kind-testbed'
+          description: 'This is for running networkpolicy tests on kind.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-kind:
+               conformance_type: 'networkpolicy'
+               ip_version: 'ipv4'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-kind-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-kind-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: rancher-e2e
+          node: 'antrea-rancher-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-rancher-e2e
+          trigger_phrase: ^(?!Thanks for your PR).*/test-rancher-(e2e|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-rancher-e2e
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-rancher-e2e to re-trigger.
+          error_status: Failed. Add comment /test-rancher-e2e to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 120
+              type: absolute
+          - credentials-binding:
+              - text:
+                  credential-id: GOVC_URL_FOR_RANCHER
+                  variable: GOVC_URL_FOR_RANCHER
+              - text:
+                  credential-id: GOVC_USERNAME
+                  variable: GOVC_USERNAME
+              - text:
+                  credential-id: GOVC_PASSWORD
+                  variable: GOVC_PASSWORD
+              - text:
+                  credential-id: GOVC_DATACENTER
+                  variable: GOVC_DATACENTER
+              - text:
+                  credential-id: GOVC_DATASTORE
+                  variable: GOVC_DATASTORE
+              - text:
+                  credential-id: RANCHER_URL
+                  variable: RANCHER_URL
+              - text:
+                  credential-id: RANCHER_ACCESS_TOKEN
+                  variable: RANCHER_ACCESS_TOKEN
+              - text:
+                  credential-id: RANCHER_UPSTREAM_CONTEXT
+                  variable: RANCHER_UPSTREAM_CONTEXT
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: antrea-test-logs.tar.gz
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: rancher-conformance
+          node: 'antrea-rancher-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-rancher-conformance:
+                conformance_type: 'conformance'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-rancher-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-rancher-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-rancher-conformance to re-trigger.
+          error_status: Failed. Add comment /test-rancher-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 120
+              type: absolute
+          - credentials-binding:
+              - text:
+                  credential-id: GOVC_URL_FOR_RANCHER
+                  variable: GOVC_URL_FOR_RANCHER
+              - text:
+                  credential-id: GOVC_USERNAME
+                  variable: GOVC_USERNAME
+              - text:
+                  credential-id: GOVC_PASSWORD
+                  variable: GOVC_PASSWORD
+              - text:
+                  credential-id: GOVC_DATACENTER
+                  variable: GOVC_DATACENTER
+              - text:
+                  credential-id: GOVC_DATASTORE
+                  variable: GOVC_DATASTORE
+              - text:
+                  credential-id: RANCHER_URL
+                  variable: RANCHER_URL
+              - text:
+                  credential-id: RANCHER_ACCESS_TOKEN
+                  variable: RANCHER_ACCESS_TOKEN
+              - text:
+                  credential-id: RANCHER_UPSTREAM_CONTEXT
+                  variable: RANCHER_UPSTREAM_CONTEXT
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: rancher-networkpolicy
+          node: 'antrea-rancher-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-rancher-conformance:
+                conformance_type: 'networkpolicy'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-rancher-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-rancher-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-rancher-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-rancher-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          - credentials-binding:
+              - text:
+                  credential-id: GOVC_URL_FOR_RANCHER
+                  variable: GOVC_URL_FOR_RANCHER
+              - text:
+                  credential-id: GOVC_USERNAME
+                  variable: GOVC_USERNAME
+              - text:
+                  credential-id: GOVC_PASSWORD
+                  variable: GOVC_PASSWORD
+              - text:
+                  credential-id: GOVC_DATACENTER
+                  variable: GOVC_DATACENTER
+              - text:
+                  credential-id: GOVC_DATASTORE
+                  variable: GOVC_DATASTORE
+              - text:
+                  credential-id: RANCHER_URL
+                  variable: RANCHER_URL
+              - text:
+                  credential-id: RANCHER_ACCESS_TOKEN
+                  variable: RANCHER_ACCESS_TOKEN
+              - text:
+                  credential-id: RANCHER_UPSTREAM_CONTEXT
+                  variable: RANCHER_UPSTREAM_CONTEXT
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: nsxvpc-e2e
+          node: 'antrea-nsxvpc-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-e2e-jumper
+          trigger_phrase: ^(?!Thanks for your PR).*/test-nsxvpc-(e2e|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-nsxvpc-e2e
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-nsxvpc-e2e to re-trigger.
+          error_status: Failed. Add comment /test-nsxvpc-e2e to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: antrea-test-logs.tar.gz
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: nsxvpc-networkpolicy
+          node: 'antrea-nsxvpc-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-jumper:
+                conformance_type: 'networkpolicy'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-nsxvpc-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-nsxvpc-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-nsxvpc-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-nsxvpc-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: nsxvpc-conformance
+          node: 'antrea-nsxvpc-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}
+          builders:
+            - builder-conformance-jumper:
+                conformance_type: 'conformance'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-nsxvpc-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          throttle_concurrent_builds_category:
+            - e2e-lock-per-testbed
+          throttle_concurrent_builds_enabled: 'true'
+          status_context: jenkins-nsxvpc-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-nsxvpc-conformance to re-trigger.
+          error_status: Failed. Add comment /test-nsxvpc-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers: []
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+
+      - '{name}-{test_name}-for-pull-request':    
+           test_name: stop-all-jobs
+           node: 'antrea-stop-all'
+           description: 'This is the {test_name} test for {name}.'
+           branches:
+           - ${{sha1}}
+           builders:
+             - builder-stop-all
+           trigger_phrase: ^(?!Thanks for your PR).*/stop-all-jobs.*
+           white_list_target_branches: []
+           allow_whitelist_orgs_as_admins: true
+           admin_list: '{antrea_admin_list}'
+           org_list: '{antrea_org_list}'
+           white_list: '{antrea_white_list}'
+           only_trigger_phrase: true
+           trigger_permit_all: true
+           status_context: jenkins-stop-all-jobs
+           status_url: --none--
+           success_status: Build finished.
+           failure_status: Failed. Add comment /stop-all-jobs to re-trigger.
+           error_status: Failed. Add comment /stop-all-jobs to re-trigger.
+           triggered_status: null
+           started_status: null
+           wrappers:
+           - credentials-binding:
+              - text:
+                  credential-id: JENKINS_API_TOKEN
+                  variable: JENKINS_API_TOKEN 
+           publishers: []
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-ipv6-only-networkpolicy
+          node: 'antrea-kind-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}    
+          builders:
+            - builder-conformance-kind:
+               conformance_type: 'networkpolicy'
+               ip_version: 'ipv6'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-ipv6-only-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          status_context: jenkins-kind-ipv6-only-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-ipv6-only-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-kind-ipv6-only-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-ipv6-only-conformance
+          node: 'antrea-kind-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}   
+          builders:
+            - builder-conformance-kind:
+               conformance_type: 'conformance'
+               ip_version: 'ipv6'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-ipv6-only-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          status_context: jenkins-kind-ipv6-only-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-ipv6-only-conformance to re-trigger.
+          error_status: Failed. Add comment /test-kind-ipv6-only-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+            test_name: kind-ipv6-only-e2e
+            node: 'antrea-kind-testbed'
+            description: 'This is the {test_name} test for {name}.'
+            branches:
+            - ${{sha1}}      
+            builders:
+              - builder-e2e-kind:
+                 ip_version: 'ipv6'
+                 kind_cluster_name: '{test_name}'
+            trigger_phrase: ^(?!Thanks for your PR).*/test-kind-ipv6-only-(e2e|all).*
+            white_list_target_branches: []
+            allow_whitelist_orgs_as_admins: true
+            admin_list: '{antrea_admin_list}'
+            org_list: '{antrea_org_list}'
+            white_list: '{antrea_white_list}'
+            only_trigger_phrase: true
+            trigger_permit_all: true
+            status_context: jenkins-kind-ipv6-only-e2e
+            status_url: --none--
+            success_status: Build finished.
+            failure_status: Failed. Add comment /test-kind-ipv6-only-e2e to re-trigger.
+            error_status: Failed. Add comment /test-kind-ipv6-only-e2e to re-trigger.
+            triggered_status: null
+            started_status: null
+            wrappers:
+            - timeout:
+                fail: true
+                timeout: 135
+                type: absolute
+            publishers:
+            - archive:
+                allow-empty: true
+                artifacts: antrea-test-logs.tar.gz
+                case-sensitive: true
+                default-excludes: true
+                fingerprint: false
+                only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-ipv6-ds-networkpolicy
+          node: 'antrea-kind-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}    
+          builders:
+            - builder-conformance-kind:
+               conformance_type: 'networkpolicy'
+               ip_version: 'dual'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-ipv6-(networkpolicy|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          status_context: jenkins-kind-ipv6-ds-networkpolicy
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-ipv6-networkpolicy to re-trigger.
+          error_status: Failed. Add comment /test-kind-ipv6-networkpolicy to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers: 
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+          test_name: kind-ipv6-ds-conformance
+          node: 'antrea-kind-testbed'
+          description: 'This is the {test_name} test for {name}.'
+          branches:
+          - ${{sha1}}   
+          builders:
+            - builder-conformance-kind:
+               conformance_type: 'conformance'
+               ip_version: 'dual'
+               kind_cluster_name: '{test_name}'
+          trigger_phrase: ^(?!Thanks for your PR).*/test-kind-ipv6-(conformance|all).*
+          white_list_target_branches: []
+          allow_whitelist_orgs_as_admins: true
+          admin_list: '{antrea_admin_list}'
+          org_list: '{antrea_org_list}'
+          white_list: '{antrea_white_list}'
+          only_trigger_phrase: true
+          trigger_permit_all: true
+          status_context: jenkins-kind-ipv6-ds-conformance
+          status_url: --none--
+          success_status: Build finished.
+          failure_status: Failed. Add comment /test-kind-ipv6-conformance to re-trigger.
+          error_status: Failed. Add comment /test-kind-ipv6-conformance to re-trigger.
+          triggered_status: null
+          started_status: null
+          wrappers:
+          - timeout:
+              fail: true
+              timeout: 135
+              type: absolute
+          publishers:
+          - archive:
+              allow-empty: true
+              artifacts: '*sonobuoy*.tar.gz'
+              case-sensitive: true
+              default-excludes: true
+              fingerprint: false
+              only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+            test_name: kind-ipv6-ds-e2e
+            node: 'antrea-kind-testbed'
+            description: 'This is the {test_name} test for {name}.'
+            branches:
+            - ${{sha1}}      
+            builders:
+              - builder-e2e-kind:
+                  ip_version: 'dual'
+                  kind_cluster_name: '{test_name}'
+            trigger_phrase: ^(?!Thanks for your PR).*/test-kind-ipv6-(e2e|all).*
+            white_list_target_branches: []
+            allow_whitelist_orgs_as_admins: true
+            admin_list: '{antrea_admin_list}'
+            org_list: '{antrea_org_list}'
+            white_list: '{antrea_white_list}'
+            only_trigger_phrase: true
+            trigger_permit_all: true
+            status_context: jenkins-kind-ipv6-ds-e2e
+            status_url: --none--
+            success_status: Build finished.
+            failure_status: Failed. Add comment /test-kind-ipv6-e2e to re-trigger.
+            error_status: Failed. Add comment /test-kind-ipv6-e2e to re-trigger.
+            triggered_status: null
+            started_status: null
+            wrappers:
+            - timeout:
+                fail: true
+                timeout: 135
+                type: absolute
+            publishers:
+            - archive:
+                allow-empty: true
+                artifacts: antrea-test-logs.tar.gz
+                case-sensitive: true
+                default-excludes: true
+                fingerprint: false
+                only-if-success: false
+      - '{name}-{test_name}-for-pull-request':
+            test_name: kind-flexible-ipam-e2e
+            node: 'antrea-kind-flexible-ipam-testbed'
+            description: 'This is the {test_name} test for {name}.'
+            branches:
+            - ${{sha1}}      
+            builders:
+              - builder-kind-flexible-ipam-e2e:
+                  kind_cluster_name: '{test_name}'
+            trigger_phrase: ^(?!Thanks for your PR).*/test-kind-flexible-ipam-e2e.*
+            white_list_target_branches: []
+            allow_whitelist_orgs_as_admins: true
+            admin_list: '{antrea_admin_list}'
+            org_list: '{antrea_org_list}'
+            white_list: '{antrea_white_list}'
+            only_trigger_phrase: true
+            trigger_permit_all: true
+            status_context: jenkins-kind-flexible-ipam-e2e
+            status_url: --none--
+            success_status: Build finished.
+            failure_status: Failed. Add comment /test-kind-flexible-ipam-e2e to re-trigger.
+            error_status: Failed. Add comment /test-kind-flexible-ipam-e2e to re-trigger.
+            triggered_status: null
+            started_status: null
+            wrappers:
+            - timeout:
+                fail: true
+                timeout: 135
+                type: absolute
+            publishers:
+            - archive:
+                allow-empty: true
+                artifacts: 'antrea-test-logs.tar.gz'
+                case-sensitive: true
+                default-excludes: true
+                fingerprint: false
+                only-if-success: false

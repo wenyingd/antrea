@@ -20,7 +20,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -44,6 +44,7 @@ var antreaAgentMetrics = []string{
 	"antrea_agent_ovs_flow_ops_error_count",
 	"antrea_agent_ovs_flow_ops_latency_milliseconds",
 	"antrea_agent_ovs_total_flow_count",
+	"antrea_agent_ovs_meter_packet_dropped_count",
 	"antrea_agent_conntrack_total_connection_count",
 	"antrea_agent_conntrack_antrea_connection_count",
 	"antrea_agent_conntrack_max_connection_count",
@@ -142,7 +143,7 @@ func getMetricsFromAPIServer(t *testing.T, url string, token string) string {
 	}
 
 	var body []byte
-	err = wait.PollImmediate(defaultInterval, defaultTimeout, func() (bool, error) {
+	err = wait.PollUntilContextTimeout(context.Background(), defaultInterval, defaultTimeout, true, func(ctx context.Context) (bool, error) {
 		// Query metrics via HTTPS from Pod
 		resp, err := client.Do(req)
 		if err != nil {
@@ -151,7 +152,7 @@ func getMetricsFromAPIServer(t *testing.T, url string, token string) string {
 		defer resp.Body.Close()
 
 		body = []byte{}
-		body, err = ioutil.ReadAll(resp.Body)
+		body, err = io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("Error retrieving metrics from %s. response: %v", url, err)
 		}
@@ -278,14 +279,13 @@ func testMetricsFromPrometheusServer(t *testing.T, data *TestData, prometheusJob
 
 	// Build the Prometheus query URL
 	// Target metadata API(/api/v1/targets/metadata) has been available since Prometheus v2.4.0.
-	// This API is still experimental in Prometheus v2.19.3.
+	// This API is still experimental in Prometheus v2.46.0.
 	path := url.PathEscape("match_target={job=\"" + prometheusJob + "\"}")
-	address := net.JoinHostPort(hostIP, fmt.Sprint(nodePort))
-	queryURL := fmt.Sprintf("http://%s/api/v1/targets/metadata?%s", address, path)
+	queryURL := getHTTPURLFromIPPort(hostIP, nodePort, "api/v1/targets/metadata?", path)
 
 	client := &http.Client{}
 	var output prometheusServerOutput
-	err := wait.PollImmediate(defaultInterval, defaultTimeout, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.Background(), defaultInterval, defaultTimeout, true, func(ctx context.Context) (bool, error) {
 		resp, err := client.Get(queryURL)
 		if err != nil {
 			// Retry when accessing prometheus failed for flexible-ipam
@@ -294,7 +294,7 @@ func testMetricsFromPrometheusServer(t *testing.T, data *TestData, prometheusJob
 		}
 		defer resp.Body.Close()
 
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			t.Fatalf("Failed to retrieve JSON data from Prometheus: %v", err)
 		}

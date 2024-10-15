@@ -18,8 +18,11 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 // TestBatchCreatePods verifies there is no FD leak after batched Pod creation.
@@ -39,24 +42,32 @@ func TestBatchCreatePods(t *testing.T) {
 	podName, err := data.getAntreaPodOnNode(node1)
 	assert.NoError(t, err)
 
-	getFDs := func() string {
+	getFDs := func() sets.Set[string] {
 		// In case that antrea-agent is not running as Pid 1 in future.
 		cmds := []string{"pgrep", "-o", "antrea-agent"}
 		pid, _, err := data.RunCommandFromPod(antreaNamespace, podName, "antrea-agent", cmds)
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Ignore the difference of modification time by specifying "--time-style +".
 		cmds = []string{"ls", "-l", "--time-style", "+", fmt.Sprintf("/proc/%s/fd/", strings.TrimSpace(pid))}
 		stdout, _, err := data.RunCommandFromPod(antreaNamespace, podName, "antrea-agent", cmds)
-		assert.NoError(t, err)
-		return stdout
+		require.NoError(t, err)
+
+		fds := strings.Split(stdout, "\n")
+		return sets.New(fds...)
 	}
 
 	oldFDs := getFDs()
 
-	_, _, cleanupFn := createTestBusyboxPods(t, data, batchNum, data.testNamespace, node1)
+	_, _, cleanupFn := createTestToolboxPods(t, data, batchNum, data.testNamespace, node1)
 	defer cleanupFn()
 
-	newFDs := getFDs()
-	assert.Equal(t, oldFDs, newFDs, "FDs were changed after batched Pod creation")
+	// It is possible for new FDs to be allocated temporarily by the process, for different
+	// reasons (health probes, CNI invocations, ...). In that case, the new set of FDs can
+	// contain additional entries compared to the old set of FDs. However, eventually, getFDs()
+	// should return a subset of oldFDs.
+	assert.Eventually(t, func() bool {
+		newFDs := getFDs()
+		return oldFDs.IsSuperset(newFDs)
+	}, 2*time.Second, 100*time.Millisecond, "Batched Pod creation allocated new FDs")
 }

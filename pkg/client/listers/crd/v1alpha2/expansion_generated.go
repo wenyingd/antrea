@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,14 +16,6 @@
 
 package v1alpha2
 
-// ClusterGroupListerExpansion allows custom methods to be added to
-// ClusterGroupLister.
-type ClusterGroupListerExpansion interface{}
-
-// EgressListerExpansion allows custom methods to be added to
-// EgressLister.
-type EgressListerExpansion interface{}
-
 // ExternalEntityListerExpansion allows custom methods to be added to
 // ExternalEntityLister.
 type ExternalEntityListerExpansion interface{}
@@ -31,10 +23,6 @@ type ExternalEntityListerExpansion interface{}
 // ExternalEntityNamespaceListerExpansion allows custom methods to be added to
 // ExternalEntityNamespaceLister.
 type ExternalEntityNamespaceListerExpansion interface{}
-
-// ExternalIPPoolListerExpansion allows custom methods to be added to
-// ExternalIPPoolLister.
-type ExternalIPPoolListerExpansion interface{}
 
 // IPPoolListerExpansion allows custom methods to be added to
 // IPPoolLister.

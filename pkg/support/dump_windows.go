@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/util/logdir"
 )
 
@@ -36,7 +37,7 @@ func (d *agentDumper) DumpLog(basedir string) error {
 	logDir := logdir.GetLogDir()
 	timeFilter := timestampFilter(d.since)
 
-	if err := directoryCopy(d.fs, path.Join(basedir, "logs", "agent"), logDir, "rancher-wins-antrea-agent", timeFilter); err != nil {
+	if err := directoryCopy(d.fs, path.Join(basedir, "logs", "agent"), logDir, "antrea-agent", timeFilter); err != nil {
 		return err
 	}
 	// Dump OVS logs.
@@ -54,8 +55,10 @@ func (d *agentDumper) DumpHostNetworkInfo(basedir string) error {
 	if err := d.dumpNetworkConfig(basedir); err != nil {
 		return err
 	}
-	if err := d.dumpHNSResources(basedir); err != nil {
-		return err
+	if d.aq.GetNodeConfig().Type == config.K8sNode {
+		if err := d.dumpHNSResources(basedir); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -99,5 +102,10 @@ func (d *agentDumper) dumpHNSResources(basedir string) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (d *agentDumper) DumpMemberlist(basedir string) error {
+	// memberlist never runs on Windows.
 	return nil
 }

@@ -27,7 +27,7 @@ import (
 const (
 	NodeNameEnvKey        = "NODE_NAME"
 	podNameEnvKey         = "POD_NAME"
-	podNamespaceEnvKey    = "POD_NAMESPACE"
+	PodNamespaceEnvKey    = "POD_NAMESPACE"
 	svcAcctNameEnvKey     = "SERVICEACCOUNT_NAME"
 	antreaConfigMapEnvKey = "ANTREA_CONFIG_MAP_NAME"
 
@@ -35,6 +35,7 @@ const (
 
 	defaultAntreaNamespace = "kube-system"
 
+	// #nosec G101 -- not credentials
 	allowNoEncapWithoutAntreaProxyEnvKey = "ALLOW_NO_ENCAP_WITHOUT_ANTREA_PROXY"
 )
 
@@ -82,9 +83,9 @@ func GetAntreaConfigMapName() string {
 
 // GetPodNamespace returns Namespace of the Pod where the code executes.
 func GetPodNamespace() string {
-	podNamespace := os.Getenv(podNamespaceEnvKey)
+	podNamespace := os.Getenv(PodNamespaceEnvKey)
 	if podNamespace == "" {
-		klog.Warningf("Environment variable %s not found", podNamespaceEnvKey)
+		klog.Warningf("Environment variable %s not found", PodNamespaceEnvKey)
 	}
 	return podNamespace
 }

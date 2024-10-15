@@ -18,7 +18,7 @@ package webhook
 import (
 	"fmt"
 	"html"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 
@@ -45,6 +45,7 @@ func statusSucceed() metav1.Status {
 
 // doConversionV1beta1 converts the requested objects in the v1beta1 ConversionRequest using the given conversion function and
 // returns a conversion response. Failures are reported with the Reason in the conversion response.
+// Deprecated: apiextensions/v1beta1 is deprecated, use apiextensions/v1 instead
 func doConversionV1beta1(convertRequest *v1beta1.ConversionRequest, convert convertFunc) *v1beta1.ConversionResponse {
 	var convertedObjects []runtime.RawExtension
 	for _, obj := range convertRequest.Objects {
@@ -110,7 +111,7 @@ func HandleCRDConversion(crdConvertFunc convertFunc) http.HandlerFunc {
 		klog.V(2).Info("Received request to convert CRD version")
 		var body []byte
 		if r.Body != nil {
-			if data, err := ioutil.ReadAll(r.Body); err == nil {
+			if data, err := io.ReadAll(r.Body); err == nil {
 				body = data
 			}
 		}
@@ -137,7 +138,7 @@ func HandleCRDConversion(crdConvertFunc convertFunc) http.HandlerFunc {
 			convertReview, ok := obj.(*v1beta1.ConversionReview)
 			if !ok {
 				msg := fmt.Sprintf("Expected v1beta1.ConversionReview but got: %T", obj)
-				klog.Errorf(msg)
+				klog.Error(msg)
 				http.Error(w, html.EscapeString(msg), http.StatusBadRequest)
 				return
 			}
@@ -152,7 +153,7 @@ func HandleCRDConversion(crdConvertFunc convertFunc) http.HandlerFunc {
 			convertReview, ok := obj.(*v1.ConversionReview)
 			if !ok {
 				msg := fmt.Sprintf("Expected v1.ConversionReview but got: %T", obj)
-				klog.Errorf(msg)
+				klog.Error(msg)
 				http.Error(w, html.EscapeString(msg), http.StatusBadRequest)
 				return
 			}
@@ -174,14 +175,14 @@ func HandleCRDConversion(crdConvertFunc convertFunc) http.HandlerFunc {
 		outSerializer := getOutputSerializer(accept)
 		if outSerializer == nil {
 			msg := fmt.Sprintf("invalid accept header `%s`", accept)
-			klog.Errorf(msg)
+			klog.Error(msg)
 			http.Error(w, html.EscapeString(msg), http.StatusBadRequest)
 			return
 		}
-		err = outSerializer.Encode(responseObj, w) // lgtm[go/reflected-xss]
+		err = outSerializer.Encode(responseObj, w)
 		if err != nil {
 			klog.Error(err)
-			http.Error(w, err.Error(), http.StatusInternalServerError) // lgtm[go/reflected-xss]
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}

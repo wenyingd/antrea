@@ -16,9 +16,10 @@ package certificate
 
 import (
 	"bytes"
-	"io/ioutil"
+	"context"
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -46,6 +47,7 @@ AQsFAAOBgQCpN27uh/LjUVCaBK7Noko25iih/JSSoWzlvc8CaipvSPofNWyGx3Vu
 OdcSwNGYX/pp4ZoAzFij/Y5u0vKTVLkWXATeTMVmlPvhmpYjj9gPkCSY6j/SiKlY
 kGy0xr+0M5UQkMBcfIh9oAp9um1fZHVWAJAGP/ikZgkcUey0LmBn8w==
 -----END CERTIFICATE-----`
+	// #nosec G101
 	fakeTLSKey = `-----BEGIN RSA PRIVATE KEY-----
 MIICWwIBAAKBgQDkGXXSm6Yun5o3Jlmx45rItcQ2pmnoDk4eZfl0rmPa674s2pfY
 o3KywkXQ1Fp3BC8GUgzPLSfJ8xXya9Lg1Wo8sHrDln0iRg5HXxGuuFNhRBvj2S0s
@@ -155,17 +157,19 @@ func TestApplyServerCert(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			caConfig := &CAConfig{
-				ServiceName: AntreaServiceName,
+				ServiceName: "antrea",
 				PairName:    "antrea-controller",
 			}
 			var err error
-			caConfig.CertDir, err = ioutil.TempDir("", "antrea-tls-test")
+			caConfig.CertDir, err = os.MkdirTemp("", "antrea-tls-test")
 			if err != nil {
 				t.Fatalf("Unable to create temporary directory: %v", err)
 			}
 			defer os.RemoveAll(caConfig.CertDir)
-			caConfig.SelfSignedCertDir, err = ioutil.TempDir("", "antrea-self-signed")
+			caConfig.SelfSignedCertDir, err = os.MkdirTemp("", "antrea-self-signed")
 			if err != nil {
 				t.Fatalf("Unable to create temporary directory: %v", err)
 			}
@@ -183,14 +187,13 @@ func TestApplyServerCert(t *testing.T) {
 			}
 
 			if tt.testRotate {
-				caConfig.MaxRotateDuration = 2 * time.Second
+				caConfig.MinValidDuration = time.Hour * 24 * 366
 			}
 
 			clientset := fakeclientset.NewSimpleClientset()
 			aggregatorClientset := fakeaggregatorclientset.NewSimpleClientset()
 			apiExtensionClient := fakeapiextensionclientset.NewSimpleClientset()
 			got, err := ApplyServerCert(tt.selfSignedCert, clientset, aggregatorClientset, apiExtensionClient, secureServing, caConfig)
-
 			if err != nil || tt.wantErr {
 				if (err != nil) != tt.wantErr {
 					t.Errorf("ApplyServerCert() error = %v, wantErr %v", err, tt.wantErr)
@@ -200,7 +203,8 @@ func TestApplyServerCert(t *testing.T) {
 
 			if tt.selfSignedCert && tt.testRotate {
 				oldCertKeyContent := got.getCertificate()
-				err := wait.Poll(time.Second, 8*time.Second, func() (bool, error) {
+				go got.Run(ctx, 1)
+				err := wait.PollUntilContextTimeout(context.Background(), time.Second, 8*time.Second, false, func(ctx context.Context) (bool, error) {
 					newCertKeyContent := got.getCertificate()
 					equal := bytes.Equal(oldCertKeyContent, newCertKeyContent)
 					return !equal, nil
@@ -210,12 +214,12 @@ func TestApplyServerCert(t *testing.T) {
 			}
 
 			if tt.wantCertKey {
-				assert.Equal(t, genericoptions.CertKey{CertFile: caConfig.CertDir + "/tls.crt", KeyFile: caConfig.CertDir + "/tls.key"}, secureServing.ServerCert.CertKey, "CertKey doesn't match")
+				assert.Equal(t, genericoptions.CertKey{CertFile: filepath.Join(caConfig.CertDir, "tls.crt"), KeyFile: filepath.Join(caConfig.CertDir, "tls.key")}, secureServing.ServerCert.CertKey, "CertKey doesn't match")
 			}
 			if tt.wantGeneratedCert {
-				assert.Equal(t, genericoptions.CertKey{CertFile: caConfig.SelfSignedCertDir + "/antrea-controller.crt", KeyFile: caConfig.SelfSignedCertDir + "/antrea-controller.key"}, secureServing.ServerCert.CertKey, "SelfSigned certs not generated")
+				assert.Equal(t, genericoptions.CertKey{CertFile: filepath.Join(caConfig.SelfSignedCertDir, "antrea-controller.crt"), KeyFile: filepath.Join(caConfig.SelfSignedCertDir, "antrea-controller.key")}, secureServing.ServerCert.CertKey, "SelfSigned certs not generated")
 			} else {
-				assert.NotEqual(t, genericoptions.CertKey{CertFile: caConfig.SelfSignedCertDir + "/antrea-controller.crt", KeyFile: caConfig.SelfSignedCertDir + "/antrea-controller.key"}, secureServing.ServerCert.CertKey, "SelfSigned certs generated erroneously")
+				assert.NotEqual(t, genericoptions.CertKey{CertFile: filepath.Join(caConfig.SelfSignedCertDir, "antrea-controller.crt"), KeyFile: filepath.Join(caConfig.SelfSignedCertDir, "antrea-controller.key")}, secureServing.ServerCert.CertKey, "SelfSigned certs generated erroneously")
 			}
 			if tt.wantCACert != nil {
 				assert.Equal(t, tt.wantCACert, got.caContentProvider.CurrentCABundleContent(), "CA cert doesn't match")

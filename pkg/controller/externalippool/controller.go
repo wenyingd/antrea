@@ -35,10 +35,10 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	antreacrds "antrea.io/antrea/pkg/apis/crd/v1alpha2"
+	antreacrds "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	clientset "antrea.io/antrea/pkg/client/clientset/versioned"
-	antreainformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha2"
-	antrealisters "antrea.io/antrea/pkg/client/listers/crd/v1alpha2"
+	antreainformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1beta1"
+	antrealisters "antrea.io/antrea/pkg/client/listers/crd/v1beta1"
 	"antrea.io/antrea/pkg/controller/metrics"
 	"antrea.io/antrea/pkg/ipam/ipallocator"
 	iputil "antrea.io/antrea/pkg/util/ip"
@@ -88,6 +88,10 @@ type ExternalIPAllocator interface {
 	// UpdateIPAllocation marks the IP in the specified ExternalIPPool as occupied.
 	UpdateIPAllocation(externalIPPool string, ip net.IP) error
 	// ReleaseIP releases the IP to the IP pool.
+	// It returns ErrExternalIPPoolNotFound if the externalIPPool does not exist.
+	// Any other error indicates that the IP was not allocated, or is not currently allocated.
+	// In case of an error, there is no reason to try again with the same arguments, as
+	// transient errors are not possible.
 	ReleaseIP(externalIPPool string, ip net.IP) error
 	// HasSynced indicates ExternalIPAllocator has finished syncing all ExternalIPPool resources.
 	HasSynced() bool
@@ -114,7 +118,7 @@ type ExternalIPPoolController struct {
 	handlersWaitGroup sync.WaitGroup
 
 	// queue maintains the ExternalIPPool objects that need to be synced.
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[string]
 }
 
 // NewExternalIPPoolController returns a new *ExternalIPPoolController.
@@ -123,9 +127,14 @@ func NewExternalIPPoolController(crdClient clientset.Interface, externalIPPoolIn
 		crdClient:                  crdClient,
 		externalIPPoolLister:       externalIPPoolInformer.Lister(),
 		externalIPPoolListerSynced: externalIPPoolInformer.Informer().HasSynced,
-		queue:                      workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "externalIPPool"),
-		ipAllocatorInitialized:     &atomic.Value{},
-		ipAllocatorMap:             make(map[string]ipallocator.MultiIPAllocator),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "externalIPPool",
+			},
+		),
+		ipAllocatorInitialized: &atomic.Value{},
+		ipAllocatorMap:         make(map[string]ipallocator.MultiIPAllocator),
 	}
 	externalIPPoolInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
@@ -195,7 +204,7 @@ func (c *ExternalIPPoolController) createOrUpdateIPAllocator(ipPool *antreacrds.
 	c.ipAllocatorMutex.Lock()
 	defer c.ipAllocatorMutex.Unlock()
 
-	existingIPRanges := sets.NewString()
+	existingIPRanges := sets.New[string]()
 	multiIPAllocator, exists := c.ipAllocatorMap[ipPool.Name]
 	if !exists {
 		multiIPAllocator = ipallocator.MultiIPAllocator{}
@@ -204,7 +213,8 @@ func (c *ExternalIPPoolController) createOrUpdateIPAllocator(ipPool *antreacrds.
 		existingIPRanges.Insert(multiIPAllocator.Names()...)
 	}
 
-	for _, ipRange := range ipPool.Spec.IPRanges {
+	for idx := range ipPool.Spec.IPRanges {
+		ipRange := &ipPool.Spec.IPRanges[idx]
 		ipAllocator, err := func() (*ipallocator.SingleIPAllocator, error) {
 			if ipRange.CIDR != "" {
 				_, ipNet, err := net.ParseCIDR(ipRange.CIDR)
@@ -314,8 +324,8 @@ func (c *ExternalIPPoolController) updateExternalIPPoolStatus(poolName string) e
 		}
 		klog.V(2).InfoS("Updating ExternalIPPool status", "ExternalIPPool", poolName, "usage", usage)
 		toUpdate.Status.Usage = usage
-		if _, updateErr := c.crdClient.CrdV1alpha2().ExternalIPPools().UpdateStatus(context.TODO(), toUpdate, metav1.UpdateOptions{}); updateErr != nil && apierrors.IsConflict(updateErr) {
-			toUpdate, getErr = c.crdClient.CrdV1alpha2().ExternalIPPools().Get(context.TODO(), poolName, metav1.GetOptions{})
+		if _, updateErr := c.crdClient.CrdV1beta1().ExternalIPPools().UpdateStatus(context.TODO(), toUpdate, metav1.UpdateOptions{}); updateErr != nil && apierrors.IsConflict(updateErr) {
+			toUpdate, getErr = c.crdClient.CrdV1beta1().ExternalIPPools().Get(context.TODO(), poolName, metav1.GetOptions{})
 			if getErr != nil {
 				return getErr
 			}
@@ -368,8 +378,7 @@ func (c *ExternalIPPoolController) processNextWorkItem() bool {
 	}
 	defer c.queue.Done(key)
 
-	err := c.updateExternalIPPoolStatus(key.(string))
-	if err != nil {
+	if err := c.updateExternalIPPoolStatus(key); err != nil {
 		// Put the item back in the workqueue to handle any transient errors.
 		c.queue.AddRateLimited(key)
 		klog.ErrorS(err, "Failed to sync ExternalIPPool status", "ExternalIPPool", key)

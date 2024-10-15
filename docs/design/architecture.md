@@ -25,10 +25,9 @@ init container that installs the CNI plugin - `antrea-cni` - on the Node and
 ensures that the OVS kernel module is loaded and it is chained with the portmap
 and bandwidth CNI plugins. All Antrea Controller, Agent, OVS daemons, and
 `antrea-cni` bits are included in a single Docker image. Antrea also has a
-command-line tool called `antctl`, and an [Octant](https://github.com/vmware-tanzu/octant)
-UI plugin.
+command-line tool called `antctl`.
 
-<img src="../assets/arch.svg.png" width="600" alt="Antrea Architecture Overview">
+<img src="../assets/arch.svg" width="600" alt="Antrea Architecture Overview">
 
 ### Antrea Controller
 
@@ -46,7 +45,7 @@ to implement the communication channel to Antrea Agents. Each Antrea Agent
 connects to the Controller API server and watches the computed NetworkPolicy
 objects. Controller also exposes a REST API for `antctl` on the same HTTP
 endpoint. See more information about the Controller API server implementation
-in the [Controller API server section](#Controller-API-server).
+in the [Controller API server section](#controller-api-server).
 
 #### Controller API server
 
@@ -137,14 +136,17 @@ executed through `kubectl` as a `kubectl` plugin as well.
 When accessing the Agent, `antctl` connects to the Agent's local REST endpoint,
 and can only be executed locally in the Agent's container.
 
-### Octant UI plugin
+### Antrea web UI
 
-Antrea also implements an Octant plugin which can show the Controller and
-Agent's health and basic runtime information in the Octant UI. The Octant plugin
-gets the Controller and Agent's information from the `AntreaControllerInfo` and
-`AntreaAgentInfo` CRDs (Custom Resource Definition) in the Kubernetes API. The
-CRDs are created by the Antrea Controller and each Antrea Agent to populate
-their health and runtime information.
+Antrea also comes with a web UI, which can show the Controller and Agent's
+health and basic runtime information. The UI gets the Controller and Agent's
+information from the `AntreaControllerInfo` and `AntreaAgentInfo` CRDs (Custom
+Resource Definition) in the Kubernetes API. The CRDs are created by the Antrea
+Controller and each Antrea Agent to populate their health and runtime
+information.
+
+The Antrea web UI provides additional capabilities. Please refer to the [Antrea
+UI repository](https://github.com/antrea-io/antrea-ui) for more information.
 
 ## Pod Networking
 
@@ -203,7 +205,7 @@ so their source IP will be rewritten to the Node's IP before going out.
 ### ClusterIP Service
 
 Antrea supports two ways to implement Services of type ClusterIP - leveraging
-`kube-proxy`, or AntreaProxy that implements load balancing for ClusterIP
+`kube-proxy`, or Antrea Proxy that implements load balancing for ClusterIP
 Service traffic with OVS.
 
 When leveraging `kube-proxy`, Antrea Agent adds OVS flows to forward the packets
@@ -216,16 +218,16 @@ the tunnel.
 
 <img src="../assets/service_walk.svg.png" width="600" alt="Antrea Service Traffic Walk">
 
-`kube-proxy` can be used in any supported mode: user-space iptables, or IPVS.
-See the [Kubernetes Service documentation](https://kubernetes.io/docs/concepts/services-networking/service)
+`kube-proxy` can be used in any supported mode: iptables, IPVS or nftables.
+See the [Kubernetes Service Proxies documentation](https://kubernetes.io/docs/reference/networking/virtual-ips)
 for more details.
 
-When AntreaProxy is enabled, Antrea Agent will add OVS flows that implement
+When Antrea Proxy is enabled, Antrea Agent will add OVS flows that implement
 load balancing and DNAT for the ClusterIP Service traffic. In this way, Service
 traffic load balancing is done inside OVS together with the rest of the
 forwarding, and it can achieve better performance than using `kube-proxy`, as
 there is no extra overhead of forwarding Service traffic to the host's network
-stack and iptables processing. The AntreaProxy implementation in Antrea Agent
+stack and iptables processing. The Antrea Proxy implementation in Antrea Agent
 leverages some `kube-proxy` packages to watch and process Service Endpoints.
 
 ### NetworkPolicy
@@ -327,7 +329,7 @@ to the local Pods on their Nodes.
 
 Antrea supports encrypting Pod traffic across Linux Nodes with IPsec ESP. The
 IPsec implementation leverages [OVS
-IPsec](http://docs.openvswitch.org/en/latest/tutorials/ipsec) and leverages
+IPsec](https://docs.openvswitch.org/en/latest/tutorials/ipsec/) and leverages
 [strongSwan](https://www.strongswan.org) as the IKE daemon. By default GRE
 tunnels are used but other tunnel types are also supported.
 
@@ -336,7 +338,7 @@ Antrea Agent DaemonSet, which runs the `ovs-monitor-ipsec` and strongSwan
 daemons. Antrea now supports only using pre-shared key (PSK) for IKE
 authentication, and the PSK string must be passed to Antrea Agent using an
 environment variable - `ANTREA_IPSEC_PSK`. The PSK string can be specified in
-the [Antrea IPsec deployment yaml](/build/yamls/antrea-ipsec.yml), which creates
+the [Antrea IPsec deployment yaml](../../build/yamls/antrea-ipsec.yml), which creates
 a Kubernetes Secret to save the PSK value and populates it to the
 `ANTREA_IPSEC_PSK` environment variable of the Antrea Agent container.
 

@@ -20,7 +20,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 )
 
 type AntreaPolicyProtocol string
@@ -46,11 +46,11 @@ func AntreaPolicyProtocolToK8sProtocol(antreaProtocol AntreaPolicyProtocol) (v1.
 	}
 }
 
-func GenPortsOrProtocols(protoc AntreaPolicyProtocol, port *int32, portName *string, endPort, icmpType, icmpCode, igmpType *int32, groupAddress *string) ([]crdv1alpha1.NetworkPolicyPort, []crdv1alpha1.NetworkPolicyProtocol) {
+func GenPortsOrProtocols(protoc AntreaPolicyProtocol, port *int32, portName *string, endPort, srcPort, srcEndPort, icmpType, icmpCode, igmpType *int32, groupAddress *string) ([]crdv1beta1.NetworkPolicyPort, []crdv1beta1.NetworkPolicyProtocol) {
 	if protoc == ProtocolICMP {
-		return nil, []crdv1alpha1.NetworkPolicyProtocol{
+		return nil, []crdv1beta1.NetworkPolicyProtocol{
 			{
-				ICMP: &crdv1alpha1.ICMPProtocol{
+				ICMP: &crdv1beta1.ICMPProtocol{
 					ICMPType: icmpType,
 					ICMPCode: icmpCode,
 				},
@@ -58,38 +58,40 @@ func GenPortsOrProtocols(protoc AntreaPolicyProtocol, port *int32, portName *str
 		}
 	}
 	if protoc == ProtocolIGMP {
-		return nil, []crdv1alpha1.NetworkPolicyProtocol{
+		return nil, []crdv1beta1.NetworkPolicyProtocol{
 			{
-				IGMP: &crdv1alpha1.IGMPProtocol{
+				IGMP: &crdv1beta1.IGMPProtocol{
 					IGMPType:     igmpType,
 					GroupAddress: *groupAddress,
 				},
 			},
 		}
 	}
-	var ports []crdv1alpha1.NetworkPolicyPort
+	var ports []crdv1beta1.NetworkPolicyPort
 	k8sProtocol, _ := AntreaPolicyProtocolToK8sProtocol(protoc)
 	if port != nil && portName != nil {
 		panic("specify portname or port, not both")
 	}
 	if portName != nil {
-		ports = []crdv1alpha1.NetworkPolicyPort{
+		ports = []crdv1beta1.NetworkPolicyPort{
 			{
 				Port:     &intstr.IntOrString{Type: intstr.String, StrVal: *portName},
 				Protocol: &k8sProtocol,
 			},
 		}
 	}
-	if port != nil || endPort != nil {
+	if port != nil || endPort != nil || srcPort != nil || srcEndPort != nil {
 		var pVal *intstr.IntOrString
 		if port != nil {
 			pVal = &intstr.IntOrString{IntVal: *port}
 		}
-		ports = []crdv1alpha1.NetworkPolicyPort{
+		ports = []crdv1beta1.NetworkPolicyPort{
 			{
-				Port:     pVal,
-				EndPort:  endPort,
-				Protocol: &k8sProtocol,
+				Port:          pVal,
+				EndPort:       endPort,
+				SourcePort:    srcPort,
+				SourceEndPort: srcEndPort,
+				Protocol:      &k8sProtocol,
 			},
 		}
 	}

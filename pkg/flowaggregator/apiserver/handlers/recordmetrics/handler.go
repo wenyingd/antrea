@@ -20,49 +20,28 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/antctl/transform/common"
+	"antrea.io/antrea/pkg/flowaggregator/apis"
 	"antrea.io/antrea/pkg/flowaggregator/querier"
 )
-
-// Response is the response struct of recordmetrics command.
-type Response struct {
-	NumRecordsExported int64 `json:"numRecordsExported,omitempty"`
-	NumRecordsReceived int64 `json:"numRecordsReceived,omitempty"`
-	NumFlows           int64 `json:"numFlows,omitempty"`
-	NumConnToCollector int64 `json:"numConnToCollector,omitempty"`
-}
 
 // HandleFunc returns the function which can handle the /recordmetrics API request.
 func HandleFunc(faq querier.FlowAggregatorQuerier) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		metrics := faq.GetRecordMetrics()
-		metricsResponse := Response{
-			NumRecordsExported: metrics.NumRecordsExported,
-			NumRecordsReceived: metrics.NumRecordsReceived,
-			NumFlows:           metrics.NumFlows,
-			NumConnToCollector: metrics.NumConnToCollector,
+		metricsResponse := apis.RecordMetricsResponse{
+			NumRecordsExported:     metrics.NumRecordsExported,
+			NumRecordsReceived:     metrics.NumRecordsReceived,
+			NumFlows:               metrics.NumFlows,
+			NumConnToCollector:     metrics.NumConnToCollector,
+			WithClickHouseExporter: metrics.WithClickHouseExporter,
+			WithS3Exporter:         metrics.WithS3Exporter,
+			WithLogExporter:        metrics.WithLogExporter,
+			WithIPFIXExporter:      metrics.WithIPFIXExporter,
 		}
 		err := json.NewEncoder(w).Encode(metricsResponse)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
-			klog.Errorf("Error when encoding AntreaAgentInfo to json: %v", err)
+			klog.Errorf("Error when encoding record metrics to json: %v", err)
 		}
 	}
-}
-
-func (r Response) GetTableHeader() []string {
-	return []string{"RECORDS-EXPORTED", "RECORDS-RECEIVED", "FLOWS", "EXPORTERS-CONNECTED"}
-}
-
-func (r Response) GetTableRow(maxColumnLength int) []string {
-	return []string{
-		common.Int64ToString(r.NumRecordsExported),
-		common.Int64ToString(r.NumRecordsReceived),
-		common.Int64ToString(r.NumFlows),
-		common.Int64ToString(r.NumConnToCollector),
-	}
-}
-
-func (r Response) SortRows() bool {
-	return true
 }

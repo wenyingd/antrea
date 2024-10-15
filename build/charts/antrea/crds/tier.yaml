@@ -7,7 +7,7 @@ metadata:
 spec:
   group: crd.antrea.io
   versions:
-    - name: v1alpha1
+    - name: v1beta1
       served: true
       storage: true
       additionalPrinterColumns:

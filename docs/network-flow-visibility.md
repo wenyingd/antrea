@@ -6,6 +6,7 @@
 - [Overview](#overview)
 - [Flow Exporter](#flow-exporter)
   - [Configuration](#configuration)
+    - [Configuration pre Antrea v1.13](#configuration-pre-antrea-v113)
   - [IPFIX Information Elements (IEs) in a Flow Record](#ipfix-information-elements-ies-in-a-flow-record)
     - [IEs from IANA-assigned IE Registry](#ies-from-iana-assigned-ie-registry)
     - [IEs from Reverse IANA-assigned IE Registry](#ies-from-reverse-iana-assigned-ie-registry)
@@ -16,6 +17,8 @@
 - [Flow Aggregator](#flow-aggregator)
   - [Deployment](#deployment)
   - [Configuration](#configuration-1)
+    - [Configuring secure connections to the ClickHouse database](#configuring-secure-connections-to-the-clickhouse-database)
+    - [Example of flow-aggregator.conf](#example-of-flow-aggregatorconf)
   - [IPFIX Information Elements (IEs) in an Aggregated Flow Record](#ipfix-information-elements-ies-in-an-aggregated-flow-record)
     - [IEs from Antrea IE Registry](#ies-from-antrea-ie-registry-1)
   - [Supported Capabilities](#supported-capabilities-1)
@@ -32,6 +35,9 @@
     - [Output Flow Records](#output-flow-records)
   - [Grafana Flow Collector (migrated)](#grafana-flow-collector-migrated)
   - [ELK Flow Collector (removed)](#elk-flow-collector-removed)
+- [Layer 7 Network Flow Exporter](#layer-7-network-flow-exporter)
+  - [Prerequisites](#prerequisites)
+  - [Usage](#usage)
 <!-- /toc -->
 
 ## Overview
@@ -61,8 +67,11 @@ library.
 
 ### Configuration
 
-To enable the Flow Exporter feature at the Antrea Agent, the following config
-parameters have to be set in the Antrea Agent ConfigMap:
+In addition to enabling the Flow Exporter feature gate (if needed), you need to
+ensure that the `flowExporter.enable` flag is set to true in the Antrea Agent
+configuration.
+
+your `antrea-agent` ConfigMap should look like this:
 
 ```yaml
   antrea-agent.conf: |
@@ -71,52 +80,65 @@ parameters have to be set in the Antrea Agent ConfigMap:
     # Enable flowexporter which exports polled conntrack connections as IPFIX flow records from each agent to a configured collector.
       FlowExporter: true
 
-    # Provide the IPFIX collector address as a string with format <HOST>:[<PORT>][:<PROTO>].
-    # HOST can either be the DNS name or the IP of the Flow Collector. For example,
-    # "flow-aggregator.flow-aggregator.svc" can be provided as a DNS name to connect
-    # to the Antrea Flow Aggregator Service. If IP, it can be either IPv4 or IPv6.
-    # However, IPv6 address should be wrapped with [].
-    # If PORT is empty, we default to 4739, the standard IPFIX port.
-    # If no PROTO is given, we consider "tls" as default. We support "tls", "tcp" and
-    # "udp" protocols. "tls" is used for securing communication between flow exporter and
-    # flow aggregator.
-    #flowCollectorAddr: "flow-aggregator.flow-aggregator.svc:4739:tls"
-    
-    # Provide flow poll interval as a duration string. This determines how often the
-    # flow exporter dumps connections from the conntrack module. Flow poll interval
-    # should be greater than or equal to 1s (one second).
-    # Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
-    #flowPollInterval: "5s"
+    flowExporter:
+      # Enable FlowExporter, a feature used to export polled conntrack connections as
+      # IPFIX flow records from each agent to a configured collector. To enable this
+      # feature, you need to set "enable" to true, and ensure that the FlowExporter
+      # feature gate is also enabled.
+      enable: true
+      # Provide the IPFIX collector address as a string with format <HOST>:[<PORT>][:<PROTO>].
+      # HOST can either be the DNS name, IP, or Service name of the Flow Collector. If
+      # using an IP, it can be either IPv4 or IPv6. However, IPv6 address should be
+      # wrapped with []. When the collector is running in-cluster as a Service, set
+      # <HOST> to <Service namespace>/<Service name>. For example,
+      # "flow-aggregator/flow-aggregator" can be provided to connect to the Antrea
+      # Flow Aggregator Service.
+      # If PORT is empty, we default to 4739, the standard IPFIX port.
+      # If no PROTO is given, we consider "tls" as default. We support "tls", "tcp" and
+      # "udp" protocols. "tls" is used for securing communication between flow exporter and
+      # flow aggregator.
+      flowCollectorAddr: "flow-aggregator/flow-aggregator:4739:tls"
 
-    # Provide the active flow export timeout, which is the timeout after which a flow
-    # record is sent to the collector for active flows. Thus, for flows with a continuous
-    # stream of packets, a flow record will be exported to the collector once the elapsed
-    # time since the last export event is equal to the value of this timeout.
-    # Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
-    #activeFlowExportTimeout: "60s"
+      # Provide flow poll interval as a duration string. This determines how often the
+      # flow exporter dumps connections from the conntrack module. Flow poll interval
+      # should be greater than or equal to 1s (one second).
+      # Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+      flowPollInterval: "5s"
 
-    # Provide the idle flow export timeout, which is the timeout after which a flow
-    # record is sent to the collector for idle flows. A flow is considered idle if no
-    # packet matching this flow has been observed since the last export event.
-    # Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
-    #idleFlowExportTimeout: "15s"
+      # Provide the active flow export timeout, which is the timeout after which a flow
+      # record is sent to the collector for active flows. Thus, for flows with a continuous
+      # stream of packets, a flow record will be exported to the collector once the elapsed
+      # time since the last export event is equal to the value of this timeout.
+      # Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+      activeFlowExportTimeout: "5s"
+
+      # Provide the idle flow export timeout, which is the timeout after which a flow
+      # record is sent to the collector for idle flows. A flow is considered idle if no
+      # packet matching this flow has been observed since the last export event.
+      # Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
+      idleFlowExportTimeout: "15s"
 ```
 
-Please note that the default value for `flowCollectorAddr` is `"flow-aggregator.flow-aggregator.svc:4739:tls"`,
-which uses the DNS name of the Flow Aggregator Service, if the Service is deployed
-with the Name and Namespace set to `flow-aggregator`. For Antrea Agent running on
-a Windows node, the user is required to change the default value of `HOST` in `flowCollectorAddr`
-from DNS name to the Cluster IP of the Flow Aggregator Service. The reason is because
-on Windows the Antrea Agent runs as a process, it uses the host's default DNS setting and the DNS
-resolver will not be configured to talk to the CoreDNS Service for cluster local DNS queries like
-`flow-aggregator.flow-aggregator.svc`. In addition, if you deploy the Flow Aggregator Service
-with a different Name and Namespace, then either use the appropriate DNS name or the Cluster IP of
-the Service.
+Please note that the default value for `flowExporter.flowCollectorAddr` is
+`"flow-aggregator/flow-aggregator:4739:tls"`, which enables the Flow Exporter to connect
+the Flow Aggregator Service, assuming it is running in the same K8 cluster with the Name
+and Namespace set to `flow-aggregator`. If you deploy the Flow Aggregator Service with
+a different Name and Namespace, then set `flowExporter.flowCollectorAddr` appropriately.
 
 Please note that the default values for
-`flowPollInterval`, `activeFlowExportTimeout`, and `idleFlowExportTimeout` parameters are set to 5s, 60s, and 15s, respectively.
+`flowExporter.flowPollInterval`, `flowExporter.activeFlowExportTimeout`, and
+`flowExporter.idleFlowExportTimeout` parameters are set to 5s, 5s, and 15s, respectively.
 TLS communication between the Flow Exporter and the Flow Aggregator is enabled by default.
 Please modify them as per your requirements.
+
+#### Configuration pre Antrea v1.13
+
+Prior to the Antrea v1.13 release, the `flowExporter` option group in the
+Antrea Agent configuration did not exist. To enable the Flow Exporter feature,
+one simply needed to enable the feature gate, and the Flow Exporter related
+configuration could be configured using the (now deprecated) `flowCollectorAddr`,
+`flowPollInterval`, `activeFlowExportTimeout`, `idleFlowExportTimeout`
+parameters.
 
 ### IPFIX Information Elements (IEs) in a Flow Record
 
@@ -242,7 +264,7 @@ kubectl apply -f https://github.com/antrea-io/antrea/releases/download/<TAG>/flo
 ```
 
 To deploy the latest version of Flow Aggregator Service (built from the main branch), use the
-checked-in [deployment yaml](/build/yamls/flow-aggregator.yml):
+checked-in [deployment yaml](../build/yamls/flow-aggregator.yml):
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/antrea-io/antrea/main/build/yamls/flow-aggregator.yml
@@ -266,7 +288,43 @@ it is deployed following the [deployment steps](#deployment-steps-1), the
 ClickHouse server is already exposed via a K8s Service, and no further
 configuration is required. If a different FQDN or IP is desired, please use
 the URL for `clickHouse.databaseURL` in the following format:
-`tcp://<ClickHouse server FQDN or IP>:<ClickHouse TCP port>`.
+`<protocol>://<ClickHouse server FQDN or IP>:<ClickHouse port>`.
+
+#### Configuring secure connections to the ClickHouse database
+
+Starting with Antrea v1.13, you can enable TLS when connecting to the ClickHouse
+Server by setting `clickHouse.databaseURL` with protocol `tls` or `https`.
+You can also change the value of `clickHouse.tls.insecureSkipVerify` to
+determine whether to skip the verification of the server's certificate.
+If you want to provide a custom CA certificate, you can set
+`clickHouse.tls.caCert` to `true` and the flow Aggregator will read the
+certificate key pair from the`clickhouse-ca` Secret.
+
+Make sure to follow the following form when creating the `clickhouse-ca` Secret
+with the custom CA certificate:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-ca
+  namespace: flow-aggregator
+data:
+  ca.crt: <BASE64 ENCODED CA CERTIFICATE>
+```
+
+You can use `kubectl apply -f <PATH TO SECRET YAML>` to create the above secret
+, or use `kubectl create secret`:
+
+```bash
+kubectl create secret generic clickhouse-ca -n flow-aggregator --from-file=ca.crt=<PATH TO CA CERTIFICATE>
+```
+
+Prior to Antrea v1.13, secure connections to ClickHouse are not supported,
+and TCP is the only supported protocol when connecting to the ClickHouse
+server from the Flow Aggregator.
+
+#### Example of flow-aggregator.conf
 
 ```yaml
 flow-aggregator.conf: |  
@@ -288,9 +346,8 @@ flow-aggregator.conf: |
   # Provide the transport protocol for the flow aggregator collecting process, which is tls, tcp or udp.
   aggregatorTransportProtocol: "tls"
 
-  # Provide DNS name or IP address of flow aggregator for generating TLS certificate. It must match
-  # the flowCollectorAddr parameter in the antrea-agent config.
-  flowAggregatorAddress: "flow-aggregator.flow-aggregator.svc"
+  # Provide an extra DNS name or IP address of flow aggregator for generating TLS certificate.
+  flowAggregatorAddress: ""
 
   # recordContents enables configuring some fields in the flow records. Fields can
   # be excluded to reduce record size, but some features or external tooling may
@@ -341,8 +398,22 @@ flow-aggregator.conf: |
     # Database is the name of database where Antrea "flows" table is created.
     database: "default"
 
-    # DatabaseURL is the url to the database. TCP protocol is required.
+    # DatabaseURL is the url to the database. Provide the database URL as a string with format
+    # <Protocol>://<ClickHouse server FQDN or IP>:<ClickHouse port>. The protocol has to be
+    # one of the following: "tcp", "tls", "http", "https". When "tls" or "https" is used, tls
+    # will be enabled.
     databaseURL: "tcp://clickhouse-clickhouse.flow-visibility.svc:9000"
+
+    # TLS configuration options, when using TLS to connect to the ClickHouse service.
+    tls:
+      # InsecureSkipVerify determines whether to skip the verification of the server's certificate chain and host name.
+      # Default is false.
+      insecureSkipVerify: false
+
+      # CACert indicates whether to use custom CA certificate. Default root CAs will be used if this field is false.
+      # If true, a Secret named "clickhouse-ca" must be provided with the following keys:
+      # ca.crt: <CA certificate>
+      caCert: false
 
     # Debug enables debug logs from ClickHouse sql driver.
     debug: false
@@ -357,14 +428,13 @@ flow-aggregator.conf: |
 ```
 
 Please note that the default values for `activeFlowRecordTimeout`,
-`inactiveFlowRecordTimeout`, `aggregatorTransportProtocol`, and
-`flowAggregatorAddress` parameters are set to `60s`, `90s`, `tls` and
-`flow-aggregator.flow-aggregator.svc`, respectively. Please make sure that
+`inactiveFlowRecordTimeout`, `aggregatorTransportProtocol` parameters are set to
+`60s`, `90s` and `tls` respectively. Please make sure that
 `aggregatorTransportProtocol` and protocol of `flowCollectorAddr` in
 `agent-agent.conf` are set to `tls` to guarantee secure communication works
-properly. Protocol of `flowCollectorAddr` and `aggregatorTransportProtocol`
-must always match, so TLS must either be enabled for both sides or disabled
-for both sides. Please modify the parameters as per your requirements.
+properly. Protocol of `flowCollectorAddr` and `aggregatorTransportProtocol` must
+always match, so TLS must either be enabled for both sides or disabled for both
+sides. Please modify the parameters as per your requirements.
 
 Please note that the default value for `recordContents.podLabels` is `false`,
 which indicates source and destination Pod labels will not be included in the
@@ -543,3 +613,61 @@ and other Theia features, please refer to the
 **Starting with Antrea v1.7, support for the ELK Flow Collector has been removed.**
 Please consider using the [Grafana Flow Collector](#grafana-flow-collector-migrated)
 instead, which is actively maintained.
+
+## Layer 7 Network Flow Exporter
+
+In addition to layer 4 network visibility, Antrea adds layer 7 network flow
+export.
+
+### Prerequisites
+
+To achieve L7 (Layer 7) network flow export, the `L7FlowExporter` feature gate
+must be enabled.
+
+Note: L7 flow-visibility support for Theia is not yet implemented.
+
+### Usage
+
+To export layer 7 flows of a Pod or a Namespace, user can annotate Pods or
+Namespaces with the annotation key `visibility.antrea.io/l7-export` and set the
+value to indicate the traffic flow direction, which can be `ingress`, `egress`
+or `both`.
+
+For example, to enable L7 flow export in the ingress direction on
+Pod test-pod in the default Namespace, you can use:
+
+```bash
+kubectl annotate pod test-pod visibility.antrea.io/l7-export=ingress
+```
+
+Based on the annotation, Flow Exporter will export the L7 flow data to the
+Flow Aggregator or configured IPFix collector using the fields `appProtocolName`
+and `httpVals`.
+
+* `appProtocolName` field is used to indicate the application layer protocol
+name (e.g. http) and it will be empty if application layer data is not exported.
+* `httpVals` stores a serialized JSON dictionary with every HTTP request for
+a connection mapped to a unique transaction ID. This format lets us group all
+the HTTP transactions pertaining to the same connection, into the same exported
+record.
+
+An example of `httpVals` is :
+
+`"{\"0\":{\"hostname\":\"10.10.0.1\",\"url\":\"/public/\",\"http_user_agent\":\"curl/7.74.0\",\"http_content_type\":\"text/html\",\"http_method\":\"GET\",\"protocol\":\"HTTP/1.1\",\"status\":200,\"length\":153}}"`
+
+HTTP fields in the `httpVals` are:
+
+| Http field        | Description                                            |
+|-------------------|--------------------------------------------------------|
+| hostname          | IP address of the sender                               |
+| URL               | url requested on the server                            |
+| http_user_agent   | application used for HTTP                              |
+| http_content_type | type of content being returned by the server           |
+| http_method       | HTTP method used for the request                       |
+| protocol          | HTTP protocol version used for the request or response |
+| status            | HTTP status code                                       |
+| length            | size of the response body                              |
+
+As of now, the only supported layer 7 protocol is `HTTP1.1`. Support for more
+protocols may be added in the future. Antrea supports L7FlowExporter feature only
+on Linux Nodes.

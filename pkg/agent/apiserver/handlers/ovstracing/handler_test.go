@@ -20,11 +20,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	interfacestoretest "antrea.io/antrea/pkg/agent/interfacestore/testing"
@@ -37,7 +40,7 @@ import (
 
 var (
 	testTraceResult = "tracing result"
-	testResponse    = Response{testTraceResult}
+	testResponse    = apis.OVSTracingResponse{Result: testTraceResult}
 
 	tunnelVirtualMAC, _ = net.ParseMAC("aa:bb:cc:dd:ee:ff")
 	gatewayMAC, _       = net.ParseMAC("00:00:00:00:00:01")
@@ -78,12 +81,11 @@ type testCase struct {
 	query          string
 	calledTrace    bool
 	expectedStatus int
+	execErr        *ovsctl.ExecError
 }
 
 func TestPodFlows(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	testcases := []testCase{
 		{
 			test:           "Invalid port format",
@@ -195,9 +197,29 @@ func TestPodFlows(t *testing.T) {
 		},
 		{
 			test:           "Flow expression",
-			query:          "?flow=in_port=3,tcp,nw_src=192.0.2.2,tcp_dst=22",
+			query:          "?flow=in_port=32770,tcp,nw_src=192.0.2.2,tcp_dst=22",
 			calledTrace:    true,
 			expectedStatus: http.StatusOK,
+		},
+		{
+			test:           "Mock syntax error",
+			query:          "",
+			calledTrace:    true,
+			expectedStatus: http.StatusInternalServerError,
+			execErr: ovsctl.NewExecError(&exec.ExitError{
+				ProcessState: &os.ProcessState{},
+				Stderr:       []byte("syntax error"),
+			}, "server returned an error"),
+		},
+		{
+			test:           "Mock command exec error",
+			query:          "",
+			calledTrace:    true,
+			expectedStatus: http.StatusInternalServerError,
+			execErr: ovsctl.NewExecError(&exec.Error{
+				Name: "fake err",
+				Err:  errors.New("command not run correctly"),
+			}, "server returned an error"),
 		},
 	}
 	for i := range testcases {
@@ -245,7 +267,7 @@ func TestPodFlows(t *testing.T) {
 				if tc.expectedStatus == http.StatusOK {
 					ctl.EXPECT().Trace(gomock.Any()).Return(testTraceResult, nil).Times(1)
 				} else {
-					ctl.EXPECT().Trace(gomock.Any()).Return(nil, errors.New("tracing error")).Times(1)
+					ctl.EXPECT().Trace(gomock.Any()).Return("", tc.execErr).Times(1)
 				}
 			}
 		} else {
@@ -266,7 +288,7 @@ func runHTTPTest(t *testing.T, tc *testCase, aq querier.AgentQuerier) {
 	assert.Equal(t, tc.expectedStatus, recorder.Code, tc.test)
 
 	if tc.expectedStatus == http.StatusOK {
-		var received Response
+		var received apis.OVSTracingResponse
 		err = json.Unmarshal(recorder.Body.Bytes(), &received)
 		assert.Nil(t, err)
 		assert.Equal(t, testResponse, received)

@@ -16,6 +16,7 @@ package features
 
 import (
 	k8sruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/component-base/featuregate"
 
 	"antrea.io/antrea/pkg/util/runtime"
@@ -33,21 +34,35 @@ const (
 
 	// alpha: v0.8
 	// beta: v1.0
-	// Enables support for ClusterNetworkPolicy and AntreaNetworkPolicy CRDs.
+	// Enable support for ClusterNetworkPolicy and AntreaNetworkPolicy CRDs.
 	AntreaPolicy featuregate.Feature = "AntreaPolicy"
 
 	// alpha: v0.13
+	// beta: v1.11
+	// GA: v1.14
 	// Enable EndpointSlice support in AntreaProxy. If AntreaProxy is not enabled, this
 	// flag will not take effect.
 	EndpointSlice featuregate.Feature = "EndpointSlice"
 
 	// alpha: v1.8
+	// beta: v1.12
 	// Enable TopologyAwareHints in AntreaProxy. If EndpointSlice is not enabled, this
 	// flag will not take effect.
 	TopologyAwareHints featuregate.Feature = "TopologyAwareHints"
 
+	// beta: v2.2
+	// Enables trafficDistribution in AntreaProxy. If EndpointSlice is not enabled, this
+	// flag will not take effect.
+	ServiceTrafficDistribution featuregate.Feature = "ServiceTrafficDistribution"
+
+	// alpha: v1.13
+	// beta: v2.1
+	// Enable support for cleaning up stale UDP Service conntrack connections in AntreaProxy.
+	CleanupStaleUDPSvcConntrack featuregate.Feature = "CleanupStaleUDPSvcConntrack"
+
 	// alpha: v0.8
 	// beta: v0.11
+	// GA: v1.14
 	// Enable antrea proxy which provides ServiceLB for in-cluster services in antrea agent.
 	// It should be enabled on Windows, otherwise NetworkPolicy will not take effect on
 	// Service traffic.
@@ -69,6 +84,7 @@ const (
 
 	// alpha: v0.13
 	// beta: v1.4
+	// GA: v1.14
 	// Expose Pod ports through NodePort
 	NodePortLocal featuregate.Feature = "NodePortLocal"
 
@@ -78,6 +94,7 @@ const (
 	Egress featuregate.Feature = "Egress"
 
 	// alpha: v1.4
+	// beta: v1.12
 	// Run Kubernetes NodeIPAM with Antrea.
 	NodeIPAM featuregate.Feature = "NodeIPAM"
 
@@ -86,6 +103,7 @@ const (
 	AntreaIPAM featuregate.Feature = "AntreaIPAM"
 
 	// alpha: v1.5
+	// beta: v1.12
 	// Enable Multicast.
 	Multicast featuregate.Feature = "Multicast"
 
@@ -106,12 +124,55 @@ const (
 	TrafficControl featuregate.Feature = "TrafficControl"
 
 	// alpha: v1.7
-	// Enable certificated-based authentication for IPsec.
+	// Enable certificate-based authentication for IPSec tunnel.
 	IPsecCertAuth featuregate.Feature = "IPsecCertAuth"
 
 	// alpha: v1.8
 	// Enable running agent on an unmanaged VM/BM.
 	ExternalNode featuregate.Feature = "ExternalNode"
+
+	// alpha: v1.10
+	// Enable collecting support bundle files with SupportBundleCollection CRD.
+	SupportBundleCollection featuregate.Feature = "SupportBundleCollection"
+
+	// alpha: v1.10
+	// Enable users to protect their applications by specifying how they are allowed to communicate with others, taking
+	// into account application context.
+	L7NetworkPolicy featuregate.Feature = "L7NetworkPolicy"
+
+	// alpha: v1.13
+	// Allow users to specify the load balancer mode as DSR (Direct Server Return).
+	LoadBalancerModeDSR featuregate.Feature = "LoadBalancerModeDSR"
+
+	// alpha: v1.13
+	// Enable the AdminNetworkPolicy APIs
+	// https://github.com/kubernetes-sigs/network-policy-api
+	AdminNetworkPolicy featuregate.Feature = "AdminNetworkPolicy"
+
+	// alpha: v1.14
+	// Enable Egress traffic shaping.
+	EgressTrafficShaping featuregate.Feature = "EgressTrafficShaping"
+
+	// alpha: v1.15
+	// Allow users to allocate Egress IPs from a different subnet from the default Node subnet.
+	EgressSeparateSubnet featuregate.Feature = "EgressSeparateSubnet"
+
+	// alpha: v1.15
+	// Allows users to apply ClusterNetworkPolicy to Kubernetes Nodes.
+	NodeNetworkPolicy featuregate.Feature = "NodeNetworkPolicy"
+
+	// alpha: v1.15
+	// Enable layer 7 flow export on Pods and Namespaces
+	L7FlowExporter featuregate.Feature = "L7FlowExporter"
+
+	// alpha: v2.1
+	// Enable the NodeLatencyMonitor feature.
+	NodeLatencyMonitor featuregate.Feature = "NodeLatencyMonitor"
+
+	// alpha: v2.1
+	// Allow users to initiate BGP process on selected Kubernetes Nodes and advertise Service IPs, Pod IPs and Egress
+	// IPs to remote BGP peers.
+	BGPPolicy featuregate.Feature = "BGPPolicy"
 )
 
 var (
@@ -126,25 +187,88 @@ var (
 	// To add a new feature, define a key for it above and add it here. The features will be
 	// available throughout Antrea binaries.
 	DefaultAntreaFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		AntreaPolicy:       {Default: true, PreRelease: featuregate.Beta},
-		AntreaProxy:        {Default: true, PreRelease: featuregate.Beta},
-		Egress:             {Default: true, PreRelease: featuregate.Beta},
-		EndpointSlice:      {Default: false, PreRelease: featuregate.Alpha},
-		TopologyAwareHints: {Default: false, PreRelease: featuregate.Alpha},
-		Traceflow:          {Default: true, PreRelease: featuregate.Beta},
-		AntreaIPAM:         {Default: false, PreRelease: featuregate.Alpha},
-		FlowExporter:       {Default: false, PreRelease: featuregate.Alpha},
-		NetworkPolicyStats: {Default: true, PreRelease: featuregate.Beta},
-		NodePortLocal:      {Default: true, PreRelease: featuregate.Beta},
-		NodeIPAM:           {Default: false, PreRelease: featuregate.Alpha},
-		Multicast:          {Default: false, PreRelease: featuregate.Alpha},
-		Multicluster:       {Default: false, PreRelease: featuregate.Alpha},
-		SecondaryNetwork:   {Default: false, PreRelease: featuregate.Alpha},
-		ServiceExternalIP:  {Default: false, PreRelease: featuregate.Alpha},
-		TrafficControl:     {Default: false, PreRelease: featuregate.Alpha},
-		IPsecCertAuth:      {Default: false, PreRelease: featuregate.Alpha},
-		ExternalNode:       {Default: false, PreRelease: featuregate.Alpha},
+		AntreaPolicy:                {Default: true, PreRelease: featuregate.Beta},
+		AntreaProxy:                 {Default: true, PreRelease: featuregate.GA},
+		BGPPolicy:                   {Default: false, PreRelease: featuregate.Alpha},
+		Egress:                      {Default: true, PreRelease: featuregate.Beta},
+		EndpointSlice:               {Default: true, PreRelease: featuregate.GA},
+		TopologyAwareHints:          {Default: true, PreRelease: featuregate.Beta},
+		ServiceTrafficDistribution:  {Default: true, PreRelease: featuregate.Beta},
+		CleanupStaleUDPSvcConntrack: {Default: true, PreRelease: featuregate.Beta},
+		Traceflow:                   {Default: true, PreRelease: featuregate.Beta},
+		AntreaIPAM:                  {Default: false, PreRelease: featuregate.Alpha},
+		FlowExporter:                {Default: false, PreRelease: featuregate.Alpha},
+		NetworkPolicyStats:          {Default: true, PreRelease: featuregate.Beta},
+		NodePortLocal:               {Default: true, PreRelease: featuregate.GA},
+		NodeIPAM:                    {Default: true, PreRelease: featuregate.Beta},
+		Multicast:                   {Default: true, PreRelease: featuregate.Beta},
+		Multicluster:                {Default: false, PreRelease: featuregate.Alpha},
+		SecondaryNetwork:            {Default: false, PreRelease: featuregate.Alpha},
+		ServiceExternalIP:           {Default: false, PreRelease: featuregate.Alpha},
+		TrafficControl:              {Default: false, PreRelease: featuregate.Alpha},
+		IPsecCertAuth:               {Default: false, PreRelease: featuregate.Alpha},
+		ExternalNode:                {Default: false, PreRelease: featuregate.Alpha},
+		SupportBundleCollection:     {Default: false, PreRelease: featuregate.Alpha},
+		L7NetworkPolicy:             {Default: false, PreRelease: featuregate.Alpha},
+		LoadBalancerModeDSR:         {Default: false, PreRelease: featuregate.Alpha},
+		AdminNetworkPolicy:          {Default: false, PreRelease: featuregate.Alpha},
+		EgressTrafficShaping:        {Default: false, PreRelease: featuregate.Alpha},
+		EgressSeparateSubnet:        {Default: false, PreRelease: featuregate.Alpha},
+		NodeNetworkPolicy:           {Default: false, PreRelease: featuregate.Alpha},
+		L7FlowExporter:              {Default: false, PreRelease: featuregate.Alpha},
+		NodeLatencyMonitor:          {Default: false, PreRelease: featuregate.Alpha},
 	}
+
+	// AgentGates consists of all known feature gates for the Antrea Agent.
+	// When adding a new feature gate that applies to the Antrea Agent, please also add it here.
+	AgentGates = sets.New[featuregate.Feature](
+		AntreaIPAM,
+		AntreaPolicy,
+		AntreaProxy,
+		BGPPolicy,
+		CleanupStaleUDPSvcConntrack,
+		Egress,
+		EndpointSlice,
+		ExternalNode,
+		FlowExporter,
+		IPsecCertAuth,
+		L7NetworkPolicy,
+		LoadBalancerModeDSR,
+		Multicast,
+		Multicluster,
+		NetworkPolicyStats,
+		NodePortLocal,
+		SecondaryNetwork,
+		ServiceExternalIP,
+		ServiceTrafficDistribution,
+		SupportBundleCollection,
+		TopologyAwareHints,
+		Traceflow,
+		TrafficControl,
+		EgressTrafficShaping,
+		EgressSeparateSubnet,
+		NodeNetworkPolicy,
+		L7FlowExporter,
+		NodeLatencyMonitor,
+	)
+
+	// ControllerGates consists of all known feature gates for the Antrea Controller.
+	// When adding a new feature gate that applies to the Antrea Controller, please also add it here.
+	ControllerGates = sets.New[featuregate.Feature](
+		AdminNetworkPolicy,
+		AntreaIPAM,
+		AntreaPolicy,
+		Egress,
+		IPsecCertAuth,
+		L7NetworkPolicy,
+		Multicast,
+		Multicluster,
+		NetworkPolicyStats,
+		NodeIPAM,
+		ServiceExternalIP,
+		SupportBundleCollection,
+		Traceflow,
+	)
 
 	// UnsupportedFeaturesOnWindows records the features not supported on
 	// a Windows Node. Antrea Agent on a Windows Node checks the enabled
@@ -157,23 +281,37 @@ var (
 	// can have different FeatureSpecs between Linux and Windows, we should
 	// still define a separate defaultAntreaFeatureGates map for Windows.
 	unsupportedFeaturesOnWindows = map[featuregate.Feature]struct{}{
-		Egress:            {},
-		AntreaIPAM:        {},
+		Egress:     {},
+		AntreaIPAM: {},
+		// BGPPolicy feature is not validated on Windows yet. This can be removed
+		// in the future if it's fully tested on Windows.
+		BGPPolicy:         {},
 		Multicast:         {},
 		SecondaryNetwork:  {},
 		ServiceExternalIP: {},
 		IPsecCertAuth:     {},
-		// Multicluster feature is not validated on Windows yet. This can removed
+		// Multicluster feature is not validated on Windows yet. This can be removed
 		// in the future if it's fully tested on Windows.
-		Multicluster: {},
+		Multicluster:                {},
+		L7NetworkPolicy:             {},
+		LoadBalancerModeDSR:         {},
+		CleanupStaleUDPSvcConntrack: {},
+		EgressTrafficShaping:        {},
+		EgressSeparateSubnet:        {},
+		NodeNetworkPolicy:           {},
+		L7FlowExporter:              {},
+		NodeLatencyMonitor:          {},
 	}
 	// supportedFeaturesOnExternalNode records the features supported on an external
 	// Node. Antrea Agent checks the enabled features if it is running on an
 	// unmanaged VM/BM, and fails the startup if an unsupported feature is enabled.
 	supportedFeaturesOnExternalNode = map[featuregate.Feature]struct{}{
-		ExternalNode:       {},
-		AntreaPolicy:       {},
-		NetworkPolicyStats: {},
+		ExternalNode:            {},
+		AntreaPolicy:            {},
+		NetworkPolicyStats:      {},
+		SupportBundleCollection: {},
+		L7NetworkPolicy:         {},
+		AdminNetworkPolicy:      {},
 	}
 )
 
@@ -202,7 +340,7 @@ func SupportedOnWindows(feature featuregate.Feature) bool {
 	return !exists
 }
 
-// SupportedOnExternalNode checks whether a feature is supported on a external Node.
+// SupportedOnExternalNode checks whether a feature is supported on an external Node.
 func SupportedOnExternalNode(feature featuregate.Feature) bool {
 	_, exists := DefaultAntreaFeatureGates[feature]
 	if !exists {
@@ -210,4 +348,18 @@ func SupportedOnExternalNode(feature featuregate.Feature) bool {
 	}
 	_, exists = supportedFeaturesOnExternalNode[feature]
 	return exists
+}
+
+func GetVersion(version string) string {
+	if version == "" {
+		version = "GA"
+	}
+	return version
+}
+
+func GetStatus(status bool) string {
+	if status {
+		return "Enabled"
+	}
+	return "Disabled"
 }

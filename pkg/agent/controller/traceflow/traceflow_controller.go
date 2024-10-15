@@ -24,11 +24,12 @@ import (
 	"time"
 
 	"antrea.io/libOpenflow/protocol"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/informers"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
@@ -39,13 +40,11 @@ import (
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/util"
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	clientsetversioned "antrea.io/antrea/pkg/client/clientset/versioned"
-	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha1"
-	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1alpha1"
-	"antrea.io/antrea/pkg/features"
+	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1beta1"
+	crdlisters "antrea.io/antrea/pkg/client/listers/crd/v1beta1"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
-	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	"antrea.io/antrea/pkg/querier"
 )
 
@@ -72,8 +71,10 @@ const (
 )
 
 type traceflowState struct {
-	name        string
-	tag         uint8
+	name string
+	// Used to uniquely identify Traceflow.
+	uid         types.UID
+	tag         int8
 	liveTraffic bool
 	droppedOnly bool
 	// Live-traffic Traceflow with only destination Pod specified.
@@ -89,53 +90,61 @@ type Controller struct {
 	kubeClient             clientset.Interface
 	serviceLister          corelisters.ServiceLister
 	serviceListerSynced    cache.InformerSynced
-	traceflowClient        clientsetversioned.Interface
+	crdClient              clientsetversioned.Interface
 	traceflowInformer      crdinformers.TraceflowInformer
 	traceflowLister        crdlisters.TraceflowLister
 	traceflowListerSynced  cache.InformerSynced
-	ovsBridgeClient        ovsconfig.OVSBridgeClient
 	ofClient               openflow.Client
 	networkPolicyQuerier   querier.AgentNetworkPolicyInfoQuerier
+	egressQuerier          querier.EgressQuerier
 	interfaceStore         interfacestore.InterfaceStore
 	networkConfig          *config.NetworkConfig
 	nodeConfig             *config.NodeConfig
 	serviceCIDR            *net.IPNet // K8s Service ClusterIP CIDR
-	queue                  workqueue.RateLimitingInterface
+	queue                  workqueue.TypedRateLimitingInterface[string]
 	runningTraceflowsMutex sync.RWMutex
 	// runningTraceflows is a map for storing the running Traceflow state
 	// with dataplane tag to be the key.
-	runningTraceflows map[uint8]*traceflowState
+	runningTraceflows map[int8]*traceflowState
+	enableAntreaProxy bool
 }
 
 // NewTraceflowController instantiates a new Controller object which will process Traceflow
 // events.
 func NewTraceflowController(
 	kubeClient clientset.Interface,
-	informerFactory informers.SharedInformerFactory,
-	traceflowClient clientsetversioned.Interface,
+	crdClient clientsetversioned.Interface,
+	serviceInformer coreinformers.ServiceInformer,
 	traceflowInformer crdinformers.TraceflowInformer,
 	client openflow.Client,
 	npQuerier querier.AgentNetworkPolicyInfoQuerier,
-	ovsBridgeClient ovsconfig.OVSBridgeClient,
+	egressQuerier querier.EgressQuerier,
 	interfaceStore interfacestore.InterfaceStore,
 	networkConfig *config.NetworkConfig,
 	nodeConfig *config.NodeConfig,
-	serviceCIDR *net.IPNet) *Controller {
+	serviceCIDR *net.IPNet,
+	enableAntreaProxy bool) *Controller {
 	c := &Controller{
 		kubeClient:            kubeClient,
-		traceflowClient:       traceflowClient,
+		crdClient:             crdClient,
 		traceflowInformer:     traceflowInformer,
 		traceflowLister:       traceflowInformer.Lister(),
 		traceflowListerSynced: traceflowInformer.Informer().HasSynced,
-		ovsBridgeClient:       ovsBridgeClient,
 		ofClient:              client,
 		networkPolicyQuerier:  npQuerier,
+		egressQuerier:         egressQuerier,
 		interfaceStore:        interfaceStore,
 		networkConfig:         networkConfig,
 		nodeConfig:            nodeConfig,
 		serviceCIDR:           serviceCIDR,
-		queue:                 workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "traceflow"),
-		runningTraceflows:     make(map[uint8]*traceflowState),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "traceflow",
+			},
+		),
+		runningTraceflows: make(map[int8]*traceflowState),
+		enableAntreaProxy: enableAntreaProxy,
 	}
 
 	// Add handlers for Traceflow events.
@@ -148,17 +157,17 @@ func NewTraceflowController(
 		resyncPeriod,
 	)
 	// Register packetInHandler
-	c.ofClient.RegisterPacketInHandler(uint8(openflow.PacketInReasonTF), "traceflow", c)
+	c.ofClient.RegisterPacketInHandler(uint8(openflow.PacketInCategoryTF), c)
 	// Add serviceLister if AntreaProxy enabled
-	if features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
-		c.serviceLister = informerFactory.Core().V1().Services().Lister()
-		c.serviceListerSynced = informerFactory.Core().V1().Services().Informer().HasSynced
+	if c.enableAntreaProxy {
+		c.serviceLister = serviceInformer.Lister()
+		c.serviceListerSynced = serviceInformer.Informer().HasSynced
 	}
 	return c
 }
 
 // enqueueTraceflow adds an object to the controller work queue.
-func (c *Controller) enqueueTraceflow(tf *crdv1alpha1.Traceflow) {
+func (c *Controller) enqueueTraceflow(tf *crdv1beta1.Traceflow) {
 	c.queue.Add(tf.Name)
 }
 
@@ -171,7 +180,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	defer klog.Infof("Shutting down %s", controllerName)
 
 	cacheSyncs := []cache.InformerSynced{c.traceflowListerSynced}
-	if features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
+	if c.enableAntreaProxy {
 		cacheSyncs = append(cacheSyncs, c.serviceListerSynced)
 	}
 	if !cache.WaitForNamedCacheSync(controllerName, stopCh, cacheSyncs...) {
@@ -185,19 +194,19 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 }
 
 func (c *Controller) addTraceflow(obj interface{}) {
-	tf := obj.(*crdv1alpha1.Traceflow)
+	tf := obj.(*crdv1beta1.Traceflow)
 	klog.Infof("Processing Traceflow %s ADD event", tf.Name)
 	c.enqueueTraceflow(tf)
 }
 
 func (c *Controller) updateTraceflow(_, curObj interface{}) {
-	tf := curObj.(*crdv1alpha1.Traceflow)
+	tf := curObj.(*crdv1beta1.Traceflow)
 	klog.Infof("Processing Traceflow %s UPDATE event", tf.Name)
 	c.enqueueTraceflow(tf)
 }
 
 func (c *Controller) deleteTraceflow(old interface{}) {
-	tf := old.(*crdv1alpha1.Traceflow)
+	tf := old.(*crdv1beta1.Traceflow)
 	klog.Infof("Processing Traceflow %s DELETE event", tf.Name)
 	c.enqueueTraceflow(tf)
 }
@@ -215,7 +224,7 @@ func (c *Controller) worker() {
 // until we get notified of a new change. This function returns false if and only if the work queue
 // was shutdown (no more items will be processed).
 func (c *Controller) processTraceflowItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
@@ -223,17 +232,9 @@ func (c *Controller) processTraceflowItem() bool {
 	// must remember to call Forget if we do not want this work item being re-queued. For
 	// example, we do not call Forget if a transient error occurs, instead the item is put back
 	// on the workqueue and attempted again after a back-off period.
-	defer c.queue.Done(obj)
+	defer c.queue.Done(key)
 
-	// We expect strings (Traceflow name) to come off the workqueue.
-	if key, ok := obj.(string); !ok {
-		// As the item in the workqueue is actually invalid, we call Forget here else we'd
-		// go into a loop of attempting to process a work item that is invalid.
-		// This should not happen: enqueueTraceflow only enqueues strings.
-		c.queue.Forget(obj)
-		klog.Errorf("Expected string in work queue but got %#v", obj)
-		return true
-	} else if err := c.syncTraceflow(key); err == nil {
+	if err := c.syncTraceflow(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again.
 		c.queue.Forget(key)
 	} else {
@@ -244,7 +245,8 @@ func (c *Controller) processTraceflowItem() bool {
 }
 
 // TODO: Let controller compute which Node is the sender, and each Node watch the TF CRD with some
-//  filter to get and process only TF from the Node.
+// filter to get and process only TF from the Node.
+//
 // syncTraceflow gets Traceflow CRD by name, update cache and start syncing.
 func (c *Controller) syncTraceflow(traceflowName string) error {
 	startTime := time.Now()
@@ -262,14 +264,21 @@ func (c *Controller) syncTraceflow(traceflowName string) error {
 	}
 
 	switch tf.Status.Phase {
-	case crdv1alpha1.Running:
+	case crdv1beta1.Running:
 		if tf.Status.DataplaneTag != 0 {
 			start := false
 			c.runningTraceflowsMutex.Lock()
-			if _, ok := c.runningTraceflows[tf.Status.DataplaneTag]; !ok {
+			tfState, ok := c.runningTraceflows[tf.Status.DataplaneTag]
+			c.runningTraceflowsMutex.Unlock()
+			// This may happen if a Traceflow is assigned with a tag that was just released from an old Traceflow but
+			// the agent hasn't processed the deletion event of the old Traceflow yet.
+			if ok && tfState.uid != tf.UID {
+				klog.V(2).InfoS("Found a stale Traceflow associated with the dataplane tag, cleaning it up", "tag", tf.Status.DataplaneTag, "currentTraceflow", traceflowName, "staleTraceflow", tfState.name)
+				c.cleanupTraceflow(tfState.name)
+				start = true
+			} else if !ok {
 				start = true
 			}
-			c.runningTraceflowsMutex.Unlock()
 			if start {
 				err = c.startTraceflow(tf)
 			}
@@ -284,7 +293,7 @@ func (c *Controller) syncTraceflow(traceflowName string) error {
 
 // startTraceflow deploys OVS flow entries for Traceflow and inject packet if current Node
 // is Sender Node.
-func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
+func (c *Controller) startTraceflow(tf *crdv1beta1.Traceflow) error {
 	err := c.validateTraceflow(tf)
 	defer func() {
 		if err != nil {
@@ -294,16 +303,6 @@ func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
 	}()
 	if err != nil {
 		return err
-	}
-
-	liveTraffic := tf.Spec.LiveTraffic
-	if tf.Spec.Source.Pod == "" && tf.Spec.Destination.Pod == "" {
-		klog.Errorf("Traceflow %s has neither source nor destination Pod specified", tf.Name)
-		return nil
-	}
-	if tf.Spec.Source.Pod == "" && !liveTraffic {
-		klog.Errorf("Traceflow %s does not have source Pod specified", tf.Name)
-		return nil
 	}
 
 	receiverOnly := false
@@ -323,6 +322,7 @@ func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
 	podInterfaces := c.interfaceStore.GetContainerInterfacesByPod(pod, ns)
 	isSender := len(podInterfaces) > 0 && !receiverOnly
 
+	liveTraffic := tf.Spec.LiveTraffic
 	var packet, matchPacket *binding.Packet
 	var ofPort uint32
 	if len(podInterfaces) > 0 {
@@ -343,7 +343,7 @@ func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
 	// Store Traceflow to cache.
 	c.runningTraceflowsMutex.Lock()
 	tfState := traceflowState{
-		name: tf.Name, tag: tf.Status.DataplaneTag,
+		uid: tf.UID, name: tf.Name, tag: tf.Status.DataplaneTag,
 		liveTraffic: liveTraffic, droppedOnly: tf.Spec.DroppedOnly && liveTraffic,
 		receiverOnly: receiverOnly, isSender: isSender}
 	c.runningTraceflows[tfState.tag] = &tfState
@@ -353,9 +353,9 @@ func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
 	klog.V(2).Infof("Installing flow entries for Traceflow %s", tf.Name)
 	timeout := tf.Spec.Timeout
 	if timeout == 0 {
-		timeout = crdv1alpha1.DefaultTraceflowTimeout
+		timeout = crdv1beta1.DefaultTraceflowTimeout
 	}
-	err = c.ofClient.InstallTraceflowFlows(tfState.tag, liveTraffic, tfState.droppedOnly, receiverOnly, matchPacket, ofPort, timeout)
+	err = c.ofClient.InstallTraceflowFlows(uint8(tfState.tag), liveTraffic, tfState.droppedOnly, receiverOnly, matchPacket, ofPort, uint16(timeout))
 	if err != nil {
 		return err
 	}
@@ -373,30 +373,27 @@ func (c *Controller) startTraceflow(tf *crdv1alpha1.Traceflow) error {
 			time.Sleep(time.Duration(injectLocalPacketDelay) * time.Millisecond)
 		}
 		klog.V(2).Infof("Injecting packet for Traceflow %s", tf.Name)
-		err = c.ofClient.SendTraceflowPacket(tfState.tag, packet, ofPort, -1)
+		err = c.ofClient.SendTraceflowPacket(uint8(tfState.tag), packet, ofPort, -1)
 	}
 	return err
 }
 
-func (c *Controller) validateTraceflow(tf *crdv1alpha1.Traceflow) error {
-	if tf.Spec.Destination.Service != "" && !features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
-		return errors.New("using Service destination requires AntreaProxy feature enabled")
+func (c *Controller) validateTraceflow(tf *crdv1beta1.Traceflow) error {
+	if tf.Spec.Destination.Service != "" && !c.enableAntreaProxy {
+		return errors.New("using Service destination requires AntreaProxy enabled")
 	}
 	if tf.Spec.Destination.IP != "" {
 		destIP := net.ParseIP(tf.Spec.Destination.IP)
-		if destIP == nil {
-			return fmt.Errorf("destination IP is not valid: %s", tf.Spec.Destination.IP)
-		}
 		// When AntreaProxy is enabled, serviceCIDR is not required and may be set to a
 		// default value which does not match the cluster configuration.
-		if !features.DefaultFeatureGate.Enabled(features.AntreaProxy) && c.serviceCIDR.Contains(destIP) {
-			return errors.New("using ClusterIP destination requires AntreaProxy feature enabled")
+		if !c.enableAntreaProxy && c.serviceCIDR.Contains(destIP) {
+			return errors.New("using ClusterIP destination requires AntreaProxy enabled")
 		}
 	}
 	return nil
 }
 
-func (c *Controller) preparePacket(tf *crdv1alpha1.Traceflow, intf *interfacestore.InterfaceConfig, receiverOnly bool) (*binding.Packet, error) {
+func (c *Controller) preparePacket(tf *crdv1beta1.Traceflow, intf *interfacestore.InterfaceConfig, receiverOnly bool) (*binding.Packet, error) {
 	liveTraffic := tf.Spec.LiveTraffic
 	isICMP := false
 	packet := new(binding.Packet)
@@ -492,11 +489,15 @@ func (c *Controller) preparePacket(tf *crdv1alpha1.Traceflow, intf *interfacesto
 		} else if packet.DestinationIP.To4() != nil {
 			return nil, errors.New("destination Service does not have an IPv6 ClusterIP")
 		}
-
 		if !liveTraffic {
-			// Set the SYN flag. In encap mode, the SYN flag is only required for
-			// Service traffic, but probably we should always set it.
-			packet.TCPFlags = 2
+			switch dstSvc.Spec.Ports[0].Protocol {
+			case corev1.ProtocolTCP:
+				packet.IPProto = protocol.Type_TCP
+				packet.TCPFlags = uint8(2)
+			case corev1.ProtocolUDP:
+				packet.IPProto = protocol.Type_UDP
+			}
+			packet.DestinationPort = uint16(dstSvc.Spec.Ports[0].Port)
 		}
 	} else if !liveTraffic {
 		return nil, errors.New("destination is not specified")
@@ -513,8 +514,10 @@ func (c *Controller) preparePacket(tf *crdv1alpha1.Traceflow, intf *interfacesto
 			packet.TTL = uint8(tf.Spec.Packet.IPv6Header.HopLimit)
 			packet.IPFlags = 0
 		}
-	} else {
-		packet.IPProto = uint8(tf.Spec.Packet.IPHeader.Protocol)
+	} else if tf.Spec.Packet.IPHeader != nil {
+		if tf.Spec.Packet.IPHeader.Protocol > 0 {
+			packet.IPProto = uint8(tf.Spec.Packet.IPHeader.Protocol)
+		}
 		if !liveTraffic {
 			packet.TTL = uint8(tf.Spec.Packet.IPHeader.TTL)
 			packet.IPFlags = uint16(tf.Spec.Packet.IPHeader.Flags)
@@ -529,15 +532,24 @@ func (c *Controller) preparePacket(tf *crdv1alpha1.Traceflow, intf *interfacesto
 		packet.IPProto = protocol.Type_TCP
 		packet.SourcePort = uint16(tf.Spec.Packet.TransportHeader.TCP.SrcPort)
 		packet.DestinationPort = uint16(tf.Spec.Packet.TransportHeader.TCP.DstPort)
-		if tf.Spec.Packet.TransportHeader.TCP.Flags != 0 {
-			packet.TCPFlags = uint8(tf.Spec.Packet.TransportHeader.TCP.Flags)
+		if tf.Spec.Packet.TransportHeader.TCP.Flags != nil {
+			packet.TCPFlags = uint8(*tf.Spec.Packet.TransportHeader.TCP.Flags)
+		}
+		if !liveTraffic {
+			if tf.Spec.Packet.TransportHeader.TCP.Flags == nil {
+				packet.TCPFlags = uint8(2)
+			} else {
+				packet.TCPFlags = uint8(*tf.Spec.Packet.TransportHeader.TCP.Flags)
+			}
 		}
 	} else if tf.Spec.Packet.TransportHeader.UDP != nil {
 		packet.IPProto = protocol.Type_UDP
+		packet.TCPFlags = uint8(0)
 		packet.SourcePort = uint16(tf.Spec.Packet.TransportHeader.UDP.SrcPort)
 		packet.DestinationPort = uint16(tf.Spec.Packet.TransportHeader.UDP.DstPort)
 	} else if tf.Spec.Packet.TransportHeader.ICMP != nil {
 		isICMP = true
+		packet.TCPFlags = uint8(0)
 		if !liveTraffic {
 			packet.ICMPEchoID = uint16(tf.Spec.Packet.TransportHeader.ICMP.ID)
 			packet.ICMPEchoSeq = uint16(tf.Spec.Packet.TransportHeader.ICMP.Sequence)
@@ -568,40 +580,30 @@ func (c *Controller) preparePacket(tf *crdv1alpha1.Traceflow, intf *interfacesto
 	return packet, nil
 }
 
-func (c *Controller) errorTraceflowCRD(tf *crdv1alpha1.Traceflow, reason string) (*crdv1alpha1.Traceflow, error) {
-	tf.Status.Phase = crdv1alpha1.Failed
+func (c *Controller) errorTraceflowCRD(tf *crdv1beta1.Traceflow, reason string) (*crdv1beta1.Traceflow, error) {
+	tf.Status.Phase = crdv1beta1.Failed
 
 	type Traceflow struct {
-		Status crdv1alpha1.TraceflowStatus `json:"status,omitempty"`
+		Status crdv1beta1.TraceflowStatus `json:"status,omitempty"`
 	}
-	patchData := Traceflow{Status: crdv1alpha1.TraceflowStatus{Phase: tf.Status.Phase, Reason: reason}}
+	patchData := Traceflow{Status: crdv1beta1.TraceflowStatus{Phase: tf.Status.Phase, Reason: reason}}
 	payloads, _ := json.Marshal(patchData)
-	return c.traceflowClient.CrdV1alpha1().Traceflows().Patch(context.TODO(), tf.Name, types.MergePatchType, payloads, metav1.PatchOptions{}, "status")
-}
-
-// Delete Traceflow from cache.
-func (c *Controller) deleteTraceflowState(tfName string) *traceflowState {
-	c.runningTraceflowsMutex.Lock()
-	defer c.runningTraceflowsMutex.Unlock()
-	// Controller could have deallocated the tag and cleared the DataplaneTag
-	// field in the Traceflow Status, so try looking up the tag from the
-	// cache by Traceflow name.
-	for tag, tfState := range c.runningTraceflows {
-		if tfName == tfState.name {
-			delete(c.runningTraceflows, tag)
-			return tfState
-		}
-	}
-	return nil
+	return c.crdClient.CrdV1beta1().Traceflows().Patch(context.TODO(), tf.Name, types.MergePatchType, payloads, metav1.PatchOptions{}, "status")
 }
 
 // Delete Traceflow state and OVS flows.
 func (c *Controller) cleanupTraceflow(tfName string) {
-	tfState := c.deleteTraceflowState(tfName)
-	if tfState != nil {
-		err := c.ofClient.UninstallTraceflowFlows(tfState.tag)
-		if err != nil {
-			klog.Errorf("Failed to uninstall Traceflow %s flows: %v", tfName, err)
+	c.runningTraceflowsMutex.Lock()
+	defer c.runningTraceflowsMutex.Unlock()
+	for tag, tfState := range c.runningTraceflows {
+		if tfName == tfState.name {
+			// This must be executed before deleting the tag from runningTraceflows, otherwise it may uninstall another
+			// Traceflow's flows if the tag is reassigned.
+			if err := c.ofClient.UninstallTraceflowFlows(uint8(tag)); err != nil {
+				klog.ErrorS(err, "Failed to uninstall Traceflow flows", "Traceflow", tfName, "state", tfState)
+			}
+			delete(c.runningTraceflows, tag)
+			break
 		}
 	}
 }

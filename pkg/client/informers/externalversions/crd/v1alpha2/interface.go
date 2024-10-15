@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,14 +22,8 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
-	// ClusterGroups returns a ClusterGroupInformer.
-	ClusterGroups() ClusterGroupInformer
-	// Egresses returns a EgressInformer.
-	Egresses() EgressInformer
 	// ExternalEntities returns a ExternalEntityInformer.
 	ExternalEntities() ExternalEntityInformer
-	// ExternalIPPools returns a ExternalIPPoolInformer.
-	ExternalIPPools() ExternalIPPoolInformer
 	// IPPools returns a IPPoolInformer.
 	IPPools() IPPoolInformer
 	// TrafficControls returns a TrafficControlInformer.
@@ -47,24 +41,9 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
-// ClusterGroups returns a ClusterGroupInformer.
-func (v *version) ClusterGroups() ClusterGroupInformer {
-	return &clusterGroupInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
-}
-
-// Egresses returns a EgressInformer.
-func (v *version) Egresses() EgressInformer {
-	return &egressInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
-}
-
 // ExternalEntities returns a ExternalEntityInformer.
 func (v *version) ExternalEntities() ExternalEntityInformer {
 	return &externalEntityInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
-}
-
-// ExternalIPPools returns a ExternalIPPoolInformer.
-func (v *version) ExternalIPPools() ExternalIPPoolInformer {
-	return &externalIPPoolInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // IPPools returns a IPPoolInformer.

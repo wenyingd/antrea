@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,16 +22,14 @@ import (
 
 // Interface provides access to all the informers in this group version.
 type Interface interface {
-	// ClusterNetworkPolicies returns a ClusterNetworkPolicyInformer.
-	ClusterNetworkPolicies() ClusterNetworkPolicyInformer
+	// BGPPolicies returns a BGPPolicyInformer.
+	BGPPolicies() BGPPolicyInformer
 	// ExternalNodes returns a ExternalNodeInformer.
 	ExternalNodes() ExternalNodeInformer
-	// NetworkPolicies returns a NetworkPolicyInformer.
-	NetworkPolicies() NetworkPolicyInformer
-	// Tiers returns a TierInformer.
-	Tiers() TierInformer
-	// Traceflows returns a TraceflowInformer.
-	Traceflows() TraceflowInformer
+	// NodeLatencyMonitors returns a NodeLatencyMonitorInformer.
+	NodeLatencyMonitors() NodeLatencyMonitorInformer
+	// SupportBundleCollections returns a SupportBundleCollectionInformer.
+	SupportBundleCollections() SupportBundleCollectionInformer
 }
 
 type version struct {
@@ -45,9 +43,9 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 	return &version{factory: f, namespace: namespace, tweakListOptions: tweakListOptions}
 }
 
-// ClusterNetworkPolicies returns a ClusterNetworkPolicyInformer.
-func (v *version) ClusterNetworkPolicies() ClusterNetworkPolicyInformer {
-	return &clusterNetworkPolicyInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+// BGPPolicies returns a BGPPolicyInformer.
+func (v *version) BGPPolicies() BGPPolicyInformer {
+	return &bGPPolicyInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // ExternalNodes returns a ExternalNodeInformer.
@@ -55,17 +53,12 @@ func (v *version) ExternalNodes() ExternalNodeInformer {
 	return &externalNodeInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
-// NetworkPolicies returns a NetworkPolicyInformer.
-func (v *version) NetworkPolicies() NetworkPolicyInformer {
-	return &networkPolicyInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+// NodeLatencyMonitors returns a NodeLatencyMonitorInformer.
+func (v *version) NodeLatencyMonitors() NodeLatencyMonitorInformer {
+	return &nodeLatencyMonitorInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
-// Tiers returns a TierInformer.
-func (v *version) Tiers() TierInformer {
-	return &tierInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
-}
-
-// Traceflows returns a TraceflowInformer.
-func (v *version) Traceflows() TraceflowInformer {
-	return &traceflowInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+// SupportBundleCollections returns a SupportBundleCollectionInformer.
+func (v *version) SupportBundleCollections() SupportBundleCollectionInformer {
+	return &supportBundleCollectionInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

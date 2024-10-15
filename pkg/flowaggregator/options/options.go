@@ -19,10 +19,9 @@ import (
 	"net"
 	"time"
 
-	"gopkg.in/yaml.v2"
-
 	flowaggregatorconfig "antrea.io/antrea/pkg/config/flowaggregator"
 	"antrea.io/antrea/pkg/util/flowexport"
+	"antrea.io/antrea/pkg/util/yaml"
 )
 
 type Options struct {
@@ -38,13 +37,17 @@ type Options struct {
 	ExternalFlowCollectorAddr string
 	// IPFIX flow collector transport protocol
 	ExternalFlowCollectorProto string
+	//  Template retransmission interval when using the UDP protocol to export records.
+	TemplateRefreshTimeout time.Duration
 	// clickHouseCommitInterval flow records batch commit interval to clickhouse in the flow aggregator
 	ClickHouseCommitInterval time.Duration
+	// Flow records batch upload interval from flow aggregator to S3 bucket
+	S3UploadInterval time.Duration
 }
 
 func LoadConfig(configBytes []byte) (*Options, error) {
 	var opt Options
-	if err := yaml.UnmarshalStrict(configBytes, &opt.Config); err != nil {
+	if err := yaml.UnmarshalLenient(configBytes, &opt.Config); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal FlowAggregator config from ConfigMap: %v", err)
 	}
 	flowaggregatorconfig.SetConfigDefaults(opt.Config)
@@ -52,8 +55,11 @@ func LoadConfig(configBytes []byte) (*Options, error) {
 	if opt.Config.FlowCollector.Enable && opt.Config.FlowCollector.Address == "" {
 		return nil, fmt.Errorf("external flow collector enabled without providing address")
 	}
-	if !opt.Config.FlowCollector.Enable && !opt.Config.ClickHouse.Enable {
-		return nil, fmt.Errorf("external flow collector or ClickHouse should be configured")
+	if opt.Config.S3Uploader.Enable && opt.Config.S3Uploader.BucketName == "" {
+		return nil, fmt.Errorf("s3Uploader enabled without specifying bucket name")
+	}
+	if !opt.Config.FlowCollector.Enable && !opt.Config.ClickHouse.Enable && !opt.Config.S3Uploader.Enable && !opt.Config.FlowLogger.Enable {
+		return nil, fmt.Errorf("external flow collector or ClickHouse or S3Uploader should be configured")
 	}
 	// Validate common parameters
 	var err error
@@ -83,6 +89,14 @@ func LoadConfig(configBytes []byte) (*Options, error) {
 		if opt.Config.FlowCollector.RecordFormat != "IPFIX" && opt.Config.FlowCollector.RecordFormat != "JSON" {
 			return nil, fmt.Errorf("record format %s is not supported", opt.Config.FlowCollector.RecordFormat)
 		}
+
+		opt.TemplateRefreshTimeout, err = time.ParseDuration(opt.Config.FlowCollector.TemplateRefreshTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("templateRefreshTimeout is not a valid duration: %w", err)
+		}
+		if opt.TemplateRefreshTimeout < 0 {
+			return nil, fmt.Errorf("templateRefreshTimeout cannot be a negative duration")
+		}
 	}
 	// Validate clickhouse specific parameters
 	if opt.Config.ClickHouse.Enable {
@@ -91,8 +105,28 @@ func LoadConfig(configBytes []byte) (*Options, error) {
 			return nil, err
 		}
 		if opt.ClickHouseCommitInterval < flowaggregatorconfig.MinClickHouseCommitInterval {
-			return nil, fmt.Errorf("commitInterval %s is too small: shortest supported interval is %s",
+			return nil, fmt.Errorf("commitInterval %s is too small: shortest supported interval is %v",
 				opt.Config.ClickHouse.CommitInterval, flowaggregatorconfig.MinClickHouseCommitInterval)
+		}
+	}
+	// Validate S3Uploader specific parameters
+	if opt.Config.S3Uploader.Enable {
+		if opt.Config.S3Uploader.RecordFormat != "CSV" {
+			return nil, fmt.Errorf("record format %s is not supported", opt.Config.S3Uploader.RecordFormat)
+		}
+		opt.S3UploadInterval, err = time.ParseDuration(opt.Config.S3Uploader.UploadInterval)
+		if err != nil {
+			return nil, err
+		}
+		if opt.S3UploadInterval < flowaggregatorconfig.MinS3CommitInterval {
+			return nil, fmt.Errorf("uploadInterval %s is too small: shortest supported interval is %v",
+				opt.Config.S3Uploader.UploadInterval, flowaggregatorconfig.MinS3CommitInterval)
+		}
+	}
+	// Validate FlowLogger specific parameters
+	if opt.Config.FlowLogger.Enable {
+		if opt.Config.FlowLogger.RecordFormat != "CSV" {
+			return nil, fmt.Errorf("record format %s is not supported", opt.Config.FlowLogger.RecordFormat)
 		}
 	}
 	return &opt, nil

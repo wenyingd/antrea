@@ -4,19 +4,22 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//	http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+// nolint: unused // a lot of this code is unused for Windows since the multicast feature is not implemented yet
 package multicast
 
 import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
@@ -32,14 +35,16 @@ const (
 	MulticastRecvBufferSize = 128
 )
 
-func newRouteClient(nodeconfig *config.NodeConfig, groupCache cache.Indexer, multicastSocket RouteInterface, multicastInterfaces sets.String, encapEnabled bool) *MRouteClient {
+func newRouteClient(nodeconfig *config.NodeConfig, groupCache cache.Indexer, multicastSocket RouteInterface, multicastInterfaces sets.Set[string], flexibleIPAMEnabled bool) *MRouteClient {
 	var m = &MRouteClient{
 		igmpMsgChan:         make(chan []byte, workerCount),
 		nodeConfig:          nodeconfig,
 		groupCache:          groupCache,
 		inboundRouteCache:   cache.NewIndexer(getMulticastInboundEntryKey, cache.Indexers{GroupNameIndexName: inboundGroupIndexFunc}),
-		multicastInterfaces: multicastInterfaces.List(),
+		multicastInterfaces: sets.List(multicastInterfaces),
+		outboundRouteCache:  cache.NewIndexer(getMulticastOutboundEntryKey, cache.Indexers{}),
 		socket:              multicastSocket,
+		flexibleIPAMEnabled: flexibleIPAMEnabled,
 	}
 	return m
 }
@@ -72,11 +77,13 @@ type MRouteClient struct {
 	nodeConfig                *config.NodeConfig
 	multicastInterfaces       []string
 	inboundRouteCache         cache.Indexer
+	outboundRouteCache        cache.Indexer
 	groupCache                cache.Indexer
 	socket                    RouteInterface
 	multicastInterfaceConfigs []multicastInterfaceConfig
 	internalInterfaceVIF      uint16
 	externalInterfaceVIFs     []uint16
+	flexibleIPAMEnabled       bool
 }
 
 // multicastInterfacesJoinMgroup allows multicast interfaces to join multicast group,
@@ -148,23 +155,48 @@ func (c *MRouteClient) deleteInboundMrouteEntryByGroup(group net.IP) (err error)
 	mEntries, _ := c.inboundRouteCache.ByIndex(GroupNameIndexName, group.String())
 	for _, route := range mEntries {
 		entry := route.(*inboundMulticastRouteEntry)
-		err := c.socket.DelMrouteEntry(net.ParseIP(entry.src), net.ParseIP(entry.group), entry.vif)
+		err := c.deleteInboundMRoute(entry)
 		if err != nil {
 			return err
 		}
-		c.inboundRouteCache.Delete(route)
 	}
+	return nil
+}
+
+func (c *MRouteClient) deleteInboundMRoute(mRoute *inboundMulticastRouteEntry) error {
+	err := c.socket.DelMrouteEntry(net.ParseIP(mRoute.src), net.ParseIP(mRoute.group), mRoute.vif)
+	if err != nil {
+		return err
+	}
+	c.inboundRouteCache.Delete(mRoute)
+	return nil
+}
+
+func (c *MRouteClient) deleteOutboundMRoute(mRoute *outboundMulticastRouteEntry) error {
+	err := c.socket.DelMrouteEntry(net.ParseIP(mRoute.src), net.ParseIP(mRoute.group), c.internalInterfaceVIF)
+	if err != nil {
+		return err
+	}
+	c.outboundRouteCache.Delete(mRoute)
 	return nil
 }
 
 // addOutboundMrouteEntry configures multicast route from Antrea gateway to all the multicast interfaces,
 // allowing multicast srcNode Pods to send multicast traffic to external.
-func (c *MRouteClient) addOutboundMrouteEntry(src net.IP, group net.IP) (err error) {
+func (c *MRouteClient) addOutboundMrouteEntry(src net.IP, group net.IP) error {
 	klog.V(2).InfoS("Adding outbound multicast route entry", "src", src, "group", group, "outboundVIFs", c.externalInterfaceVIFs)
-	err = c.socket.AddMrouteEntry(src, group, c.internalInterfaceVIF, c.externalInterfaceVIFs)
+	err := c.socket.AddMrouteEntry(src, group, c.internalInterfaceVIF, c.externalInterfaceVIFs)
 	if err != nil {
 		return err
 	}
+	routeEntry := &outboundMulticastRouteEntry{
+		multicastRouteEntry: multicastRouteEntry{
+			group:       group.String(),
+			src:         src.String(),
+			updatedTime: time.Now(),
+		},
+	}
+	c.outboundRouteCache.Add(routeEntry)
 	return nil
 }
 
@@ -177,32 +209,66 @@ func (c *MRouteClient) addInboundMrouteEntry(src net.IP, group net.IP, inboundVI
 		return err
 	}
 	routeEntry := &inboundMulticastRouteEntry{
-		group: group.String(),
-		src:   src.String(),
-		vif:   inboundVIF,
+		vif: inboundVIF,
+		multicastRouteEntry: multicastRouteEntry{
+			group:       group.String(),
+			src:         src.String(),
+			updatedTime: time.Now(),
+		},
 	}
 	c.inboundRouteCache.Add(routeEntry)
 	return nil
 }
 
-// inboundMulticastRouteEntry encodes the inbound multicast routing entry.
+// Field pktCount and updatedTime are used for removing stale multicast routes.
+type multicastRouteEntry struct {
+	group       string
+	src         string
+	pktCount    uint32
+	updatedTime time.Time
+}
+
+// outboundMulticastRouteEntry encodes the outbound multicast routing entry.
 // For example,
-// type inboundMulticastRouteEntry struct {
-//	group "226.94.9.9"
-//	src   "10.0.0.55"
-//	vif   vif of wlan0
-// } encodes the multicast route entry from wlan0 to Antrea gateway
+//
+//	type outboundMulticastRouteEntry struct {
+//		group "226.94.9.9"
+//		src   "10.0.0.55"
+//	} encodes the multicast route entry from Antrea gateway to multicast interfaces
+//
+// (10.0.0.55,226.94.9.9)           Iif: antrea-gw0      Oifs: list of multicastInterfaces.
+//
+// The iif is always Antrea gateway and oifs are always outbound interfaces
+// so we do not put them in the struct.
+type outboundMulticastRouteEntry struct {
+	multicastRouteEntry
+}
+
+// inboundMulticastRouteEntry encodes the inbound multicast routing entry.
+// It has extra field vif to represent inbound interface VIF.
+// For example,
+//
+//	type inboundMulticastRouteEntry struct {
+//		group "226.94.9.9"
+//		src   "10.0.0.55"
+//		vif   vif of wlan0
+//	} encodes the multicast route entry from wlan0 to Antrea gateway
+//
 // (10.0.0.55,226.94.9.9)           Iif: wlan0      Oifs: antrea-gw0.
 // The oif is always Antrea gateway so we do not put it in the struct.
 type inboundMulticastRouteEntry struct {
-	group string
-	src   string
-	vif   uint16
+	multicastRouteEntry
+	vif uint16
 }
 
 func getMulticastInboundEntryKey(obj interface{}) (string, error) {
 	entry := obj.(*inboundMulticastRouteEntry)
 	return entry.group + "/" + entry.src + "/" + fmt.Sprint(entry.vif), nil
+}
+
+func getMulticastOutboundEntryKey(obj interface{}) (string, error) {
+	entry := obj.(*outboundMulticastRouteEntry)
+	return entry.group + "/" + entry.src, nil
 }
 
 func inboundGroupIndexFunc(obj interface{}) ([]string, error) {
@@ -271,10 +337,12 @@ type RouteInterface interface {
 	MulticastInterfaceLeaveMgroup(mgroup net.IP, ifaceIP net.IP, ifaceName string) error
 	// AddMrouteEntry adds multicast route with specified source(src), multicast group IP(group),
 	// inbound multicast interface(iif) and outbound multicast interfaces(oifs).
-	AddMrouteEntry(src net.IP, group net.IP, iif uint16, oifs []uint16) (err error)
+	AddMrouteEntry(src net.IP, group net.IP, iif uint16, oifs []uint16) error
+	// GetMroutePacketCount returns the number of routed packets by the multicast route entry.
+	GetMroutePacketCount(src net.IP, group net.IP) (uint32, error)
 	// DelMrouteEntry deletes multicast route with specified source(src), multicast group IP(group),
 	// inbound multicast interface(iif).
-	DelMrouteEntry(src net.IP, group net.IP, iif uint16) (err error)
+	DelMrouteEntry(src net.IP, group net.IP, iif uint16) error
 	// FlushMRoute flushes static multicast routing entries.
 	FlushMRoute()
 	// GetFD returns socket file descriptor.

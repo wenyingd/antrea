@@ -51,6 +51,8 @@ import (
 // Provider is the interface provided by proxier implementations.
 type Provider interface {
 	config.EndpointsHandler
+	config.EndpointSliceHandler
+	config.NodeHandler
 	config.ServiceHandler
 
 	// SyncLoop runs periodic work.
@@ -100,14 +102,24 @@ type ServicePort interface {
 	HealthCheckNodePort() int
 	// GetNodePort returns a service Node port if present. If return 0, it means not present.
 	NodePort() int
-	// NodeLocalExternal returns if a service has only node local endpoints for external traffic.
-	NodeLocalExternal() bool
-	// NodeLocalInternal returns if a service has only node local endpoints for internal traffic.
-	NodeLocalInternal() bool
+	// ExternalPolicyLocal returns if a service has only node local endpoints for external traffic.
+	ExternalPolicyLocal() bool
+	// InternalPolicyLocal returns if a service has only node local endpoints for internal traffic.
+	InternalPolicyLocal() bool
 	// InternalTrafficPolicy returns service InternalTrafficPolicy
 	InternalTrafficPolicy() *v1.ServiceInternalTrafficPolicyType
-	// HintsAnnotation returns the value of the v1.AnnotationTopologyAwareHints annotation.
+	// HintsAnnotation returns the value of the v1.DeprecatedAnnotationTopologyAwareHints annotation or
+	// service.kubernetes.io/topology-mode annotation.
 	HintsAnnotation() string
+	// ExternallyAccessible returns true if the service port is reachable via something
+	// other than ClusterIP (NodePort/ExternalIP/LoadBalancer)
+	ExternallyAccessible() bool
+	// UsesClusterEndpoints returns true if the service port ever sends traffic to
+	// endpoints based on "Cluster" traffic policy
+	UsesClusterEndpoints() bool
+	// UsesLocalEndpoints returns true if the service port ever sends traffic to
+	// endpoints based on "Local" traffic policy
+	UsesLocalEndpoints() bool
 }
 
 // Endpoint in an interface which abstracts information about an endpoint.
@@ -127,14 +139,14 @@ type Endpoint interface {
 	// This is only set when watching EndpointSlices. If using Endpoints, this is always
 	// true since only ready endpoints are read from Endpoints.
 	IsServing() bool
-	// IsTerminating retruns true if an endpoint is terminating. For pods,
+	// IsTerminating returns true if an endpoint is terminating. For pods,
 	// that is any pod with a deletion timestamp.
 	// This is only set when watching EndpointSlices. If using Endpoints, this is always
 	// false since terminating endpoints are always excluded from Endpoints.
 	IsTerminating() bool
-	// GetZoneHint returns the zone hint for the endpoint. This is based on
+	// GetZoneHints returns the zone hint for the endpoint. This is based on
 	// endpoint.hints.forZones[0].name in the EndpointSlice API.
-	GetZoneHints() sets.String
+	GetZoneHints() sets.Set[string]
 	// IP returns IP part of the endpoint.
 	IP() string
 	// Port returns the Port part of the endpoint.

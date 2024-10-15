@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -28,20 +29,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	multiclusterv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
+	mcv1alpha1 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha1"
+	mcv1alpha2 "antrea.io/antrea/multicluster/apis/multicluster/v1alpha2"
 )
 
 //+kubebuilder:webhook:path=/validate-multicluster-crd-antrea-io-v1alpha1-memberclusterannounce,mutating=false,failurePolicy=fail,sideEffects=None,groups=multicluster.crd.antrea.io,resources=memberclusterannounces,verbs=create;update,versions=v1alpha1,name=vmemberclusterannounce.kb.io,admissionReviewVersions={v1,v1beta1}
 
 type memberClusterAnnounceValidator struct {
 	Client    client.Client
-	decoder   *admission.Decoder
+	decoder   admission.Decoder
 	namespace string
 }
 
 // Handle handles admission requests.
 func (v *memberClusterAnnounceValidator) Handle(ctx context.Context, req admission.Request) admission.Response {
-	memberClusterAnnounce := &multiclusterv1alpha1.MemberClusterAnnounce{}
+	memberClusterAnnounce := &mcv1alpha1.MemberClusterAnnounce{}
 	e := v.decoder.Decode(req, memberClusterAnnounce)
 	if e != nil {
 		klog.ErrorS(e, "Error while decoding")
@@ -61,7 +63,7 @@ func (v *memberClusterAnnounceValidator) Handle(ctx context.Context, req admissi
 		return admission.Errored(http.StatusPreconditionFailed, err)
 	}
 
-	var newObj, oldObj *multiclusterv1alpha1.MemberClusterAnnounce
+	var newObj, oldObj *mcv1alpha1.MemberClusterAnnounce
 	if req.Object.Raw != nil {
 		if err := json.Unmarshal(req.Object.Raw, &newObj); err != nil {
 			klog.ErrorS(err, "Error while decoding new MemberClusterAnnounce", "MemberClusterAnnounce", klog.KObj(memberClusterAnnounce))
@@ -78,15 +80,15 @@ func (v *memberClusterAnnounceValidator) Handle(ctx context.Context, req admissi
 	switch req.Operation {
 	case admissionv1.Create:
 		// Read the ClusterSet info
-		clusterSetList := &multiclusterv1alpha1.ClusterSetList{}
+		clusterSetList := &mcv1alpha2.ClusterSetList{}
 		if err := v.Client.List(context.TODO(), clusterSetList, client.InNamespace(v.namespace)); err != nil {
 			klog.ErrorS(err, "Error reading ClusterSet", "Namespace", v.namespace)
 			return admission.Errored(http.StatusPreconditionFailed, err)
 		}
 
 		if len(clusterSetList.Items) == 0 {
-			klog.ErrorS(err, "No ClusterSet found", "Namespace", v.namespace)
-			return admission.Errored(http.StatusPreconditionFailed, err)
+			klog.ErrorS(nil, "No ClusterSet found", "Namespace", v.namespace)
+			return admission.Errored(http.StatusPreconditionFailed, fmt.Errorf("no ClusterSet found in Namespace %s", v.namespace))
 		}
 		clusterSet := clusterSetList.Items[0]
 		if clusterSet.Name != memberClusterAnnounce.ClusterSetID {
@@ -105,9 +107,4 @@ func (v *memberClusterAnnounceValidator) Handle(ctx context.Context, req admissi
 	default:
 		return admission.Allowed("")
 	}
-}
-
-func (v *memberClusterAnnounceValidator) InjectDecoder(d *admission.Decoder) error {
-	v.decoder = d
-	return nil
 }

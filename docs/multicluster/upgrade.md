@@ -11,11 +11,11 @@ The goal is to support 'graceful' upgrade. Multi-cluster upgrade will not have d
 to data-plane of member clusters, but there can be downtime of processing new configurations
 when individual components restart:
 
-- During Leader Controller restart, new member cluster, ClusterSet, ClusterClaim or
-  ResourceExport will not be processed. This is because the Controller also runs the validation
-  webhooks for MemberClusterAnnounce, ClusterSet, ClusterClaim and ResourceExport.
-- During Member Controller restart, new ClusterSet or ClusterClaim will not be processed.
-  This is because the Controller runs the validation webhooks for ClusterSet and ClusterClaim.
+- During Leader Controller restart, a new member cluster, ClusterSet or ResourceExport will
+  not be processed. This is because the Controller also runs the validation webhooks for
+  MemberClusterAnnounce, ClusterSet and ResourceExport.
+- During Member Controller restart, a new ClusterSet will not be processed, this is because
+  the Controller runs the validation webhooks for ClusterSet.
 
 Our goal is to support version skew for different Antrea Multi-cluster components, but the
 Multi-cluster feature is still in Alpha version, and the API is not stable yet. Our recommendation
@@ -36,6 +36,41 @@ for the feature in new version.
 
 It should have no impact during upgrade to those imported resources like Service, Endpoints
 or AntreaClusterNetworkPolicy.
+
+## Upgrade from a version prior to v1.13
+
+Prior to Antrea v1.13, the `ClusterClaim` CRD is used to define both the local Cluster ID and
+the ClusterSet ID. Since Antrea v1.13, the `ClusterClaim` CRD is removed, and the `ClusterSet`
+CRD solely defines a ClusterSet. The name of a `ClusterSet` CR must match the ClusterSet ID,
+and a new `clusterID` field specifies the local Cluster ID.
+
+After upgrading Antrea Multi-cluster Controller from a version older than v1.13, the new version
+Multi-cluster Controller can still recognize and work with the old version `ClusterClaim` and
+`ClusterSet` CRs. However, we still suggest updating the `ClusterSet` CR to the new version after
+upgrading Multi-cluster Controller. You just need to update the existing `ClusterSet` CR and add the
+right `clusterID` to the spec. An example `ClusterSet` CR is like the following:
+
+```yaml
+apiVersion: multicluster.crd.antrea.io/v1alpha2
+kind: ClusterSet
+metadata:
+  name: test-clusterset # This value must match the ClusterSet ID.
+  namespace: kube-system
+spec:
+  clusterID: test-cluster-north # The new added field since v1.13.
+  leaders:
+    - clusterID: test-cluster-north
+      secret: "member-north-token"
+      server: "https://172.18.0.1:6443"
+  namespace: antrea-multicluster
+```
+
+You may also delete the `ClusterClaim` CRD after the upgrade, and then all existing `ClusterClaim`
+CRs will be removed automatically after the CRD is deleted.
+
+```bash
+kubectl delete crds clusterclaims.multicluster.crd.antrea.io
+```
 
 ## APIs deprecation policy
 

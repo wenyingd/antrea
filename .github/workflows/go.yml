@@ -11,17 +11,15 @@ on:
     - release-*
     - feature/*
 
-env:
-  go-cache-name: go
-
 jobs:
   check-changes:
     name: Check whether tests need to be run based on diff
     runs-on: [ubuntu-latest]
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        show-progress: false
     - uses: antrea-io/has-changes@v2
       id: check_diff
       with:
@@ -38,71 +36,51 @@ jobs:
     name: Unit test (ubuntu-latest)
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
-    - uses: actions/cache@v3
+      uses: actions/checkout@v4
       with:
-        # In order:
-        # * Module download cache
-        # * Build cache (Linux)
-        # * Build cache (Mac)
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-          ~/Library/Caches/go-build
-          %LocalAppData%\go-build
-        key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ env.go-cache-name }}-
+        show-progress: false
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     - name: Run unit tests
       run: make test-unit
     - name: Codecov
-      uses: codecov/codecov-action@v3
+      uses: codecov/codecov-action@v4
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         file: .coverage/coverage-unit.txt
+        disable_search: true
         flags: unit-tests
         name: codecov-unit-test
+        fail_ci_if_error: ${{ github.event_name == 'push' }}
 
   test-unit-windows:
     needs: check-changes
     if: ${{ needs.check-changes.outputs.has_changes == 'yes' }}
-    name: Unit test (windows-2019)
-    runs-on: [windows-2019]
+    name: Unit test (windows-2022)
+    runs-on: [windows-2022]
     steps:
-      - name: Set up Go 1.17
-        uses: actions/setup-go@v3
-        with:
-          go-version: 1.17
       - name: Check-out code
-        uses: actions/checkout@v3
-      - uses: actions/cache@v3
+        uses: actions/checkout@v4
         with:
-          # In order:
-          # * Module download cache
-          # * Build cache (Linux)
-          # * Build cache (Mac)
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~/Library/Caches/go-build
-            %LocalAppData%\go-build
-          key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ env.go-cache-name }}-
+          show-progress: false
+      - name: Set up Go using version from go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
       - name: Run unit tests
         run: make test-unit
       - name: Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: .coverage/coverage-unit.txt
+          disable_search: true
           flags: unit-tests
           name: codecov-unit-test
+          fail_ci_if_error: ${{ github.event_name == 'push' }}
 
   test-integration:
     needs: check-changes
@@ -110,26 +88,14 @@ jobs:
     name: Integration test
     runs-on: [ubuntu-latest]
     steps:
-      - name: Set up Go 1.17
-        uses: actions/setup-go@v3
-        with:
-          go-version: 1.17
       - name: Check-out code
-        uses: actions/checkout@v3
-      - uses: actions/cache@v3
+        uses: actions/checkout@v4
         with:
-          # In order:
-          # * Module download cache
-          # * Build cache (Linux)
-          # * Build cache (Mac)
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~/Library/Caches/go-build
-            %LocalAppData%\go-build
-          key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ env.go-cache-name }}-
+          show-progress: false
+      - name: Set up Go using version from go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
       - name: Run integration tests
         run: |
           ./build/images/ovs/build.sh
@@ -139,12 +105,14 @@ jobs:
           cd multicluster
           make test-integration
       - name: Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: .coverage/coverage-integration.txt,multicluster/.coverage/coverage-integration.txt
+          disable_search: true
           flags: integration-tests
           name: codecov-integration-test
+          fail_ci_if_error: ${{ github.event_name == 'push' }}
 
   # golangci-lint-ubuntu and golangci-lint-macos are intentionally not merged into one job with os matrix, otherwise the
   # job wouldn't be expanded if it's skipped and the report of the required check would be missing.
@@ -155,30 +123,15 @@ jobs:
     name: Golangci-lint (ubuntu-latest)
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
-    - uses: actions/cache@v3
+      uses: actions/checkout@v4
       with:
-        # In order:
-        # * Module download cache
-        # * Build cache (Linux)
-        # * Build cache (Mac)
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-          ~/Library/Caches/go-build
-          %LocalAppData%\go-build
-        key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ env.go-cache-name }}-
+        show-progress: false
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     - name: Run golangci-lint
-      run: make golangci
-    - name: Run golangci-lint for netpol
-      working-directory: hack/netpol
       run: make golangci
 
   golangci-lint-macos:
@@ -187,30 +140,15 @@ jobs:
     name: Golangci-lint (macos-latest)
     runs-on: [macos-latest]
     steps:
-      - name: Set up Go 1.17
-        uses: actions/setup-go@v3
-        with:
-          go-version: 1.17
       - name: Check-out code
-        uses: actions/checkout@v3
-      - uses: actions/cache@v3
+        uses: actions/checkout@v4
         with:
-          # In order:
-          # * Module download cache
-          # * Build cache (Linux)
-          # * Build cache (Mac)
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~/Library/Caches/go-build
-            %LocalAppData%\go-build
-          key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ env.go-cache-name }}-
+          show-progress: false
+      - name: Set up Go using version from go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
       - name: Run golangci-lint
-        run: make golangci
-      - name: Run golangci-lint for netpol
-        working-directory: hack/netpol
         run: make golangci
 
   bin:
@@ -219,38 +157,36 @@ jobs:
     name: Build Antrea and antctl binaries
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
-    - uses: actions/cache@v3
+      uses: actions/checkout@v4
       with:
-        # In order:
-        # * Module download cache
-        # * Build cache (Linux)
-        # * Build cache (Mac)
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-          ~/Library/Caches/go-build
-          %LocalAppData%\go-build
-        key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ env.go-cache-name }}-
+        show-progress: false
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     - name: Build Antrea binaries for amd64
       run: GOARCH=amd64 make bin
     - name: Build Antrea binaries for arm64
       run: GOARCH=arm64 make bin
     - name: Build Antrea binaries for arm
       run: GOARCH=arm make bin
-    - name: Build antctl binaries
-      run: make antctl
+    - name: Build antctl binary for linux amd64
+      run: GOOS=linux GOARCH=amd64 make antctl
+    - name: Build antctl binary for linux arm64
+      run: GOOS=linux GOARCH=arm64 make antctl
+    - name: Build antctl binary for linux arm
+      run: GOOS=linux GOARCH=arm make antctl
+    - name: Build antctl binary for windows amd64
+      run: GOOS=windows GOARCH=amd64 make antctl
+    - name: Build antctl binary for darwin amd64
+      run: GOOS=darwin GOARCH=amd64 make antctl
+    - name: Build antctl binary for darwin arm64
+      run: GOOS=darwin GOARCH=arm64 make antctl
     - name: Build Multi-cluster binaries
       run: |
         cd multicluster
-        make build
+        make bin
 
   windows-bin:
     needs: check-changes
@@ -258,26 +194,14 @@ jobs:
     name: Build Antrea Windows binaries
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
-    - uses: actions/cache@v3
+      uses: actions/checkout@v4
       with:
-        # In order:
-        # * Module download cache
-        # * Build cache (Linux)
-        # * Build cache (Mac)
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-          ~/Library/Caches/go-build
-          %LocalAppData%\go-build
-        key: ${{ runner.os }}-${{ env.go-cache-name }}-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-${{ env.go-cache-name }}-
+        show-progress: false
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     - name: Build Antrea windows binaries
       run: make windows-bin
 
@@ -287,12 +211,14 @@ jobs:
     name: Check tidy, code generation and manifest
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+      with:
+        show-progress: false
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     # tidy check need to be run before code generation which will regenerate codes.
     - name: Check tidy
       run: make test-tidy
@@ -307,12 +233,14 @@ jobs:
     name: Verify docs and spelling
     runs-on: [ubuntu-latest]
     steps:
-    - name: Set up Go 1.17
-      uses: actions/setup-go@v3
-      with:
-        go-version: 1.17
     - name: Check-out code
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
+      with:
+        show-progress: false
+    - name: Set up Go using version from go.mod
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: 'go.mod'
     - name: Run verify scripts
       run: make verify
     - name: Checking for broken Markdown links
@@ -325,7 +253,7 @@ jobs:
         config-file: 'hack/.md_links_config.json'
     - name: Markdownlint
       run: |
-        sudo npm install -g markdownlint-cli@0.31.1
+        sudo npm install -g markdownlint-cli@0.38.0
         make markdownlint
     - name: Checking whether autogenerated Helm chart documentation is up-to-date
       working-directory: build/charts/
@@ -343,11 +271,13 @@ jobs:
     name: Go benchmark test
     runs-on: [ubuntu-latest]
     steps:
-      - name: Set up Go 1.17
-        uses: actions/setup-go@v3
-        with:
-          go-version: 1.17
       - name: Check-out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+        with:
+          show-progress: false
+      - name: Set up Go using version from go.mod
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
       - name: Run Go benchmark test
         run: go test -run '^$' -bench . -benchtime 1x -timeout 10m -cpu 4 -v -benchmem ./pkg/...

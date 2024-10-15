@@ -22,17 +22,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 type eventReceiver struct {
-	receivedEvents sets.String
+	receivedEvents sets.Set[string]
 	mutex          sync.RWMutex
 }
 
 func newEventReceiver() *eventReceiver {
 	return &eventReceiver{
-		receivedEvents: sets.NewString(),
+		receivedEvents: sets.New[string](),
 	}
 }
 
@@ -42,7 +41,7 @@ func (r *eventReceiver) receive(e interface{}) {
 	r.receivedEvents.Insert(e.(string))
 }
 
-func (r *eventReceiver) received() sets.String {
+func (r *eventReceiver) received() sets.Set[string] {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	// Return a copy to prevent race condition
@@ -62,26 +61,21 @@ func TestSubscribe(t *testing.T) {
 		eventReceivers = append(eventReceivers, receiver)
 	}
 
-	desiredEvents := sets.NewString()
+	desiredEvents := sets.New[string]()
 	for i := 0; i < 1000; i++ {
 		e := fmt.Sprintf("event-%d", i)
 		c.Notify(e)
 		desiredEvents.Insert(e)
 	}
 
-	var errReceiver int
-	var errReceivedEvents sets.String
-	assert.NoError(t, wait.PollImmediate(10*time.Millisecond, 100*time.Millisecond, func() (done bool, err error) {
+	assert.EventuallyWithT(t, func(t *assert.CollectT) {
 		for i, r := range eventReceivers {
 			receivedEvents := r.received()
-			if !receivedEvents.Equal(desiredEvents) {
-				errReceiver = i
-				errReceivedEvents = receivedEvents
-				return false, nil
+			if !assert.True(t, receivedEvents.Equal(desiredEvents), "Receiver %d failed to receive all events, expected %d events, got %d events", i, len(desiredEvents), len(receivedEvents)) {
+				return
 			}
 		}
-		return true, nil
-	}), "Receiver %d failed to receive all events, expected %d events, got %d events", errReceiver, len(desiredEvents), len(errReceivedEvents))
+	}, 500*time.Millisecond, 50*time.Millisecond, "Not all receivers received all events")
 }
 
 func TestNotify(t *testing.T) {

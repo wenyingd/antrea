@@ -6,6 +6,12 @@ metadata:
     app: antrea
 rules:
   - apiGroups:
+      - stats.antrea.io
+    resources:
+      - nodelatencystats
+    verbs:
+      - create
+  - apiGroups:
       - ""
     resources:
       - nodes
@@ -90,6 +96,20 @@ rules:
       - create
       - get
   - apiGroups:
+      - controlplane.antrea.io
+    resources:
+      - supportbundlecollections
+    verbs:
+      - get
+      - watch
+      - list
+  - apiGroups:
+      - controlplane.antrea.io
+    resources:
+      - supportbundlecollections/status
+    verbs:
+      - create
+  - apiGroups:
       - authentication.k8s.io
     resources:
       - tokenreviews
@@ -157,9 +177,11 @@ rules:
   - apiGroups:
       - crd.antrea.io
     resources:
+      - bgppolicies
       - externalippools
       - ippools
       - trafficcontrols
+      - nodelatencymonitors
     verbs:
       - get
       - watch
@@ -195,11 +217,31 @@ rules:
     - get
     - list
     - watch
+    - patch
   - apiGroups:
     - multicluster.crd.antrea.io
     resources:
     - clusterinfoimports
+    - labelidentities
     verbs:
     - get
     - list
     - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - antrea-bgp-passwords
+    verbs:
+      - get
+      - list
+      - watch

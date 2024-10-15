@@ -45,12 +45,12 @@ import (
 	"net"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
-	utilnet "k8s.io/utils/net"
-
 	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 )
 
 var (
@@ -67,8 +67,12 @@ type Resolver interface {
 }
 
 // ShouldSkipService checks if a given service should skip proxying
-func ShouldSkipService(service *v1.Service, skipServices sets.String) bool {
-	// if ClusterIP is "None" or empty, skip proxying
+func ShouldSkipService(service *v1.Service, skipServices sets.Set[string], serviceLabelSelector labels.Selector) bool {
+	// Skip proxying if the Service label doesn't match the serviceLabelSelector.
+	if !serviceLabelSelector.Matches(labels.Set(service.Labels)) {
+		return true
+	}
+	// If ClusterIP is "None" or empty, skip proxying
 	if service.Spec.ClusterIP == v1.ClusterIPNone || service.Spec.ClusterIP == "" {
 		klog.V(3).Infof("Skipping service %s in namespace %s due to clusterIP = %q", service.Name, service.Namespace, service.Spec.ClusterIP)
 		return true
@@ -193,7 +197,7 @@ func MapCIDRsByIPFamily(cidrStrings []string) map[v1.IPFamily][]string {
 	ipFamilyMap := map[v1.IPFamily][]string{}
 	for _, cidr := range cidrStrings {
 		// Handle only the valid CIDRs
-		if ipFamily, err := getIPFamilyFromCIDR(cidr); err == nil {
+		if ipFamily := getIPFamilyFromCIDR(cidr); ipFamily != v1.IPFamilyUnknown {
 			ipFamilyMap[ipFamily] = append(ipFamilyMap[ipFamily], cidr)
 		} else {
 			klog.Errorf("Skipping invalid cidr: %s", cidr)
@@ -202,13 +206,30 @@ func MapCIDRsByIPFamily(cidrStrings []string) map[v1.IPFamily][]string {
 	return ipFamilyMap
 }
 
-func getIPFamilyFromCIDR(cidrStr string) (v1.IPFamily, error) {
-	_, netCIDR, err := net.ParseCIDR(cidrStr)
-	if err != nil {
-		return "", ErrAddressNotAllowed
+// GetIPFamilyFromIP Returns the IP family of ipStr, or IPFamilyUnknown if ipStr can't be parsed as an IP
+func GetIPFamilyFromIP(ipStr string) v1.IPFamily {
+	return convertToV1IPFamily(utilnet.IPFamilyOfString(ipStr))
+}
+
+func getIPFamilyFromCIDR(cidrStr string) v1.IPFamily {
+	return convertToV1IPFamily(utilnet.IPFamilyOfCIDRString(cidrStr))
+}
+
+// Convert netutils.IPFamily to v1.IPFamily
+func convertToV1IPFamily(ipFamily utilnet.IPFamily) v1.IPFamily {
+	switch ipFamily {
+	case utilnet.IPv4:
+		return v1.IPv4Protocol
+	case utilnet.IPv6:
+		return v1.IPv6Protocol
 	}
-	if utilnet.IsIPv6CIDR(netCIDR) {
-		return v1.IPv6Protocol, nil
+
+	return v1.IPFamilyUnknown
+}
+
+func IsVIPMode(ing v1.LoadBalancerIngress) bool {
+	if ing.IPMode == nil {
+		return true
 	}
-	return v1.IPv4Protocol, nil
+	return *ing.IPMode == v1.LoadBalancerIPModeVIP
 }

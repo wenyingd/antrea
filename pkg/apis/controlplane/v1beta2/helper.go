@@ -14,11 +14,17 @@
 
 package v1beta2
 
-import "fmt"
+import (
+	"fmt"
+)
 
 func (r *NetworkPolicyReference) ToString() string {
 	if r.Type == AntreaClusterNetworkPolicy {
 		return fmt.Sprintf("%s:%s", r.Type, r.Name)
 	}
 	return fmt.Sprintf("%s:%s/%s", r.Type, r.Namespace, r.Name)
+}
+
+func IsSourceAntreaNativePolicy(npRef *NetworkPolicyReference) bool {
+	return npRef.Type == AntreaClusterNetworkPolicy || npRef.Type == AntreaNetworkPolicy
 }

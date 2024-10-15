@@ -15,6 +15,8 @@
 package openflow
 
 import (
+	"antrea.io/libOpenflow/openflow15"
+
 	"antrea.io/antrea/pkg/agent/config"
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
@@ -55,10 +57,16 @@ type feature interface {
 	getFeatureName() string
 	// getRequiredTables returns a slice of required tables of the feature.
 	getRequiredTables() []*Table
-	// initFlows returns the initial flows of the feature.
-	initFlows() []binding.Flow
-	// replayFlows returns the fixed and cached flows that need to be replayed after OVS is reconnected.
-	replayFlows() []binding.Flow
+	// initGroups returns the OpenFlow groups of the feature needed in the initialization.
+	initGroups() []binding.OFEntry
+	// initFlows returns the Openflow messages of initial flows of the feature.
+	initFlows() []*openflow15.FlowMod
+	// replayMeters returns the fixed and cached Openflow meters that need to be replayed after OVS is reconnected.
+	replayMeters() []binding.OFEntry
+	// replayGroups returns the fixed and cached Openflow groups that need to be replayed after OVS is reconnected.
+	replayGroups() []binding.OFEntry
+	// replayFlows returns the Openflow messages of fixed and cached flows that need to be replayed after OVS is reconnected.
+	replayFlows() []*openflow15.FlowMod
 }
 
 const (
@@ -146,6 +154,10 @@ func newTable(tableName string, stage binding.StageID, pipeline binding.Pipeline
 	return table
 }
 
+func (t *Table) IsInitialized() bool {
+	return t.ofTable != nil
+}
+
 func (t *Table) GetID() uint8 {
 	return t.ofTable.GetID()
 }
@@ -172,7 +184,7 @@ func (f *featurePodConnectivity) getRequiredTables() []*Table {
 		L3DecTTLTable,
 		L2ForwardingCalcTable,
 		ConntrackCommitTable,
-		L2ForwardingOutTable,
+		OutputTable,
 	}
 
 	for _, ipProtocol := range f.ipProtocols {
@@ -191,7 +203,7 @@ func (f *featurePodConnectivity) getRequiredTables() []*Table {
 			}
 		}
 	}
-	if f.enableTrafficControl {
+	if f.enableTrafficControl || f.enableL7FlowExporter {
 		tables = append(tables, TrafficControlTable)
 	}
 
@@ -213,15 +225,16 @@ func (f *featureNetworkPolicy) getRequiredTables() []*Table {
 			AntreaPolicyEgressRuleTable,
 			AntreaPolicyIngressRuleTable,
 		)
+		if f.enableL7NetworkPolicy {
+			tables = append(tables, TrafficControlTable) // For L7 NetworkPolicy.
+		}
 		if f.enableMulticast {
 			tables = append(tables,
 				MulticastEgressRuleTable,
+				MulticastEgressPodMetricTable,
 				MulticastEgressMetricTable,
 				MulticastIngressRuleTable,
 				MulticastIngressPodMetricTable,
-				MulticastEgressRuleTable,
-				MulticastEgressMetricTable,
-				MulticastEgressPodMetricTable,
 				MulticastIngressMetricTable,
 			)
 		}
@@ -248,19 +261,26 @@ func (f *featureService) getRequiredTables() []*Table {
 		SNATMarkTable,
 		SNATTable,
 		ConntrackCommitTable,
-		L2ForwardingOutTable,
+		OutputTable,
 	}
 	if f.proxyAll {
 		tables = append(tables, NodePortMarkTable)
+	}
+	if f.enableDSR {
+		tables = append(tables, DSRServiceMarkTable)
 	}
 	return tables
 }
 
 func (f *featureEgress) getRequiredTables() []*Table {
-	return []*Table{
+	tables := []*Table{
 		L3ForwardingTable,
 		EgressMarkTable,
 	}
+	if f.enableEgressTrafficShaping {
+		tables = append(tables, EgressQoSTable)
+	}
+	return tables
 }
 
 func (f *featureMulticast) getRequiredTables() []*Table {
@@ -281,7 +301,7 @@ func (f *featureMulticluster) getRequiredTables() []*Table {
 		SNATTable,
 		UnSNATTable,
 		SNATMarkTable,
-		L2ForwardingOutTable,
+		OutputTable,
 	}
 }
 
@@ -295,7 +315,7 @@ func (f *featureExternalNodeConnectivity) getRequiredTables() []*Table {
 		ConntrackStateTable,
 		L2ForwardingCalcTable,
 		ConntrackCommitTable,
-		L2ForwardingOutTable,
+		OutputTable,
 		NonIPTable,
 	}
 }

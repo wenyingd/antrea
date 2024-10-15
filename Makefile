@@ -1,8 +1,16 @@
 SHELL              := /bin/bash
 # go options
 GO                 ?= go
-LDFLAGS            :=
-GOFLAGS            :=
+# By default, disable debugging information (see https://pkg.go.dev/cmd/link) and trim embedded
+# paths.
+# To build binaries (standalone or embedded inside container images) with debugging information,
+# edit LDFLAGS and GOFLAGS.
+LDFLAGS            := -s -w
+GOFLAGS            := -trimpath
+# By default, disable cgo for all Go binaries.
+# For binaries meant to be published as release assets or copied to a different host, cgo should
+# always be disabled.
+CGO_ENABLED        ?= 0
 BINDIR             ?= $(CURDIR)/bin
 GO_FILES           := $(shell find . -type d -name '.cache' -prune -o -type f -name '*.go' -print)
 GOPATH             ?= $$($(GO) env GOPATH)
@@ -11,16 +19,44 @@ ANTCTL_BINARY_NAME ?= antctl
 OVS_VERSION        := $(shell head -n 1 build/images/deps/ovs-version)
 GO_VERSION         := $(shell head -n 1 build/images/deps/go-version)
 CNI_BINARIES_VERSION := $(shell head -n 1 build/images/deps/cni-binaries-version)
-NANOSERVER_VERSION := $(shell head -n 1 build/images/deps/nanoserver-version)
-WIN_BUILD_TAG      := $(shell echo $(GO_VERSION) $(CNI_BINARIES_VERSION) $(NANOSERVER_VERSION)|md5sum|head -c 10)
-GIT_HOOKS := $(shell find hack/git_client_side_hooks -type f -print)
+GIT_HOOKS          := $(shell find hack/git_client_side_hooks -type f -print)
+DOCKER_NETWORK     ?= default
+TRIVY_TARGET_IMAGE ?=
 
-DOCKER_BUILD_ARGS = --build-arg OVS_VERSION=$(OVS_VERSION)
+GOLANGCI_LINT_VERSION := v1.60.3
+GOLANGCI_LINT_BINDIR  := $(CURDIR)/.golangci-bin
+GOLANGCI_LINT_BIN     := $(GOLANGCI_LINT_BINDIR)/$(GOLANGCI_LINT_VERSION)/golangci-lint
+
+# Arguments to pass to go test invocation.
+#
+# Example:
+#   make test-unit TEST_ARGS="-run ^TestAddEgress$"
+#   make docker-test-integration TEST_ARGS="-run TestGoBGPLifecycle"
+TEST_ARGS ?=
+
+# If we have stdin we can run interactive so the tests running in docker can be interrupted.
+INTERACTIVE_ARGS := $(shell [ -t 0 ] && echo "-it")
+
+BUILD_TAG :=
+ifndef CUSTOM_BUILD_TAG
+	BUILD_TAG = $(shell build/images/build-tag.sh)
+else
+	BUILD_TAG = $(CUSTOM_BUILD_TAG)
+	DOCKER_IMG_VERSION = $(CUSTOM_BUILD_TAG)
+endif
+
+DOCKER_BUILD_ARGS :=
+ifeq ($(NO_PULL),)
+	DOCKER_BUILD_ARGS += --pull
+endif
+ifneq ($(NO_CACHE),)
+	DOCKER_BUILD_ARGS += --no-cache
+endif
+DOCKER_BUILD_ARGS += --build-arg OVS_VERSION=$(OVS_VERSION)
 DOCKER_BUILD_ARGS += --build-arg GO_VERSION=$(GO_VERSION)
-WIN_BUILD_ARGS = --build-arg GO_VERSION=$(GO_VERSION)
-WIN_BUILD_ARGS += --build-arg CNI_BINARIES_VERSION=$(CNI_BINARIES_VERSION)
-WIN_BUILD_ARGS += --build-arg NANOSERVER_VERSION=$(NANOSERVER_VERSION)
-WIN_BUILD_ARGS += --build-arg WIN_BUILD_TAG=$(WIN_BUILD_TAG)
+DOCKER_BUILD_ARGS += --build-arg BUILD_TAG=$(BUILD_TAG)
+
+export CGO_ENABLED
 
 .PHONY: all
 all: build
@@ -32,6 +68,14 @@ LDFLAGS += $(VERSION_LDFLAGS)
 UNAME_S := $(shell uname -s)
 USERID  := $(shell id -u)
 GRPID   := $(shell id -g)
+
+WINDOWS_BUILD_OPTIONS :=
+ifeq ($(NO_PULL),)
+	WINDOWS_BUILD_OPTIONS += --pull
+endif
+ifeq ($(RELEASE_STATUS),released)
+	WINDOWS_BUILD_OPTIONS += --agent-tag ${DOCKER_IMG_VERSION}
+endif
 
 .PHONY: install-hooks
 install-hooks:
@@ -49,10 +93,25 @@ bin:
 	@mkdir -p $(BINDIR)
 	GOOS=linux $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/...
 
+.trivy-bin:
+	curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b $@ v0.34.0
+
+check-%:
+	@: $(if $(value $*),,$(error $* is undefined))
+
+.PHONY: trivy-scan
+trivy-scan: .trivy-bin check-TRIVY_TARGET_IMAGE
+	$(CURDIR)/.trivy-bin/trivy image -c .trivy.yml $(TRIVY_TARGET_IMAGE)
+
 .PHONY: antrea-agent
 antrea-agent:
 	@mkdir -p $(BINDIR)
 	GOOS=linux $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-agent
+
+.PHONY: antrea-agent-release
+antrea-agent-release:
+	@mkdir -p $(BINDIR)
+	$(GO) build -o $(BINDIR)/$(ANTREA_AGENT_BINARY_NAME) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-agent
 
 .PHONY: antrea-agent-simulator
 antrea-agent-simulator:
@@ -62,7 +121,7 @@ antrea-agent-simulator:
 .PHONY: antrea-agent-instr-binary
 antrea-agent-instr-binary:
 	@mkdir -p $(BINDIR)
-	GOOS=linux $(GO) test -tags testbincover -covermode count -coverpkg=antrea.io/antrea/pkg/... -c -o $(BINDIR)/antrea-agent-coverage $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-agent
+	GOOS=linux $(GO) build -cover -o $(BINDIR)/antrea-agent-coverage -coverpkg=antrea.io/antrea/cmd/antrea-agent,antrea.io/antrea/pkg/... $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-agent
 
 .PHONY: antrea-controller
 antrea-controller:
@@ -76,27 +135,27 @@ antrea-controller:
 .PHONY: antrea-controller-instr-binary
 antrea-controller-instr-binary:
 	@mkdir -p $(BINDIR)
-	GOOS=linux $(GO) test -tags testbincover -covermode count -coverpkg=antrea.io/antrea/pkg/... -c -o $(BINDIR)/antrea-controller-coverage $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-controller
+	GOOS=linux $(GO) build -cover -o $(BINDIR)/antrea-controller-coverage -coverpkg=antrea.io/antrea/cmd/antrea-controller,antrea.io/antrea/pkg/... $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-controller
 
-# diable cgo for antrea-cni since it can be installed on some systems with
-# incompatible or missing system libraries.
 .PHONY: antrea-cni
 antrea-cni:
 	@mkdir -p $(BINDIR)
-	GOOS=linux CGO_ENABLED=0 $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-cni
+	GOOS=linux $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-cni
+
+.PHONY: antrea-cni
+antrea-cni-release:
+	@mkdir -p $(BINDIR)
+	$(GO) build -o $(BINDIR)/$(ANTREA_CNI_BINARY_NAME) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-cni
 
 .PHONY: antctl-instr-binary
 antctl-instr-binary:
 	@mkdir -p $(BINDIR)
-	GOOS=linux $(GO) test -tags testbincover -covermode count -coverpkg=antrea.io/antrea/pkg/... -c -o $(BINDIR)/antctl-coverage $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antctl
+	GOOS=linux $(GO) build -cover -o $(BINDIR)/antctl-coverage -coverpkg=antrea.io/antrea/cmd/antctl,antrea.io/antrea/pkg/... $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antctl
 
-# diable cgo for antrea-cni and antrea-agent: antrea-cni is meant to be
-# installed on the host and the antrea-agent is run as a process on Windows
-# hosts (we also distribute it as a release binary).
 .PHONY: windows-bin
 windows-bin:
 	@mkdir -p $(BINDIR)
-	GOOS=windows CGO_ENABLED=0 $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-cni antrea.io/antrea/cmd/antrea-agent antrea.io/antrea/cmd/antctl
+	GOOS=windows $(GO) build -o $(BINDIR) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antrea-cni antrea.io/antrea/cmd/antrea-agent antrea.io/antrea/cmd/antctl
 
 .PHONY: flow-aggregator
 flow-aggregator:
@@ -106,7 +165,7 @@ flow-aggregator:
 .PHONY: flow-aggregator-instr-binary
 flow-aggregator-instr-binary:
 	@mkdir -p $(BINDIR)
-	GOOS=linux $(GO) test -tags testbincover -covermode count -coverpkg=antrea.io/antrea/pkg/... -c -o $(BINDIR)/flow-aggregator-coverage $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/flow-aggregator
+	GOOS=linux $(GO) build -cover -o $(BINDIR)/flow-aggregator-coverage -coverpkg=antrea.io/antrea/cmd/flow-aggregator,antrea.io/antrea/pkg/... $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/flow-aggregator
 
 .PHONY: test-unit test-integration
 ifeq ($(UNAME_S),Linux)
@@ -124,7 +183,8 @@ test-integration:
 endif
 
 .PHONY: build
-build: build-ubuntu
+build: build-agent-ubuntu
+build: build-controller-ubuntu
 
 .PHONY: test
 test: golangci
@@ -139,14 +199,15 @@ $(DOCKER_CACHE):
 # Since the WORKDIR is mounted from host, the $(id -u):$(id -g) user can access it.
 # Inside the docker, the user is nameless and does not have a home directory. This is ok for our use case.
 DOCKER_ENV := \
-	@docker run --rm -u $$(id -u):$$(id -g) \
+	@docker run $(INTERACTIVE_ARGS) --rm -u $$(id -u):$$(id -g) \
 		-e "GOCACHE=/tmp/gocache" \
 		-e "GOPATH=/tmp/gopath" \
+		-e "TEST_ARGS=$(TEST_ARGS)" \
 		-w /usr/src/antrea.io/antrea \
 		-v $(DOCKER_CACHE)/gopath:/tmp/gopath \
 		-v $(DOCKER_CACHE)/gocache:/tmp/gocache \
 		-v $(CURDIR):/usr/src/antrea.io/antrea \
-		golang:1.17
+		golang:$(GO_VERSION)
 
 .PHONY: docker-bin
 docker-bin: $(DOCKER_CACHE)
@@ -165,15 +226,12 @@ docker-test-unit: $(DOCKER_CACHE)
 .PHONY: docker-test-integration
 docker-test-integration: .coverage
 	@echo "===> Building Antrea Integration Test Docker image <==="
-ifneq ($(NO_PULL),)
 	docker build -t antrea/test -f build/images/test/Dockerfile $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/test -f build/images/test/Dockerfile $(DOCKER_BUILD_ARGS) .
-endif
-	@docker run --privileged --rm \
+	@docker run $(INTERACTIVE_ARGS) --privileged --rm \
 		-e "GOCACHE=/tmp/gocache" \
 		-e "GOPATH=/tmp/gopath" \
 		-e "INCONTAINER=true" \
+		-e "TEST_ARGS=$(TEST_ARGS)" \
 		-w /usr/src/antrea.io/antrea \
 		-v $(DOCKER_CACHE)/gopath:/tmp/gopath \
 		-v $(DOCKER_CACHE)/gocache:/tmp/gocache \
@@ -187,10 +245,8 @@ endif
 docker-tidy: $(DOCKER_CACHE)
 	@rm -f go.sum
 	@$(DOCKER_ENV) $(GO) mod tidy
-	@rm -f plugins/octant/go.sum
-	@$(DOCKER_ENV) bash -c "cd plugins/octant && $(GO) mod tidy"
 	@chmod -R 0755 $<
-	@chmod 0644 go.sum plugins/octant/go.sum
+	@chmod 0644 go.sum
 
 ANTCTL_BINARIES := antctl-darwin antctl-linux antctl-windows
 $(ANTCTL_BINARIES): antctl-%:
@@ -202,11 +258,11 @@ $(ANTCTL_BINARIES): antctl-%:
 	fi
 
 .PHONY: antctl
-antctl: $(ANTCTL_BINARIES)
+antctl: antctl-release
 
 .PHONY: antctl-release
 antctl-release:
-	@$(GO) build -o $(BINDIR)/$(ANTCTL_BINARY_NAME) $(GOFLAGS) -ldflags '-s -w $(LDFLAGS)' antrea.io/antrea/cmd/antctl
+	$(GO) build -o $(BINDIR)/$(ANTCTL_BINARY_NAME) $(GOFLAGS) -ldflags '$(LDFLAGS)' antrea.io/antrea/cmd/antctl
 
 .PHONY: check-copyright
 check-copyright: 
@@ -216,39 +272,40 @@ check-copyright:
 add-copyright: 
 	@GO=$(GO) $(CURDIR)/hack/add-license.sh --add
 
+# Cgo is required to run the race detector.
+
 .PHONY: .linux-test-unit
 .linux-test-unit: .coverage
 	@echo
 	@echo "==> Running unit tests <=="
-	$(GO) test -race -coverprofile=.coverage/coverage-unit.txt -covermode=atomic -cover antrea.io/antrea/cmd/... antrea.io/antrea/pkg/... \
-	 antrea.io/antrea/multicluster/cmd/... antrea.io/antrea/multicluster/controllers/...
+	CGO_ENABLED=1 $(GO) test $(TEST_ARGS) -race -coverpkg=antrea.io/antrea/cmd/...,antrea.io/antrea/pkg/...,antrea.io/antrea/multicluster/cmd/...,antrea.io/antrea/multicluster/controllers/... \
+	  -coverprofile=.coverage/coverage-unit.txt -covermode=atomic \
+	  antrea.io/antrea/cmd/... antrea.io/antrea/pkg/... antrea.io/antrea/multicluster/cmd/... antrea.io/antrea/multicluster/controllers/...
 
 .PHONY: .windows-test-unit
-.windows-test-unit:
+.windows-test-unit: .coverage
 	@echo
 	@echo "==> Running unit tests <=="
-	$(GO) test -race antrea.io/antrea/cmd/... antrea.io/antrea/pkg/...
+	CGO_ENABLED=1 $(GO) test $(TEST_ARGS) -race -coverpkg=antrea.io/antrea/cmd/...,antrea.io/antrea/pkg/... \
+	  -coverprofile=.coverage/coverage-unit.txt -covermode=atomic \
+	  antrea.io/antrea/cmd/... antrea.io/antrea/pkg/...
 
 .PHONY: tidy
 tidy:
 	@rm -f go.sum
 	@$(GO) mod tidy
-	@rm -f plugins/octant/go.sum
-	@cd plugins/octant && $(GO) mod tidy
 
 .PHONY: .linux-test-integration
 .linux-test-integration: .coverage
 	@echo
 	@echo "==> Running integration tests <=="
 	@echo "SOME TESTS WILL FAIL IF NOT RUN AS ROOT!"
-	$(GO) test -v -coverpkg=antrea.io/antrea/pkg/... -coverprofile=.coverage/coverage-integration.txt -covermode=atomic -cover antrea.io/antrea/test/integration/...
+	$(GO) test $(TEST_ARGS) -v -coverpkg=antrea.io/antrea/pkg/... -coverprofile=.coverage/coverage-integration.txt -covermode=atomic antrea.io/antrea/test/integration/...
 
 test-tidy:
 	@echo
 	@echo "===> Checking go.mod tidiness <==="
 	@GO=$(GO) $(CURDIR)/hack/tidy-check.sh
-	@echo "===> Checking octant plugins go.mod tidiness <==="
-	@GO=$(GO) $(CURDIR)/hack/tidy-check.sh plugins/octant
 
 .PHONY: fmt
 fmt:
@@ -256,38 +313,32 @@ fmt:
 	@echo "===> Formatting Go files <==="
 	@gofmt -s -l -w $(GO_FILES)
 
-.golangci-bin:
+$(GOLANGCI_LINT_BIN):
 	@echo "===> Installing Golangci-lint <==="
-	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $@ v1.41.1
+	@rm -rf $(GOLANGCI_LINT_BINDIR)/* # remove old versions
+	@curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOLANGCI_LINT_BINDIR)/$(GOLANGCI_LINT_VERSION) $(GOLANGCI_LINT_VERSION)
 
 .PHONY: golangci
-golangci: .golangci-bin
+golangci: $(GOLANGCI_LINT_BIN)
 	@echo "===> Running golangci (linux) <==="
-	@GOOS=linux $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml
+	@GOOS=linux $(GOLANGCI_LINT_BIN) run -c $(CURDIR)/.golangci.yml
 	@echo "===> Running golangci (windows) <==="
-	@GOOS=windows $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml
-	@echo "===> Running golangci for Octant plugin (linux) <==="
-	@cd plugins/octant && GOOS=linux $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml
-	@echo "===> Running golangci for Octant plugin (windows) <==="
-	@cd plugins/octant && GOOS=windows $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml
+	@GOOS=windows $(GOLANGCI_LINT_BIN) run -c $(CURDIR)/.golangci.yml
 
 .PHONY: golangci-fix
-golangci-fix: .golangci-bin
+golangci-fix: $(GOLANGCI_LINT_BIN)
 	@echo "===> Running golangci (linux) <==="
-	@GOOS=linux $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml --fix
+	@GOOS=linux $(GOLANGCI_LINT_BIN) run -c $(CURDIR)/.golangci.yml --fix
 	@echo "===> Running golangci (windows) <==="
-	@GOOS=windows $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml --fix
-	@echo "===> Running golangci for Octant plugin (linux) <==="
-	@cd plugins/octant && GOOS=linux $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml --fix
-	@echo "===> Running golangci for Octant plugin (windows) <==="
-	@cd plugins/octant && GOOS=windows $(CURDIR)/.golangci-bin/golangci-lint run -c $(CURDIR)/.golangci.yml --fix
+	@GOOS=windows $(GOLANGCI_LINT_BIN) run -c $(CURDIR)/.golangci.yml --fix
 
 .PHONY: clean
 clean:
 	@rm -rf $(BINDIR)
 	@rm -rf $(DOCKER_CACHE)
-	@rm -rf .golangci-bin
+	@rm -rf $(GOLANGCI_LINT_BINDIR)
 	@rm -rf .coverage
+	@rm -rf .trivy-bin
 
 .PHONY: codegen
 codegen:
@@ -301,66 +352,75 @@ mockgen:
 
 ### Docker images ###
 
+# This target is for development only. It assumes that "make bin" has been run previously and will
+# copy the local binaries to the Docker image, instead of building the binaries inside the image as
+# part of the Docker build.
+
 .PHONY: ubuntu
 ubuntu:
-	@echo "===> Building antrea/antrea-ubuntu Docker image <==="
-ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubuntu $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.ubuntu $(DOCKER_BUILD_ARGS) .
-endif
-	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-ubuntu
-	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubuntu
-	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION)
+	@echo "===> Building antrea/antrea-agent-ubuntu and antrea/antrea-controller-ubuntu development Docker images <==="
+	docker build -t antrea/antrea-agent-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.agent.ubuntu $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-agent-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-agent-ubuntu
+	docker build -t antrea/antrea-controller-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.controller.ubuntu $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-controller-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-controller-ubuntu
 
-# Build bins in a golang container, and build the antrea-ubuntu Docker image.
+.PHONY: build-controller-ubuntu
+build-controller-ubuntu:
+	@echo "===> Building antrea/antrea-controller-ubuntu Docker image <==="
+	docker build -t antrea/antrea-controller-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.controller.ubuntu $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-controller-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-controller-ubuntu
+
+.PHONY: build-agent-ubuntu
+build-agent-ubuntu:
+	@echo "===> Building antrea/antrea-agent-ubuntu Docker image <==="
+	docker build -t antrea/antrea-agent-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.agent.ubuntu $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-agent-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-agent-ubuntu
+
+# These 2 targets are here for "backwards-compatibility". They will build the agent and controller
+# images for the requested distribution.
+
 .PHONY: build-ubuntu
-build-ubuntu:
-	@echo "===> Building Antrea bins and antrea/antrea-ubuntu Docker image <==="
-ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.ubuntu $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.ubuntu $(DOCKER_BUILD_ARGS) .
-endif
-	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) antrea/antrea-ubuntu
-	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubuntu
-	docker tag antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubuntu:$(DOCKER_IMG_VERSION)
+build-ubuntu: build-agent-ubuntu build-controller-ubuntu
 
-# Build bins in a golang container, and build the antrea-ubi Docker image.
 .PHONY: build-ubi
-build-ubi:
-	@echo "===> Building Antrea bins and antrea/antrea-ubi Docker image <==="
-ifneq ($(NO_PULL),"")
-	docker build -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.ubi $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.ubi $(DOCKER_BUILD_ARGS) .
-endif
-	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-ubi
-	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubi
-	docker tag antrea/antrea-ubi:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-ubi:$(DOCKER_IMG_VERSION)
+build-ubi: build-agent-ubi build-controller-ubi
+
+.PHONY: build-agent-ubi
+build-agent-ubi:
+	@echo "===> Building Antrea bins and antrea/antrea-agent-ubi Docker image <==="
+	docker build -t antrea/antrea-agent-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.agent.ubi $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-agent-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-agent-ubi
+
+.PHONY: build-controller-ubi
+build-controller-ubi:
+	@echo "===> Building Antrea bins and antrea/antrea-controller-ubi Docker image <==="
+	docker build -t antrea/antrea-controller-ubi:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.controller.ubi $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-controller-ubi:$(DOCKER_IMG_VERSION) antrea/antrea-controller-ubi
 
 .PHONY: build-windows
 build-windows:
 	@echo "===> Building Antrea bins and antrea/antrea-windows Docker image <==="
-	docker build --cache-from antrea/base-windows:$(WIN_BUILD_TAG) -t antrea/base-windows:$(WIN_BUILD_TAG) -f build/images/base-windows/Dockerfile $(WIN_BUILD_ARGS) .
-ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-windows:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.windows $(WIN_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-windows:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.windows $(WIN_BUILD_ARGS) .
-endif
-	docker tag antrea/antrea-windows:$(DOCKER_IMG_VERSION) antrea/antrea-windows
-	docker tag antrea/antrea-windows:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-windows
-	docker tag antrea/antrea-windows:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-windows:$(DOCKER_IMG_VERSION)
+	$(CURDIR)/build/images/build-windows.sh ${WINDOWS_BUILD_OPTIONS}
+
+.PHONY: build-and-push-windows
+build-and-push-windows:
+	@echo "===> Building Antrea bins and antrea/antrea-windows Docker image and pushing to registry <==="
+	$(CURDIR)/build/images/build-windows.sh --push ${WINDOWS_BUILD_OPTIONS}
 
 .PHONY: build-ubuntu-coverage
-build-ubuntu-coverage:
-	@echo "===> Building Antrea bins and antrea/antrea-ubuntu-coverage Docker image <==="
-ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-ubuntu-coverage:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.coverage $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-ubuntu-coverage:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.coverage $(DOCKER_BUILD_ARGS) .
-endif
-	docker tag antrea/antrea-ubuntu-coverage:$(DOCKER_IMG_VERSION) antrea/antrea-ubuntu-coverage
+build-ubuntu-coverage: build-controller-ubuntu-coverage build-agent-ubuntu-coverage
+
+.PHONY: build-controller-ubuntu-coverage
+build-controller-ubuntu-coverage:
+	@echo "===> Building Antrea bins and antrea/antrea-controller-ubuntu-coverage Docker image <==="
+	docker build -t antrea/antrea-controller-ubuntu-coverage:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.controller.coverage $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-controller-ubuntu-coverage:$(DOCKER_IMG_VERSION) antrea/antrea-controller-ubuntu-coverage
+
+.PHONY: build-agent-ubuntu-coverage
+build-agent-ubuntu-coverage:
+	@echo "===> Building Antrea bins and antrea/antrea-agent-ubuntu-coverage Docker image <==="
+	docker build -t antrea/antrea-agent-ubuntu-coverage:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.agent.coverage $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-agent-ubuntu-coverage:$(DOCKER_IMG_VERSION) antrea/antrea-agent-ubuntu-coverage
 
 .PHONY: build-scale-simulator
 build-scale-simulator:
@@ -368,12 +428,18 @@ build-scale-simulator:
 	docker build -t antrea/antrea-ubuntu-simulator:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.simulator.build.ubuntu $(DOCKER_BUILD_ARGS) .
 	docker tag antrea/antrea-ubuntu-simulator:$(DOCKER_IMG_VERSION) antrea/antrea-ubuntu-simulator
 
+.PHONY: build-migrator
+build-migrator:
+	@echo "===> Building antrea/antrea-migrator Docker image <==="
+	docker build -t antrea/antrea-migrator:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.build.migrator $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-migrator:$(DOCKER_IMG_VERSION) antrea/antrea-migrator
+
 .PHONY: manifest
 manifest:
 	@echo "===> Generating dev manifest for Antrea <==="
 	$(CURDIR)/hack/generate-standard-manifests.sh --mode dev --out build/yamls
-	$(CURDIR)/hack/generate-manifest-octant.sh --mode dev > build/yamls/antrea-octant.yml
 	$(CURDIR)/hack/generate-manifest-windows.sh --mode dev > build/yamls/antrea-windows.yml
+	$(CURDIR)/hack/generate-manifest-windows.sh --mode dev --include-ovs > build/yamls/antrea-windows-with-ovs.yml
 	$(CURDIR)/hack/generate-manifest-flow-aggregator.sh --mode dev > build/yamls/flow-aggregator.yml
 
 .PHONY: manifest-scale
@@ -387,57 +453,35 @@ manifest-coverage:
 	$(CURDIR)/hack/generate-manifest.sh --mode dev --ipsec --coverage > build/yamls/antrea-ipsec-coverage.yml
 	$(CURDIR)/hack/generate-manifest-flow-aggregator.sh --mode dev --coverage > build/yamls/flow-aggregator-coverage.yml
 
-.PHONY: octant-antrea-ubuntu
-octant-antrea-ubuntu:
-	@echo "===> Building antrea/octant-antrea-ubuntu Docker image <==="
-	docker build --pull -t antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) -f build/images/Dockerfile.octant.ubuntu $(DOCKER_BUILD_ARGS) .
-	docker tag antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) antrea/octant-antrea-ubuntu
-	docker tag antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/octant-antrea-ubuntu
-	docker tag antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/octant-antrea-ubuntu:$(DOCKER_IMG_VERSION)
-
 .PHONY: antrea-mc-controller
 antrea-mc-controller:
 	@echo "===> Building antrea/antrea-mc-controller Docker image <==="
-ifneq ($(NO_PULL),)
-	docker build -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build $(DOCKER_BUILD_ARGS) .
-endif
+	docker build -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile $(DOCKER_BUILD_ARGS) .
 	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller
-	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller
-	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION)
 
-.PHONY: antrea-mc-controller-coverage
-antrea-mc-controller-coverage:
+# Build bins in a golang container, and build the antrea-mc-controller Docker image.
+.PHONY: build-antrea-mc-controller
+build-antrea-mc-controller:
+	@echo "===> Building antrea/antrea-mc-controller Docker image <==="
+	docker build -t antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build $(DOCKER_BUILD_ARGS) .
+	docker tag antrea/antrea-mc-controller:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller
+
+.PHONY: build-antrea-mc-controller-coverage
+build-antrea-mc-controller-coverage:
 	@echo "===> Building antrea/antrea-mc-controller-coverage Docker image <==="
-ifneq ($(NO_PULL),)
 	docker build -t antrea/antrea-mc-controller-coverage:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build.coverage $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/antrea-mc-controller-coverage:$(DOCKER_IMG_VERSION) -f multicluster/build/images/Dockerfile.build.coverage $(DOCKER_BUILD_ARGS) .
-endif
 	docker tag antrea/antrea-mc-controller-coverage:$(DOCKER_IMG_VERSION) antrea/antrea-mc-controller-coverage
-	docker tag antrea/antrea-mc-controller-coverage:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/antrea-mc-controller-coverage
 
 .PHONY: flow-aggregator-image
 flow-aggregator-image:
 	@echo "===> Building antrea/flow-aggregator Docker image <==="
-ifneq ($(NO_PULL),)
 	docker build -t antrea/flow-aggregator:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/flow-aggregator:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile $(DOCKER_BUILD_ARGS) .
-endif
 	docker tag antrea/flow-aggregator:$(DOCKER_IMG_VERSION) antrea/flow-aggregator
-	docker tag antrea/flow-aggregator:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-aggregator
-	docker tag antrea/flow-aggregator:$(DOCKER_IMG_VERSION) projects.registry.vmware.com/antrea/flow-aggregator:$(DOCKER_IMG_VERSION)
 
 .PHONY: flow-aggregator-ubuntu-coverage
 flow-aggregator-ubuntu-coverage:
 	@echo "===> Building antrea/flow-aggregator-coverage Docker image <==="
-ifneq ($(NO_PULL),)
 	docker build -t antrea/flow-aggregator-coverage:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.coverage $(DOCKER_BUILD_ARGS) .
-else
-	docker build --pull -t antrea/flow-aggregator-coverage:$(DOCKER_IMG_VERSION) -f build/images/flow-aggregator/Dockerfile.coverage $(DOCKER_BUILD_ARGS) .
-endif
 	docker tag antrea/flow-aggregator-coverage:$(DOCKER_IMG_VERSION) antrea/flow-aggregator-coverage
 
 .PHONY: verify

@@ -89,27 +89,27 @@ func createTrafficControlTestPod(t *testing.T, data *TestData, podName string) {
 	}
 	require.NoError(t, data.podWaitForRunning(defaultTimeout, podName, data.testNamespace))
 
-	if ips.ipv4 != nil {
-		tcTestConfig.podIPs[corev1.IPv4Protocol] = ips.ipv4.String()
+	if ips.IPv4 != nil {
+		tcTestConfig.podIPs[corev1.IPv4Protocol] = ips.IPv4.String()
 	}
-	if ips.ipv6 != nil {
-		tcTestConfig.podIPs[corev1.IPv6Protocol] = ips.ipv6.String()
+	if ips.IPv6 != nil {
+		tcTestConfig.podIPs[corev1.IPv6Protocol] = ips.IPv6.String()
 	}
 }
 
 func createTrafficControlPacketsCollectorPod(t *testing.T, data *TestData, podName string) {
-	require.NoError(t, NewPodBuilder(podName, data.testNamespace, agnhostImage).OnNode(tcTestConfig.nodeName).WithCommand([]string{"sleep", "3600"}).Privileged().Create(data))
+	require.NoError(t, NewPodBuilder(podName, data.testNamespace, agnhostImage).OnNode(tcTestConfig.nodeName).Privileged().Create(data))
 	ips, err := data.podWaitForIPs(defaultTimeout, podName, data.testNamespace)
 	if err != nil {
 		t.Fatalf("Error when waiting for IP for Pod '%s': %v", podName, err)
 	}
 	require.NoError(t, data.podWaitForRunning(defaultTimeout, podName, data.testNamespace))
 
-	if ips.ipv4 != nil {
-		tcTestConfig.collectorPodIPs[corev1.IPv4Protocol] = ips.ipv4.String()
+	if ips.IPv4 != nil {
+		tcTestConfig.collectorPodIPs[corev1.IPv4Protocol] = ips.IPv4.String()
 	}
-	if ips.ipv6 != nil {
-		tcTestConfig.collectorPodIPs[corev1.IPv6Protocol] = ips.ipv6.String()
+	if ips.IPv6 != nil {
+		tcTestConfig.collectorPodIPs[corev1.IPv6Protocol] = ips.IPv6.String()
 	}
 }
 
@@ -299,7 +299,7 @@ func testRedirectToLocal(t *testing.T, data *TestData) {
 ip link add dev %[1]s type veth peer name %[2]s && \
 ip link set dev %[1]s up && \
 ip link set dev %[2]s up`, targetPortName, returnPortName)
-	if err := NewPodBuilder(tempPodName, data.testNamespace, agnhostImage).OnNode(tcTestConfig.nodeName).WithCommand([]string{"sleep", "3600"}).InHostNetwork().Privileged().Create(data); err != nil {
+	if err := NewPodBuilder(tempPodName, data.testNamespace, agnhostImage).OnNode(tcTestConfig.nodeName).InHostNetwork().Privileged().Create(data); err != nil {
 		t.Fatalf("Failed to create Pod %s: %v", tempPodName, err)
 	}
 	require.NoError(t, data.podWaitForRunning(defaultTimeout, tempPodName, data.testNamespace))

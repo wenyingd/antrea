@@ -61,7 +61,7 @@ const (
 // check previousResult with local cache.
 // Host gateway and the default tunnel interfaces are added into cache in node initialization
 // phase or retrieved from existing OVS ports.
-// An IPsec tunnel interface is added into the cache when IPsec encyption is enabled, and
+// An IPsec tunnel interface is added into the cache when IPsec encryption is enabled, and
 // NodeRouteController watches a new remote Node from K8s API, and is removed when the remote
 // Node is deleted.
 // Todo: add periodic task to sync local cache with container veth pair
@@ -85,9 +85,9 @@ func getInterfaceKey(obj interface{}) (string, error) {
 	interfaceConfig := obj.(*InterfaceConfig)
 	var key string
 	if interfaceConfig.Type == ContainerInterface {
-		key = util.GenerateContainerInterfaceKey(interfaceConfig.ContainerID)
-	} else if interfaceConfig.Type == TunnelInterface && interfaceConfig.NodeName != "" {
-		// Tunnel interface for a Node.
+		key = util.GenerateContainerInterfaceKey(interfaceConfig.ContainerID, interfaceConfig.IFDev)
+	} else if interfaceConfig.Type == IPSecTunnelInterface {
+		// IPsec tunnel interface for a Node.
 		key = util.GenerateNodeTunnelInterfaceKey(interfaceConfig.NodeName)
 	} else {
 		// Use the interface name as the key by default.
@@ -121,6 +121,15 @@ func (c *interfaceCache) GetInterface(interfaceKey string) (*InterfaceConfig, bo
 		return nil, false
 	}
 	return iface.(*InterfaceConfig), found
+}
+
+// ListInterfacesByType lists all interfaces from local cache.
+func (c *interfaceCache) ListInterfaces() []*InterfaceConfig {
+	interfaceConfigs := make([]*InterfaceConfig, 0)
+	for _, iface := range c.cache.List() {
+		interfaceConfigs = append(interfaceConfigs, iface.(*InterfaceConfig))
+	}
+	return interfaceConfigs
 }
 
 // GetInterfaceByName retrieves interface from local cache given the interface
@@ -257,7 +266,8 @@ func interfaceIPIndexFunc(obj interface{}) ([]string, error) {
 
 func interfaceOFPortIndexFunc(obj interface{}) ([]string, error) {
 	interfaceConfig := obj.(*InterfaceConfig)
-	if interfaceConfig.OFPort < 0 {
+	// OVSPortConfig can be nil for a secondary SR-IOV interface.
+	if interfaceConfig.OVSPortConfig == nil || interfaceConfig.OFPort < 0 {
 		// If interfaceConfig OFport is not valid, we return empty key.
 		return []string{}, nil
 	}

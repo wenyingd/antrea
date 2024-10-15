@@ -16,16 +16,17 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/pflag"
-	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/util/sets"
+	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/featuregate"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 
 	"antrea.io/antrea/pkg/agent/config"
 	"antrea.io/antrea/pkg/apis"
@@ -36,6 +37,7 @@ import (
 	"antrea.io/antrea/pkg/util/env"
 	"antrea.io/antrea/pkg/util/flowexport"
 	"antrea.io/antrea/pkg/util/ip"
+	"antrea.io/antrea/pkg/util/yaml"
 )
 
 const (
@@ -44,23 +46,32 @@ const (
 	defaultHostProcPathPrefix      = "/host"
 	defaultServiceCIDR             = "10.96.0.0/12"
 	defaultTunnelType              = ovsconfig.GeneveTunnel
-	defaultFlowCollectorAddress    = "flow-aggregator.flow-aggregator.svc:4739:tls"
+	defaultFlowCollectorAddress    = "flow-aggregator/flow-aggregator:4739:tls"
 	defaultFlowCollectorTransport  = "tls"
 	defaultFlowCollectorPort       = "4739"
-	defaultFlowPollInterval        = 5 * time.Second
-	defaultActiveFlowExportTimeout = 30 * time.Second
-	defaultIdleFlowExportTimeout   = 15 * time.Second
+	defaultFlowPollInterval        = "5s"
+	defaultActiveFlowExportTimeout = "5s"
+	defaultIdleFlowExportTimeout   = "15s"
 	defaultIGMPQueryInterval       = 125 * time.Second
 	defaultStaleConnectionTimeout  = 5 * time.Minute
-	defaultNPLPortRange            = "61000-62000"
 	defaultNodeType                = config.K8sNode
+	defaultMaxEgressIPsPerNode     = 255
+	defaultAuditLogsMaxSize        = 100
+	defaultAuditLogsMaxBackups     = 3
+	defaultAuditLogsMaxAge         = 28
+	defaultAuditLogsCompressed     = true
+	defaultPacketInRate            = 500
 )
+
+var defaultIGMPQueryVersions = []int{1, 2, 3}
 
 type Options struct {
 	// The path of configuration file.
 	configFile string
 	// The configuration object
 	config *agentconfig.AgentConfig
+	// tlsCipherSuites is a slice of TLSCipherSuites mapped to input provided by user.
+	tlsCipherSuites []string
 	// IPFIX flow collector address
 	flowCollectorAddr string
 	// IPFIX flow collector protocol
@@ -74,10 +85,25 @@ type Options struct {
 	// Stale connection timeout to delete connections if they are not exported.
 	staleConnectionTimeout time.Duration
 	igmpQueryInterval      time.Duration
+	igmpQueryVersions      []uint8
 	nplStartPort           int
 	nplEndPort             int
 	dnsServerOverride      string
 	nodeType               config.NodeType
+
+	// enableEgress represents whether Egress should run or not, calculated from its feature gate configuration and
+	// whether the traffic mode supports it.
+	enableEgress bool
+	// enableAntreaProxy indicates whether AntreaProxy should be enabled, based on feature gate AntreaProxy and options
+	// AntreaProxy.Enable. This is used to maintain compatibility with the AntreaProxy feature gate, which was promoted
+	// to GA in v1.14.
+	enableAntreaProxy bool
+	// enableNodePortLocal indicates whether NodePortLocal should be enabled or not, based on feature gate NodePortLocal
+	// and options NodePortLocal.Enable. This is used to maintain compatibility with the NodePortLocal feature gate, which
+	// was promoted to GA in v1.14
+	enableNodePortLocal bool
+
+	defaultLoadBalancerMode config.LoadBalancerMode
 }
 
 func newOptions() *Options {
@@ -117,11 +143,12 @@ func (o *Options) validate(args []string) error {
 		return fmt.Errorf("no positional arguments are supported")
 	}
 
-	if o.config.OVSDatapathType != string(ovsconfig.OVSDatapathSystem) && o.config.OVSDatapathType != string(ovsconfig.OVSDatapathNetdev) {
+	if o.config.OVSDatapathType != string(ovsconfig.OVSDatapathSystem) {
 		return fmt.Errorf("OVS datapath type %s is not supported", o.config.OVSDatapathType)
 	}
-	if o.config.OVSDatapathType == string(ovsconfig.OVSDatapathNetdev) {
-		klog.Info("OVS 'netdev' datapath is not fully supported at the moment")
+
+	if err := o.validateTLSOptions(); err != nil {
+		return err
 	}
 
 	if config.ExternalNode.String() == o.config.NodeType && !features.DefaultFeatureGate.Enabled(features.ExternalNode) {
@@ -140,12 +167,16 @@ func (o *Options) validate(args []string) error {
 }
 
 func (o *Options) loadConfigFromFile() error {
-	data, err := ioutil.ReadFile(o.configFile)
+	data, err := os.ReadFile(o.configFile)
 	if err != nil {
 		return err
 	}
 
-	return yaml.UnmarshalStrict(data, &o.config)
+	err = yaml.UnmarshalLenient(data, &o.config)
+	if err != nil {
+		return fmt.Errorf("failed to decode config file %s: %w", o.configFile, err)
+	}
+	return nil
 }
 
 func (o *Options) setDefaults() {
@@ -169,11 +200,39 @@ func (o *Options) setDefaults() {
 	} else {
 		o.setExternalNodeDefaultOptions()
 	}
+	if o.config.Multicluster.EnableGateway {
+		o.setMulticlusterDefaultOptions()
+	}
+	if o.config.PacketInRate == 0 {
+		o.config.PacketInRate = defaultPacketInRate
+	}
+	o.setAuditLoggingDefaultOptions()
 }
 
-func (o *Options) validateAntreaProxyConfig() error {
+func (o *Options) validateTLSOptions() error {
+	_, err := cliflag.TLSVersion(o.config.TLSMinVersion)
+	if err != nil {
+		return fmt.Errorf("invalid TLSMinVersion: %v", err)
+	}
+	trimmedTLSCipherSuites := strings.ReplaceAll(o.config.TLSCipherSuites, " ", "")
+	if trimmedTLSCipherSuites != "" {
+		tlsCipherSuites := strings.Split(trimmedTLSCipherSuites, ",")
+		_, err = cliflag.TLSCipherSuites(tlsCipherSuites)
+		if err != nil {
+			return fmt.Errorf("invalid TLSCipherSuites: %v", err)
+		}
+		o.tlsCipherSuites = tlsCipherSuites
+	}
+	return nil
+}
+
+func (o *Options) validateAntreaProxyConfig(encapMode config.TrafficEncapModeType) error {
 	if !features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
-		// Validate service CIDR configuration if AntreaProxy is not enabled.
+		klog.InfoS("Feature gate `AntreaProxy` is deprecated, please use option `antreaProxy.enable` to disable AntreaProxy")
+	}
+	o.enableAntreaProxy = *o.config.AntreaProxy.Enable && features.DefaultFeatureGate.Enabled(features.AntreaProxy)
+	if !o.enableAntreaProxy {
+		// Validate Service CIDR configuration if AntreaProxy is not enabled.
 		if _, _, err := net.ParseCIDR(o.config.ServiceCIDR); err != nil {
 			return fmt.Errorf("Service CIDR %s is invalid", o.config.ServiceCIDR)
 		}
@@ -194,12 +253,26 @@ func (o *Options) validateAntreaProxyConfig() error {
 			}
 		}
 	}
+
+	ok, defaultLoadBalancerMode := config.GetLoadBalancerModeFromStr(o.config.AntreaProxy.DefaultLoadBalancerMode)
+	if !ok {
+		return fmt.Errorf("LoadBalancerMode %s is unknown", o.config.AntreaProxy.DefaultLoadBalancerMode)
+	}
+	if defaultLoadBalancerMode == config.LoadBalancerModeDSR {
+		if !features.DefaultFeatureGate.Enabled(features.LoadBalancerModeDSR) {
+			return fmt.Errorf("LoadBalancerMode DSR requires feature gate %s to be enabled", features.LoadBalancerModeDSR)
+		}
+		if encapMode != config.TrafficEncapModeEncap {
+			return fmt.Errorf("LoadBalancerMode DSR requires %s mode", config.TrafficEncapModeEncap)
+		}
+	}
+	o.defaultLoadBalancerMode = defaultLoadBalancerMode
 	return nil
 }
 
 func (o *Options) validateFlowExporterConfig() error {
 	if features.DefaultFeatureGate.Enabled(features.FlowExporter) {
-		host, port, proto, err := flowexport.ParseFlowCollectorAddr(o.config.FlowCollectorAddr, defaultFlowCollectorPort, defaultFlowCollectorTransport)
+		host, port, proto, err := flowexport.ParseFlowCollectorAddr(o.config.FlowExporter.FlowCollectorAddr, defaultFlowCollectorPort, defaultFlowCollectorTransport)
 		if err != nil {
 			return err
 		}
@@ -207,16 +280,16 @@ func (o *Options) validateFlowExporterConfig() error {
 		o.flowCollectorProto = proto
 
 		// Parse the given flowPollInterval config
-		if o.config.FlowPollInterval != "" {
-			flowPollInterval, err := flowexport.ParseFlowIntervalString(o.config.FlowPollInterval)
+		if o.config.FlowExporter.FlowPollInterval != "" {
+			flowPollInterval, err := flowexport.ParseFlowIntervalString(o.config.FlowExporter.FlowPollInterval)
 			if err != nil {
 				return err
 			}
 			o.pollInterval = flowPollInterval
 		}
 		// Parse the given activeFlowExportTimeout config
-		if o.config.ActiveFlowExportTimeout != "" {
-			o.activeFlowTimeout, err = time.ParseDuration(o.config.ActiveFlowExportTimeout)
+		if o.config.FlowExporter.ActiveFlowExportTimeout != "" {
+			o.activeFlowTimeout, err = time.ParseDuration(o.config.FlowExporter.ActiveFlowExportTimeout)
 			if err != nil {
 				return fmt.Errorf("ActiveFlowExportTimeout is not provided in right format")
 			}
@@ -226,8 +299,8 @@ func (o *Options) validateFlowExporterConfig() error {
 			}
 		}
 		// Parse the given inactiveFlowExportTimeout config
-		if o.config.IdleFlowExportTimeout != "" {
-			o.idleFlowTimeout, err = time.ParseDuration(o.config.IdleFlowExportTimeout)
+		if o.config.FlowExporter.IdleFlowExportTimeout != "" {
+			o.idleFlowTimeout, err = time.ParseDuration(o.config.FlowExporter.IdleFlowExportTimeout)
 			if err != nil {
 				return fmt.Errorf("IdleFlowExportTimeout is not provided in right format")
 			}
@@ -245,23 +318,32 @@ func (o *Options) validateFlowExporterConfig() error {
 		} else {
 			o.staleConnectionTimeout = defaultStaleConnectionTimeout
 		}
+	} else if o.config.FlowExporter.Enable {
+		klog.InfoS("The FlowExporter.enable config option is set to true, but it will be ignored because the FlowExporter feature gate is disabled")
 	}
 	return nil
 }
 
-func (o *Options) validateMulticastConfig() error {
-	if features.DefaultFeatureGate.Enabled(features.Multicast) {
+func (o *Options) validateMulticastConfig(encryptionMode config.TrafficEncryptionModeType) error {
+	if features.DefaultFeatureGate.Enabled(features.Multicast) && o.config.Multicast.Enable {
 		var err error
+		if encryptionMode != config.TrafficEncryptionModeNone {
+			return fmt.Errorf("Multicast feature doesn't work with the current encryption mode '%s'", encryptionMode)
+		}
 		if o.config.Multicast.IGMPQueryInterval != "" {
 			o.igmpQueryInterval, err = time.ParseDuration(o.config.Multicast.IGMPQueryInterval)
 			if err != nil {
 				return err
 			}
 		}
-		if len(o.config.Multicast.MulticastInterfaces) == 0 && len(o.config.MulticastInterfaces) > 0 {
-			klog.InfoS("The multicastInterfaces option is deprecated, please use multicast.multicastInterfaces instead")
-			o.config.Multicast.MulticastInterfaces = o.config.MulticastInterfaces
+		if !sets.NewInt(defaultIGMPQueryVersions...).HasAll(o.config.Multicast.IGMPQueryVersions...) {
+			return fmt.Errorf("igmpQueryVersions should be a subset of %v", defaultIGMPQueryVersions)
 		}
+		for _, version := range o.config.Multicast.IGMPQueryVersions {
+			o.igmpQueryVersions = append(o.igmpQueryVersions, uint8(version))
+		}
+	} else if o.config.Multicast.Enable {
+		klog.InfoS("The multicast.enable config option is set to true, but it will be ignored because the Multicast feature gate is disabled")
 	}
 	return nil
 }
@@ -273,11 +355,6 @@ func (o *Options) validateAntreaIPAMConfig() error {
 	if !features.DefaultFeatureGate.Enabled(features.AntreaIPAM) {
 		return fmt.Errorf("AntreaIPAM feature gate must be enabled to configure bridging mode")
 	}
-	// Bridging mode will connect uplink to OVS bridge, which is not compatible with OVSDatapathSystem 'netdev'.
-	if o.config.OVSDatapathType != string(ovsconfig.OVSDatapathSystem) {
-		return fmt.Errorf("Bridging mode requires 'system' OVSDatapathType, current: %s",
-			o.config.OVSDatapathType)
-	}
 	if !strings.EqualFold(o.config.TrafficEncapMode, config.TrafficEncapModeNoEncap.String()) {
 		return fmt.Errorf("Bridging mode requires 'noEncap' TrafficEncapMode, current: %s",
 			o.config.TrafficEncapMode)
@@ -286,6 +363,30 @@ func (o *Options) validateAntreaIPAMConfig() error {
 	// SNAT needs to be updated to bypass traffic from AntreaIPAM Pod to Per-Node IPAM Pod
 	if !o.config.NoSNAT {
 		return fmt.Errorf("Bridging mode requires noSNAT")
+	}
+	return nil
+}
+
+func (o *Options) validateMulticlusterConfig(encapMode config.TrafficEncapModeType, encryptionMode config.TrafficEncryptionModeType) error {
+	if !o.config.Multicluster.EnableGateway && !o.config.Multicluster.EnableStretchedNetworkPolicy {
+		return nil
+	}
+
+	if !features.DefaultFeatureGate.Enabled(features.Multicluster) {
+		klog.InfoS("Multicluster feature gate is disabled. Multi-cluster options are ignored")
+		return nil
+	}
+
+	if !o.config.Multicluster.EnableGateway && o.config.Multicluster.EnableStretchedNetworkPolicy {
+		return fmt.Errorf("Multi-cluster Gateway must be enabled to enable StretchedNetworkPolicy")
+	}
+	_, multiclusterEncryptionMode := config.GetTrafficEncryptionModeFromStr(o.config.Multicluster.TrafficEncryptionMode)
+	if multiclusterEncryptionMode == config.TrafficEncryptionModeWireGuard && encryptionMode != config.TrafficEncryptionModeNone {
+		return fmt.Errorf("Antrea Multi-cluster WireGuard does not support in-cluster encryption mode %s", o.config.TrafficEncryptionMode)
+	}
+
+	if encapMode.SupportsEncap() && encryptionMode == config.TrafficEncryptionModeWireGuard {
+		return fmt.Errorf("Multi-cluster Gateway doesn't support in-cluster WireGuard encryption")
 	}
 	return nil
 }
@@ -309,22 +410,24 @@ func (o *Options) setK8sNodeDefaultOptions() {
 	if o.config.HostProcPathPrefix == "" {
 		o.config.HostProcPathPrefix = defaultHostProcPathPrefix
 	}
-	if features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
-		if o.config.AntreaProxy.ProxyLoadBalancerIPs == nil {
-			o.config.AntreaProxy.ProxyLoadBalancerIPs = new(bool)
-			*o.config.AntreaProxy.ProxyLoadBalancerIPs = true
-		}
-	} else {
-		if o.config.ServiceCIDR == "" {
-			o.config.ServiceCIDR = defaultServiceCIDR
-		}
+	if o.config.AntreaProxy.Enable == nil {
+		o.config.AntreaProxy.Enable = ptr.To(true)
+	}
+	if o.config.AntreaProxy.ProxyLoadBalancerIPs == nil {
+		o.config.AntreaProxy.ProxyLoadBalancerIPs = ptr.To(true)
+	}
+	if o.config.ServiceCIDR == "" {
+		//It's okay to set the default value of this field even when AntreaProxy is enabled and the field is not used.
+		o.config.ServiceCIDR = defaultServiceCIDR
+	}
+	if o.config.AntreaProxy.DefaultLoadBalancerMode == "" {
+		o.config.AntreaProxy.DefaultLoadBalancerMode = config.LoadBalancerModeNAT.String()
 	}
 	if o.config.ClusterMembershipPort == 0 {
 		o.config.ClusterMembershipPort = apis.AntreaAgentClusterMembershipPort
 	}
 	if o.config.EnablePrometheusMetrics == nil {
-		o.config.EnablePrometheusMetrics = new(bool)
-		*o.config.EnablePrometheusMetrics = true
+		o.config.EnablePrometheusMetrics = ptr.To(true)
 	}
 	if o.config.WireGuard.Port == 0 {
 		o.config.WireGuard.Port = apis.WireGuardListenPort
@@ -335,27 +438,38 @@ func (o *Options) setK8sNodeDefaultOptions() {
 	}
 
 	if features.DefaultFeatureGate.Enabled(features.FlowExporter) {
-		if o.config.FlowCollectorAddr == "" {
-			o.config.FlowCollectorAddr = defaultFlowCollectorAddress
+		if o.config.FlowExporter.FlowCollectorAddr == "" {
+			o.config.FlowExporter.FlowCollectorAddr = defaultFlowCollectorAddress
+			if o.config.FlowCollectorAddr != "" {
+				klog.InfoS("The flowCollectorAddr option is deprecated, please use flowExporter.flowCollectorAddr instead")
+				o.config.FlowExporter.FlowCollectorAddr = o.config.FlowCollectorAddr
+			}
 		}
-		if o.config.FlowPollInterval == "" {
-			o.pollInterval = defaultFlowPollInterval
+		if o.config.FlowExporter.FlowPollInterval == "" {
+			o.config.FlowExporter.FlowPollInterval = defaultFlowPollInterval
+			if o.config.FlowPollInterval != "" {
+				klog.InfoS("The flowPollInterval option is deprecated, please use flowExporter.flowPollInterval instead")
+				o.config.FlowExporter.FlowPollInterval = o.config.FlowPollInterval
+			}
 		}
-		if o.config.ActiveFlowExportTimeout == "" {
-			o.activeFlowTimeout = defaultActiveFlowExportTimeout
+		if o.config.FlowExporter.ActiveFlowExportTimeout == "" {
+			o.config.FlowExporter.ActiveFlowExportTimeout = defaultActiveFlowExportTimeout
+			if o.config.ActiveFlowExportTimeout != "" {
+				klog.InfoS("The activeFlowExportTimeout option is deprecated, please use flowExporter.activeFlowExportTimeout instead")
+				o.config.FlowExporter.ActiveFlowExportTimeout = o.config.ActiveFlowExportTimeout
+			}
 		}
-		if o.config.IdleFlowExportTimeout == "" {
-			o.idleFlowTimeout = defaultIdleFlowExportTimeout
+		if o.config.FlowExporter.IdleFlowExportTimeout == "" {
+			o.config.FlowExporter.IdleFlowExportTimeout = defaultIdleFlowExportTimeout
+			if o.config.IdleFlowExportTimeout != "" {
+				klog.InfoS("The idleFlowExportTimeout option is deprecated, please use flowExporter.idleFlowExportTimeout instead")
+				o.config.FlowExporter.IdleFlowExportTimeout = o.config.IdleFlowExportTimeout
+			}
 		}
 	}
 
-	if features.DefaultFeatureGate.Enabled(features.NodePortLocal) {
-		switch {
-		case o.config.NodePortLocal.PortRange != "":
-		case o.config.NPLPortRange != "":
-			klog.InfoS("The nplPortRange option is deprecated, please use nodePortLocal.portRange instead")
-			o.config.NodePortLocal.PortRange = o.config.NPLPortRange
-		default:
+	if o.config.NodePortLocal.Enable {
+		if o.config.NodePortLocal.PortRange == "" {
 			o.config.NodePortLocal.PortRange = defaultNPLPortRange
 		}
 	}
@@ -364,7 +478,48 @@ func (o *Options) setK8sNodeDefaultOptions() {
 		if o.config.Multicast.IGMPQueryInterval == "" {
 			o.igmpQueryInterval = defaultIGMPQueryInterval
 		}
+		if len(o.config.Multicast.IGMPQueryVersions) == 0 {
+			o.config.Multicast.IGMPQueryVersions = defaultIGMPQueryVersions
+		}
 	}
+
+	if features.DefaultFeatureGate.Enabled(features.Multicluster) {
+		if o.config.Multicluster.EnableGateway && o.config.Multicluster.Namespace == "" {
+			o.config.Multicluster.Namespace = env.GetPodNamespace()
+		}
+	}
+
+	if features.DefaultFeatureGate.Enabled(features.Egress) {
+		if o.config.Egress.MaxEgressIPsPerNode == 0 {
+			o.config.Egress.MaxEgressIPsPerNode = defaultMaxEgressIPsPerNode
+		}
+	}
+
+	// Regardless of whether the egress feature is enabled, o.config.Egress.SNATFullyRandomPorts should not be nil to prevent a crash in NewClient().
+	if o.config.Egress.SNATFullyRandomPorts == nil {
+		o.config.Egress.SNATFullyRandomPorts = ptr.To(o.config.SNATFullyRandomPorts)
+	}
+}
+
+func (o *Options) validateEgressConfig(encapMode config.TrafficEncapModeType) error {
+	if !features.DefaultFeatureGate.Enabled(features.Egress) {
+		return nil
+	}
+	if encapMode != config.TrafficEncapModeEncap {
+		klog.InfoS("The Egress feature gate is enabled, but it won't work because it is only applicable to the encap mode")
+		return nil
+	}
+	for _, cidr := range o.config.Egress.ExceptCIDRs {
+		_, _, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("Egress Except CIDR %s is invalid", cidr)
+		}
+	}
+	if o.config.Egress.MaxEgressIPsPerNode > defaultMaxEgressIPsPerNode {
+		return fmt.Errorf("maxEgressIPsPerNode cannot be greater than %d", defaultMaxEgressIPsPerNode)
+	}
+	o.enableEgress = true
+	return nil
 }
 
 func (o *Options) validateK8sNodeOptions() error {
@@ -392,7 +547,9 @@ func (o *Options) validateK8sNodeOptions() error {
 	if err := o.checkUnsupportedFeatures(); err != nil {
 		return err
 	}
-
+	if err := o.validateAntreaProxyConfig(encapMode); err != nil {
+		return fmt.Errorf("proxy config is invalid: %w", err)
+	}
 	if encapMode.SupportsNoEncap() {
 		// When using NoEncap traffic mode without AntreaProxy, Pod-to-Service traffic is handled by kube-proxy
 		// (iptables/ipvs) in the root netns. If the Endpoint is not local the DNATed traffic will be output to
@@ -401,7 +558,7 @@ func (o *Options) validateK8sNodeOptions() error {
 		// AntreaProxy. But one can bypass this check and force this feature combination to be allowed, by defining
 		// the ALLOW_NO_ENCAP_WITHOUT_ANTREA_PROXY environment variable and setting it to true. This may lead to
 		// better performance when using NoEncap if Egress NetworkPolicy enforcement is not required.
-		if !features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
+		if !o.enableAntreaProxy {
 			if env.GetAllowNoEncapWithoutAntreaProxy() {
 				klog.InfoS("Disabling AntreaProxy in NoEncap mode will prevent Egress NetworkPolicy rules from being enforced correctly")
 			} else {
@@ -420,37 +577,20 @@ func (o *Options) validateK8sNodeOptions() error {
 		// (but SNAT can be done by the primary CNI).
 		o.config.NoSNAT = true
 	}
-	if err := o.validateAntreaProxyConfig(); err != nil {
-		return fmt.Errorf("proxy config is invalid: %w", err)
-	}
 	if err := o.validateFlowExporterConfig(); err != nil {
 		return fmt.Errorf("failed to validate flow exporter config: %v", err)
 	}
-	if err := o.validateMulticastConfig(); err != nil {
+	if err := o.validateMulticastConfig(encryptionMode); err != nil {
 		return fmt.Errorf("failed to validate multicast config: %v", err)
 	}
-	if features.DefaultFeatureGate.Enabled(features.Egress) {
-		for _, cidr := range o.config.Egress.ExceptCIDRs {
-			_, _, err := net.ParseCIDR(cidr)
-			if err != nil {
-				return fmt.Errorf("Egress Except CIDR %s is invalid", cidr)
-			}
-		}
+	if err := o.validateEgressConfig(encapMode); err != nil {
+		return fmt.Errorf("failed to validate egress config: %v", err)
 	}
-	if (features.DefaultFeatureGate.Enabled(features.Multicluster) || o.config.Multicluster.Enable) &&
-		encapMode != config.TrafficEncapModeEncap {
-		// Only Encap mode is supported for Multi-cluster feature.
-		return fmt.Errorf("Multicluster is only applicable to the %s mode", config.TrafficEncapModeEncap)
+	if err := o.validateMulticlusterConfig(encapMode, encryptionMode); err != nil {
+		return err
 	}
-	if features.DefaultFeatureGate.Enabled(features.NodePortLocal) {
-		startPort, endPort, err := parsePortRange(o.config.NodePortLocal.PortRange)
-		if err != nil {
-			return fmt.Errorf("NodePortLocal portRange is not valid: %v", err)
-		}
-		o.nplStartPort = startPort
-		o.nplEndPort = endPort
-	} else if o.config.NodePortLocal.Enable {
-		klog.InfoS("The nodePortLocal.enable config option is set to true, but it will be ignored because the NodePortLocal feature gate is disabled")
+	if err := o.validateNodePortLocalConfig(); err != nil {
+		return fmt.Errorf("failed to validate nodePortLocal config: %v", err)
 	}
 	if err := o.validateAntreaIPAMConfig(); err != nil {
 		return fmt.Errorf("failed to validate AntreaIPAM config: %v", err)
@@ -464,6 +604,17 @@ func (o *Options) validateK8sNodeOptions() error {
 		}
 		o.dnsServerOverride = hostPort
 	}
+
+	if err := o.validateSecondaryNetworkConfig(); err != nil {
+		return fmt.Errorf("failed to validate secondary network config: %v", err)
+	}
+
+	// Unlike checkUnsupportedFeatures, validateConfigForPlatform runs after all validations and
+	// after all fields in the Options struct have been initialized (e.g., enableProxy).
+	if err := o.validateConfigForPlatform(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -491,9 +642,6 @@ func (o *Options) validateExternalNodeOptions() error {
 	if o.config.NodePortLocal.Enable {
 		unsupported = append(unsupported, "NodePortLocal")
 	}
-	if o.config.EnableIPSecTunnel {
-		unsupported = append(unsupported, "EnableIPSecTunnel")
-	}
 	if unsupported != nil {
 		return fmt.Errorf("unsupported features on Virtual Machine: {%s}", strings.Join(unsupported, ", "))
 	}
@@ -507,7 +655,7 @@ func (o *Options) validatePolicyBypassRulesConfig() error {
 	if len(o.config.ExternalNode.PolicyBypassRules) == 0 {
 		return nil
 	}
-	allowedProtocols := sets.NewString("tcp", "udp", "icmp", "ip")
+	allowedProtocols := sets.New[string]("tcp", "udp", "icmp", "ip")
 	for _, rule := range o.config.ExternalNode.PolicyBypassRules {
 		if rule.Direction != "ingress" && rule.Direction != "egress" {
 			return fmt.Errorf("direction %s for policyBypassRule is invalid", rule.Direction)
@@ -528,6 +676,7 @@ func (o *Options) validatePolicyBypassRulesConfig() error {
 	return nil
 
 }
+
 func (o *Options) setExternalNodeDefaultOptions() {
 	// Following options are default values for agent running on a Virtual Machine.
 	// They are set to avoid unexpected agent crash.
@@ -541,4 +690,70 @@ func (o *Options) setExternalNodeDefaultOptions() {
 	if o.config.ExternalNode.ExternalNodeNamespace == "" {
 		o.config.ExternalNode.ExternalNodeNamespace = "default"
 	}
+}
+
+func (o *Options) setMulticlusterDefaultOptions() {
+	_, trafficEncryptionModeType := config.GetTrafficEncryptionModeFromStr(o.config.Multicluster.TrafficEncryptionMode)
+	if trafficEncryptionModeType == config.TrafficEncryptionModeWireGuard {
+		if o.config.Multicluster.WireGuard.Port == 0 {
+			o.config.Multicluster.WireGuard.Port = apis.MulticlusterWireGuardListenPort
+		}
+	}
+}
+
+func (o *Options) setAuditLoggingDefaultOptions() {
+	auditLogging := &o.config.AuditLogging
+	if auditLogging.MaxSize == 0 {
+		auditLogging.MaxSize = defaultAuditLogsMaxAge
+	}
+	if auditLogging.MaxBackups == nil {
+		maxBackups := int32(defaultAuditLogsMaxBackups)
+		auditLogging.MaxBackups = &maxBackups
+	}
+	if auditLogging.MaxAge == nil {
+		maxAge := int32(defaultAuditLogsMaxAge)
+		auditLogging.MaxAge = &maxAge
+	}
+	if auditLogging.Compress == nil {
+		compress := defaultAuditLogsCompressed
+		auditLogging.Compress = &compress
+	}
+}
+
+func (o *Options) validateSecondaryNetworkConfig() error {
+	if !features.DefaultFeatureGate.Enabled(features.SecondaryNetwork) {
+		return nil
+	}
+
+	if len(o.config.SecondaryNetwork.OVSBridges) == 0 {
+		return nil
+	}
+	if len(o.config.SecondaryNetwork.OVSBridges) > 1 {
+		return fmt.Errorf("only one OVS bridge can be specified for secondary network")
+	}
+	brConfig := o.config.SecondaryNetwork.OVSBridges[0]
+	if brConfig.BridgeName == "" {
+		return fmt.Errorf("bridge name is not provided for the secondary network OVS bridge")
+	}
+	if len(brConfig.PhysicalInterfaces) > 8 {
+		return fmt.Errorf("at most eight physical interfaces can be specified for the secondary network OVS bridge")
+	}
+
+	return nil
+}
+
+func (o *Options) validateNodePortLocalConfig() error {
+	o.enableNodePortLocal = o.config.NodePortLocal.Enable && features.DefaultFeatureGate.Enabled(features.NodePortLocal)
+	if !features.DefaultFeatureGate.Enabled(features.NodePortLocal) {
+		klog.InfoS("Feature gate `NodePortLocal` is deprecated, please use option `nodePortLocal.enable` to disable NodePortLocal")
+	}
+	if o.enableNodePortLocal {
+		startPort, endPort, err := parsePortRange(o.config.NodePortLocal.PortRange)
+		if err != nil {
+			return fmt.Errorf("NodePortLocal portRange is not valid: %v", err)
+		}
+		o.nplStartPort = startPort
+		o.nplEndPort = endPort
+	}
+	return nil
 }

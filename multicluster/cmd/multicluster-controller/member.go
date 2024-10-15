@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,8 +21,10 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	multiclustercontrollers "antrea.io/antrea/multicluster/controllers/multicluster"
+	"antrea.io/antrea/multicluster/controllers/multicluster/member"
 	"antrea.io/antrea/pkg/log"
 	"antrea.io/antrea/pkg/signals"
 	"antrea.io/antrea/pkg/util/env"
@@ -49,57 +51,99 @@ func newMemberCommand() *cobra.Command {
 }
 
 func runMember(o *Options) error {
-	mgr, err := setupManagerAndCertController(o)
+	mgr, err := setupManagerAndCertControllerFunc(false, o)
 	if err != nil {
 		return err
 	}
+	mgrClient := mgr.GetClient()
+	mgrScheme := mgr.GetScheme()
+	podNamespace := env.GetPodNamespace()
+	stopCh := signals.RegisterSignalHandlers()
+	hookServer := mgr.GetWebhookServer()
+	hookServer.Register("/validate-multicluster-crd-antrea-io-v1alpha1-gateway",
+		&webhook.Admission{Handler: &gatewayValidator{
+			Client:    mgrClient,
+			decoder:   admission.NewDecoder(mgr.GetScheme()),
+			namespace: podNamespace,
+		}},
+	)
 
-	clusterSetReconciler := multiclustercontrollers.NewMemberClusterSetReconciler(mgr.GetClient(),
+	hookServer.Register("/validate-multicluster-crd-antrea-io-v1alpha2-clusterset",
+		&webhook.Admission{Handler: &clusterSetValidator{
+			Client:    mgrClient,
+			decoder:   admission.NewDecoder(mgr.GetScheme()),
+			namespace: podNamespace,
+			role:      memberRole,
+		}},
+	)
+
+	commonAreaCreationCh := make(chan struct{}, 1)
+	clusterSetReconciler := member.NewMemberClusterSetReconciler(mgr.GetClient(),
 		mgr.GetScheme(),
 		env.GetPodNamespace(),
+		o.EnableStretchedNetworkPolicy,
+		o.ClusterCalimCRDAvailable,
+		commonAreaCreationCh,
 	)
 	if err = clusterSetReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("error creating ClusterSet controller: %v", err)
 	}
 
 	commonAreaGetter := clusterSetReconciler
-	svcExportReconciler := multiclustercontrollers.NewServiceExportReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		commonAreaGetter)
+	svcExportReconciler := member.NewServiceExportReconciler(
+		mgrClient,
+		mgrScheme,
+		commonAreaGetter,
+		o.EndpointIPType,
+		o.EnableEndpointSlice,
+		podNamespace,
+	)
 	if err = svcExportReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("error creating ServiceExport controller: %v", err)
 	}
+	if o.EnableStretchedNetworkPolicy {
+		labelIdentityReconciler := member.NewLabelIdentityReconciler(
+			mgrClient,
+			mgrScheme,
+			commonAreaGetter,
+			podNamespace)
+		if err = labelIdentityReconciler.SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("error creating LabelIdentity controller: %v", err)
+		}
+		go labelIdentityReconciler.Run(stopCh)
+	}
 
-	gwReconciler := multiclustercontrollers.NewGatewayReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		env.GetPodNamespace(),
-		opts.ServiceCIDR,
+	gwReconciler := member.NewGatewayReconciler(
+		mgrClient,
+		mgrScheme,
+		podNamespace,
+		opts.PodCIDRs,
 		commonAreaGetter)
 	if err = gwReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("error creating Gateway controller: %v", err)
 	}
 
-	nodeReconciler := multiclustercontrollers.NewNodeReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		env.GetPodNamespace(),
-		opts.GatewayIPPrecedence)
+	nodeReconciler := member.NewNodeReconciler(
+		mgrClient,
+		mgrScheme,
+		podNamespace,
+		opts.ServiceCIDR,
+		opts.GatewayIPPrecedence,
+		commonAreaGetter)
 	if err = nodeReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("error creating Node controller: %v", err)
 	}
 
-	stopCh := signals.RegisterSignalHandlers()
-	staleController := multiclustercontrollers.NewStaleResCleanupController(
+	staleController := member.NewStaleResCleanupController(
 		mgr.GetClient(),
 		mgr.GetScheme(),
+		commonAreaCreationCh,
 		env.GetPodNamespace(),
 		commonAreaGetter,
-		multiclustercontrollers.MemberCluster,
 	)
 
 	go staleController.Run(stopCh)
+
 	// Member runs ResourceImportReconciler from RemoteCommonArea only
 
 	klog.InfoS("Member MC Controller Starting Manager")

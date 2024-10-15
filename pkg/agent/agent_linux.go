@@ -18,12 +18,11 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
-	"github.com/vishvananda/netlink"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
@@ -31,13 +30,27 @@ import (
 	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	utilip "antrea.io/antrea/pkg/util/ip"
+)
+
+var (
+	// getInterfaceByName is meant to be overridden for testing.
+	getInterfaceByName = net.InterfaceByName
+
+	// setInterfaceARPAnnounce is meant to be overridden for testing.
+	setInterfaceARPAnnounce = util.EnsureARPAnnounceOnInterface
 )
 
 // prepareHostNetwork returns immediately on Linux.
 func (i *Initializer) prepareHostNetwork() error {
 	return nil
 }
+
+// Assuming a page cache of 4096, based on Suricata source code from L1752-L1798
+// at https://github.com/OISF/suricata/blob/49713ebaa0b8edb057d60f1cfe9126946645a848/src/source-af-packet.c#L1757C2-L1777C129.
+// The maximum supported MTU by Suricata is 32678 after calculation.
+const maxMTUSupportedBySuricata = 32678
 
 // prepareOVSBridgeForK8sNode returns immediately on Linux if connectUplinkToBridge is false.
 func (i *Initializer) prepareOVSBridgeForK8sNode() error {
@@ -54,32 +67,22 @@ func (i *Initializer) prepareOVSBridgeForK8sNode() error {
 	uplinkNetConfig := i.nodeConfig.UplinkNetConfig
 	uplinkNetConfig.Name = adapter.Name
 	uplinkNetConfig.MAC = adapter.HardwareAddr
-	uplinkNetConfig.IPs = []*net.IPNet{i.nodeConfig.NodeIPv4Addr}
-	uplinkNetConfig.Index = adapter.Index
 	// Gateway and DNSServers are not configured at adapter in Linux
 	// Limitation: dynamic DNS servers will be lost after DHCP lease expired
 	uplinkNetConfig.Gateway = ""
 	uplinkNetConfig.DNSServers = ""
-	// Save routes which are configured on the uplink interface.
-	// The routes on the host will be lost when moving the network configuration of the uplink interface
-	// to the OVS bridge local interface. The saved routes will be restored on host after that.
-	if err = i.saveHostRoutes(); err != nil {
-		return err
-	}
 
 	// Set datapathID of OVS bridge.
 	// If no datapathID configured explicitly, the reconfiguration operation will change OVS bridge datapathID
 	// and break the OpenFlow channel.
-	// The length of datapathID is 64 bits, the lower 48-bits are for a MAC address, while the upper 16-bits are
-	// implementer-defined. Antrea uses "0x0000" for the upper 16-bits.
-	datapathID := strings.Replace(uplinkNetConfig.MAC.String(), ":", "", -1)
-	datapathID = "0000" + datapathID
+	datapathID := util.GenerateOVSDatapathID(uplinkNetConfig.MAC.String())
+
 	if err = i.ovsBridgeClient.SetDatapathID(datapathID); err != nil {
 		return fmt.Errorf("failed to set datapath_id %s: err=%w", datapathID, err)
 	}
 
 	if hostOFPort, err := i.ovsBridgeClient.GetOFPort(uplinkNetConfig.Name, false); err == nil {
-		klog.Infof("OVS bridge local port %s already exists", uplinkNetConfig.Name)
+		klog.InfoS("OVS bridge local port already exists", "name", uplinkNetConfig.Name)
 		i.nodeConfig.HostInterfaceOFPort = uint32(hostOFPort)
 		// If local port exists, get the real uplink interface.
 		// This branch is used when antrea-agent had a hard restart (e.g. SIGKILL)
@@ -89,25 +92,17 @@ func (i *Initializer) prepareOVSBridgeForK8sNode() error {
 		} else {
 			uplinkNetConfig.OFPort = uint32(uplinkOFPort)
 		}
-		if adapter, err := net.InterfaceByName(bridgedUplinkName); err != nil {
+		if adapter, err := getInterfaceByName(bridgedUplinkName); err != nil {
 			return fmt.Errorf("cannot find uplink interface %s: err=%w", bridgedUplinkName, err)
 		} else {
 			uplinkNetConfig.Index = adapter.Index
 		}
-		klog.InfoS("Found uplink", "Name", adapter.Name, "Index", uplinkNetConfig.Index, "OFPort", uplinkNetConfig.OFPort)
+		klog.InfoS("Found uplink", "Name", adapter.Name, "Index", uplinkNetConfig.Index, "ofPort", uplinkNetConfig.OFPort)
 	} else {
-		freePort, err := i.ovsBridgeClient.AllocateOFPort(config.UplinkOFPort)
-		if err != nil {
-			return err
-		}
-		uplinkNetConfig.OFPort = uint32(freePort)
-		klog.InfoS("Set OpenFlow port in UplinkNetConfig", "ofport", uplinkNetConfig.OFPort)
-		freePort, err = i.ovsBridgeClient.AllocateOFPort(config.UplinkOFPort)
-		if err != nil {
-			return err
-		}
-		i.nodeConfig.HostInterfaceOFPort = uint32(freePort)
-		klog.InfoS("Set host interface", "ofport", i.nodeConfig.HostInterfaceOFPort)
+		klog.InfoS("Using default OpenFlow port for uplink", "ofPort", config.DefaultUplinkOFPort)
+		uplinkNetConfig.OFPort = config.DefaultUplinkOFPort
+		klog.InfoS("Using default OpenFlow port for host interface", "ofPort", config.DefaultHostInterfaceOFPort)
+		i.nodeConfig.HostInterfaceOFPort = config.DefaultHostInterfaceOFPort
 	}
 	return nil
 }
@@ -118,58 +113,8 @@ func (i *Initializer) getTunnelPortLocalIP() net.IP {
 	return nil
 }
 
-func GetTransportIPNetDeviceByName(ifaceName string, ovsBridgeName string) (*net.IPNet, *net.IPNet, *net.Interface, error) {
+func getTransportIPNetDeviceByName(ifaceName string, ovsBridgeName string) (*net.IPNet, *net.IPNet, *net.Interface, error) {
 	return util.GetIPNetDeviceByName(ifaceName)
-}
-
-// saveHostRoutes saves routes which are configured on uplink interface before
-// the interface the configured as the uplink of antrea network.
-// The routes will be restored on OVS bridge interface after the IP configuration
-// is moved to the OVS bridge.
-func (i *Initializer) saveHostRoutes() error {
-	routes, err := netlink.RouteList(nil, netlink.FAMILY_V4)
-	if err != nil {
-		return err
-	}
-	for _, route := range routes {
-		if route.LinkIndex != i.nodeConfig.UplinkNetConfig.Index {
-			klog.V(2).Infof("Skipped host route not on uplink: %+v", route)
-			continue
-		}
-		// Skip IPv6 routes before we support IPv6 stack.
-		// TODO(gran): support IPv6
-		if route.Gw.To4() == nil {
-			klog.V(2).Infof("Skipped IPv6 host route: %+v", route)
-			continue
-		}
-		klog.Infof("Got host route=%+v", route)
-		i.nodeConfig.UplinkNetConfig.Routes = append(i.nodeConfig.UplinkNetConfig.Routes, route)
-	}
-	return nil
-}
-
-// restoreHostRoutes restores the host routes which are lost when moving the IP
-// configuration of uplink interface to the OVS bridge interface during
-// the antrea network initialize stage.
-// The backup routes are restored after the IP configuration change.
-func (i *Initializer) restoreHostRoutes() error {
-	return i.restoreHostRoutesToInterface(i.nodeConfig.UplinkNetConfig.Name)
-}
-
-func (i *Initializer) restoreHostRoutesToInterface(ifaceName string) error {
-	iface, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return nil
-	}
-	for _, routeInterface := range i.nodeConfig.UplinkNetConfig.Routes {
-		route := routeInterface.(netlink.Route)
-		newRoute := route
-		newRoute.LinkIndex = iface.Index
-		if err := netlink.RouteReplace(&newRoute); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (i *Initializer) ConnectUplinkToOVSBridge() error {
@@ -177,23 +122,29 @@ func (i *Initializer) ConnectUplinkToOVSBridge() error {
 	if !i.connectUplinkToBridge {
 		return nil
 	}
-	klog.Infof("Bridging uplink to OVS bridge")
+	klog.InfoS("Bridging uplink to OVS bridge")
 	var err error
 	uplinkNetConfig := i.nodeConfig.UplinkNetConfig
-	uplinkName := uplinkNetConfig.Name
-	bridgedUplinkName := util.GenerateUplinkInterfaceName(uplinkNetConfig.Name)
 
-	// If uplink is already exists, return.
-	if uplinkOFPort, err := i.ovsBridgeClient.GetOFPort(bridgedUplinkName, false); err == nil {
-		klog.InfoS("Uplink already exists, skip the configuration", "uplink", bridgedUplinkName, "port", uplinkOFPort)
-		return nil
+	externalIDs := map[string]interface{}{
+		interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaHost,
 	}
-	uplinkIPs, err := util.GetAllIPNetsByName(uplinkName)
+	// We request the same MTU for the bridge interface as for the uplink adapter. If we don't,
+	// OVS will default to the lowest MTU among all existing bridge ports, including container
+	// ports. There may be some existing workloads with a lower MTU, and using that lower value
+	// may impact host connectivity.
+	bridgedUplinkName, exists, err := util.PrepareHostInterfaceConnection(
+		i.ovsBridgeClient,
+		uplinkNetConfig.Name,
+		int32(i.nodeConfig.HostInterfaceOFPort),
+		externalIDs,
+		i.nodeConfig.NodeTransportInterfaceMTU,
+	)
 	if err != nil {
-		return fmt.Errorf("failed to get uplink IPs: err=%w", err)
+		return err
 	}
-	if err := util.RenameInterface(uplinkName, bridgedUplinkName); err != nil {
-		return fmt.Errorf("failed to change uplink interface name: err=%w", err)
+	if exists {
+		return nil
 	}
 
 	// Create uplink port.
@@ -210,45 +161,6 @@ func (i *Initializer) ConnectUplinkToOVSBridge() error {
 	klog.InfoS("Allocated OpenFlow port for uplink interface", "port", bridgedUplinkName, "ofPort", uplinkOFPort)
 	uplinkInterface.OVSPortConfig = &interfacestore.OVSPortConfig{uplinkPortUUID, uplinkOFPort} //nolint: govet
 	i.ifaceStore.AddInterface(uplinkInterface)
-
-	// Create local port.
-	externalIDs := map[string]interface{}{
-		interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaHost,
-	}
-	if _, err = i.ovsBridgeClient.CreateInternalPort(uplinkName, int32(i.nodeConfig.HostInterfaceOFPort), uplinkNetConfig.MAC.String(), externalIDs); err != nil {
-		return fmt.Errorf("cannot create host interface port %s: err=%w", uplinkName, err)
-	}
-
-	// Move network configuration of uplink interface to OVS bridge local interface.
-	// The net configuration of uplink will be restored by RestoreOVSBridge when shutting down.
-	wait.PollImmediate(100*time.Millisecond, 10000*time.Millisecond, func() (bool, error) {
-		// Wait a few seconds for OVS bridge local port.
-		link, err := netlink.LinkByName(uplinkName)
-		if err != nil {
-			klog.V(4).InfoS("OVS bridge local port is not ready", "port", uplinkName, "err", err)
-			return false, nil
-		}
-		klog.InfoS("OVS bridge local port is ready", "type", link.Type(), "attrs", link.Attrs())
-		return true, nil
-	})
-	localLink, err := netlink.LinkByName(uplinkName)
-	if err != nil {
-		return err
-	}
-	if _, _, err = util.SetLinkUp(uplinkName); err != nil {
-		return err
-	}
-	if err = util.ConfigureLinkAddresses(localLink.Attrs().Index, uplinkIPs); err != nil {
-		return err
-	}
-	if err = util.ConfigureLinkAddresses(uplinkNetConfig.Index, nil); err != nil {
-		return err
-	}
-	// Restore the host routes which are lost when moving the network configuration of the uplink interface to OVS bridge interface.
-	if err = i.restoreHostRoutes(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -258,38 +170,12 @@ func (i *Initializer) RestoreOVSBridge() {
 	if !i.connectUplinkToBridge {
 		return
 	}
-	klog.Infof("Restoring bridge config to uplink...")
-	uplinkNetConfig := i.nodeConfig.UplinkNetConfig
-	uplinkName := ""
-	bridgedUplinkName := ""
-	if uplinkNetConfig != nil {
-		uplinkName = uplinkNetConfig.Name
-		bridgedUplinkName = util.GenerateUplinkInterfaceName(uplinkName)
-	}
-	brName := i.ovsBridge
+	klog.InfoS("Restoring bridge config to uplink...")
 
-	if uplinkName != "" {
-		uplinkIPs, err := util.GetAllIPNetsByName(uplinkName)
-		if err != nil {
-			klog.ErrorS(err, "Failed to get uplink IPs")
-		}
-		if err := util.DeleteOVSPort(brName, uplinkName); err != nil {
-			klog.ErrorS(err, "Delete OVS port failed", "port", uplinkName)
-		}
-		if err := util.DeleteOVSPort(brName, bridgedUplinkName); err != nil {
-			klog.ErrorS(err, "Delete OVS port failed", "port", bridgedUplinkName)
-		}
-		if err := util.RenameInterface(bridgedUplinkName, uplinkName); err != nil {
-			klog.ErrorS(err, "Restore uplink name failed", "uplink", bridgedUplinkName)
-		}
-		if err := util.ConfigureLinkAddresses(uplinkNetConfig.Index, uplinkIPs); err != nil {
-			klog.ErrorS(err, "Configure IP to uplink failed", "uplink", uplinkName)
-		}
-		if err := i.restoreHostRoutesToInterface(uplinkName); err != nil {
-			klog.ErrorS(err, "Configure route to uplink interface failed", "uplink", uplinkName)
-		}
+	if i.nodeConfig.UplinkNetConfig.Name != "" {
+		util.RestoreHostInterfaceConfiguration(i.ovsBridge, i.nodeConfig.UplinkNetConfig.Name)
+		klog.InfoS("Finished restoring bridge config to uplink...")
 	}
-	klog.Infof("Finished to restore bridge config to uplink...")
 }
 
 func (i *Initializer) setInterfaceMTU(iface string, mtu int) error {
@@ -310,5 +196,69 @@ func (i *Initializer) prepareOVSBridgeForVM() error {
 }
 
 func (i *Initializer) installVMInitialFlows() error {
+	return nil
+}
+
+// prepareL7EngineInterfaces creates two OVS internal ports. An application-aware engine will connect to OVS
+// through these two ports.
+func (i *Initializer) prepareL7EngineInterfaces() error {
+	trafficControlPortExternalIDs := map[string]interface{}{
+		interfacestore.AntreaInterfaceTypeKey: interfacestore.AntreaTrafficControl,
+	}
+
+	for _, portName := range []string{config.L7RedirectTargetPortName, config.L7RedirectReturnPortName} {
+		_, exists := i.ifaceStore.GetInterface(portName)
+		if exists {
+			continue
+		}
+		portUUID, err := i.ovsBridgeClient.CreateInternalPort(portName, ovsconfig.AutoAssignedOFPort, "", trafficControlPortExternalIDs)
+		if err != nil {
+			return err
+		}
+		if pollErr := wait.PollUntilContextTimeout(context.TODO(), time.Second, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+			_, _, err := util.SetLinkUp(portName)
+			if err == nil {
+				return true, nil
+			}
+			if _, ok := err.(util.LinkNotFound); ok {
+				return false, nil
+			}
+			return false, err
+		}); pollErr != nil {
+			return pollErr
+		}
+
+		ofPort, err := i.ovsBridgeClient.GetOFPort(portName, false)
+		if err != nil {
+			return err
+		}
+
+		itf := interfacestore.NewTrafficControlInterface(portName, &interfacestore.OVSPortConfig{PortUUID: portUUID, OFPort: ofPort})
+		i.ifaceStore.AddInterface(itf)
+	}
+
+	targetPort, _ := i.ifaceStore.GetInterfaceByName(config.L7RedirectTargetPortName)
+	returnPort, _ := i.ifaceStore.GetInterfaceByName(config.L7RedirectReturnPortName)
+	i.l7NetworkPolicyConfig.TargetOFPort = uint32(targetPort.OFPort)
+	i.l7NetworkPolicyConfig.ReturnOFPort = uint32(returnPort.OFPort)
+	// Set the ports with no-flood to reject ARP flood packets at every startup.
+	if err := i.ovsCtlClient.SetPortNoFlood(int(targetPort.OFPort)); err != nil {
+		return fmt.Errorf("failed to set port %s with no-flood config: %w", config.L7RedirectTargetPortName, err)
+	}
+	if err := i.ovsCtlClient.SetPortNoFlood(int(returnPort.OFPort)); err != nil {
+		return fmt.Errorf("failed to set port %s with no-flood config: %w", config.L7RedirectReturnPortName, err)
+	}
+	// Set MTU of the ports to the calculated MTU value at every startup.
+	if err := i.setInterfaceMTU(config.L7RedirectTargetPortName, i.networkConfig.InterfaceMTU); err != nil {
+		return err
+	}
+	if err := i.setInterfaceMTU(config.L7RedirectReturnPortName, i.networkConfig.InterfaceMTU); err != nil {
+		return err
+	}
+	// Currently, the maximum of MTU supported by L7 NetworkPolicy engine Suricata is 32678 (assuming that the page size
+	// is 4096). If the calculated MTU value is greater than 32678, Suricata may fail to start.
+	if i.networkConfig.InterfaceMTU > maxMTUSupportedBySuricata {
+		klog.ErrorS(nil, "L7 NetworkPolicy engine Suricata may fail to start since the interface MTU is greater than the maximum MTU supported by Suricata", "interfaceMTU", i.networkConfig.InterfaceMTU, "maximumMTU", maxMTUSupportedBySuricata)
+	}
 	return nil
 }

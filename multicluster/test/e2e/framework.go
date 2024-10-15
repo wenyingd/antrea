@@ -23,7 +23,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	antreae2e "antrea.io/antrea/test/e2e"
 	"antrea.io/antrea/test/e2e/providers"
 )
@@ -39,6 +39,8 @@ const (
 	multiClusterTestNamespace string = "antrea-multicluster-test"
 	eastClusterTestService    string = "east-nginx"
 	westClusterTestService    string = "west-nginx"
+	mcEastClusterTestService  string = "antrea-mc-east-nginx"
+	mcWestClusterTestService  string = "antrea-mc-west-nginx"
 	eastCluster               string = "east-cluster"
 	westCluster               string = "west-cluster"
 	leaderCluster             string = "leader-cluster"
@@ -48,8 +50,8 @@ const (
 	gatewayNodeClientSuffix string = "gateway-client"
 	regularNodeClientSuffix string = "regular-client"
 
-	nginxImage   = "projects.registry.vmware.com/antrea/nginx:1.21.6-alpine"
-	agnhostImage = "agnhost:2.26"
+	nginxImage   = "antrea/nginx:1.21.6-alpine"
+	agnhostImage = "registry.k8s.io/e2e-test-images/agnhost:2.40"
 )
 
 var provider providers.ProviderInterface
@@ -67,7 +69,7 @@ var testOptions TestOptions
 
 type MCTestData struct {
 	clusters            []string
-	clusterTestDataMap  map[string]antreae2e.TestData
+	clusterTestDataMap  map[string]*antreae2e.TestData
 	controlPlaneNames   map[string]string
 	logsDirForTestCase  string
 	clusterGateways     map[string]string
@@ -85,9 +87,9 @@ func (data *MCTestData) createClients() error {
 	data.clusters = []string{
 		leaderCluster, eastCluster, westCluster,
 	}
-	data.clusterTestDataMap = map[string]antreae2e.TestData{}
+	data.clusterTestDataMap = make(map[string]*antreae2e.TestData)
 	for i, cluster := range data.clusters {
-		testData := antreae2e.TestData{}
+		testData := &antreae2e.TestData{ClusterName: cluster}
 		if err := testData.CreateClient(kubeConfigPaths[i]); err != nil {
 			return fmt.Errorf("error initializing clients for cluster %s: %v", cluster, err)
 		}
@@ -130,9 +132,37 @@ func (data *MCTestData) createTestNamespaces() error {
 	return nil
 }
 
+func (data *MCTestData) deleteTestNamespaces() error {
+	for cluster, d := range data.clusterTestDataMap {
+		if err := d.DeleteNamespace(multiClusterTestNamespace, defaultTimeout); err != nil {
+			log.Errorf("Failed to delete Namespace %s in cluster %s", multiClusterTestNamespace, cluster)
+			return err
+		}
+	}
+	return nil
+}
+
+func (data *MCTestData) patchPod(clusterName, namespace, name string, patch []byte) error {
+	if d, ok := data.clusterTestDataMap[clusterName]; ok {
+		if err := d.PatchPod(namespace, name, patch); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (data *MCTestData) deletePod(clusterName, namespace, name string) error {
 	if d, ok := data.clusterTestDataMap[clusterName]; ok {
 		if err := d.DeletePod(namespace, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (data *MCTestData) deletePodAndWait(clusterName, namespace, name string) error {
+	if d, ok := data.clusterTestDataMap[clusterName]; ok {
+		if err := d.DeletePodAndWait(defaultTimeout, namespace, name); err != nil {
 			return err
 		}
 	}
@@ -163,7 +193,27 @@ func (data *MCTestData) createPod(clusterName, name, nodeName, namespace, ctrNam
 			WithCommand(command).WithArgs(args).
 			WithEnv(env).WithPorts(ports).WithHostNetwork(hostNetwork).
 			WithMutateFunc(mutateFunc).
-			Create(&d)
+			Create(d)
+	}
+	return fmt.Errorf("clusterName %s not found", clusterName)
+}
+
+func (data *MCTestData) updatePod(clusterName string, namespace, name string, mutateFunc func(*corev1.Pod)) error {
+	if d, ok := data.clusterTestDataMap[clusterName]; ok {
+		if err := d.UpdatePod(namespace, name, mutateFunc); err != nil {
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("clusterName %s not found", clusterName)
+}
+
+func (data *MCTestData) updateNamespace(clusterName string, namespace string, mutateFunc func(*corev1.Namespace)) error {
+	if d, ok := data.clusterTestDataMap[clusterName]; ok {
+		if err := d.UpdateNamespace(namespace, mutateFunc); err != nil {
+			return err
+		}
+		return nil
 	}
 	return fmt.Errorf("clusterName %s not found", clusterName)
 }
@@ -181,17 +231,32 @@ func (data *MCTestData) createService(clusterName, serviceName, namespace string
 	return nil, fmt.Errorf("clusterName %s not found", clusterName)
 }
 
-func (data *MCTestData) createOrUpdateANP(clusterName string, anp *crdv1alpha1.NetworkPolicy) (*crdv1alpha1.NetworkPolicy, error) {
+func (data *MCTestData) createOrUpdateANNP(clusterName string, annp *crdv1beta1.NetworkPolicy) (*crdv1beta1.NetworkPolicy, error) {
 	if d, ok := data.clusterTestDataMap[clusterName]; ok {
-		return d.CreateOrUpdateANP(anp)
+		return d.CreateOrUpdateANNP(annp)
 	}
 	return nil, fmt.Errorf("clusterName %s not found", clusterName)
 }
 
-// deleteANP is a convenience function for deleting ANP by name and Namespace.
-func (data *MCTestData) deleteANP(clusterName, namespace, name string) error {
+// deleteANNP is a convenience function for deleting ANNP by name and Namespace.
+func (data *MCTestData) deleteANNP(clusterName, namespace, name string) error {
 	if d, ok := data.clusterTestDataMap[clusterName]; ok {
-		return d.DeleteANP(namespace, name)
+		return d.DeleteANNP(namespace, name)
+	}
+	return fmt.Errorf("clusterName %s not found", clusterName)
+}
+
+func (data *MCTestData) createOrUpdateACNP(clusterName string, acnp *crdv1beta1.ClusterNetworkPolicy) (*crdv1beta1.ClusterNetworkPolicy, error) {
+	if d, ok := data.clusterTestDataMap[clusterName]; ok {
+		return d.CreateOrUpdateACNP(acnp)
+	}
+	return nil, fmt.Errorf("clusterName %s not found", clusterName)
+}
+
+// deleteACNP is a convenience function for deleting ACNP by name.
+func (data *MCTestData) deleteACNP(clusterName, name string) error {
+	if d, ok := data.clusterTestDataMap[clusterName]; ok {
+		return d.DeleteACNP(name)
 	}
 	return fmt.Errorf("clusterName %s not found", clusterName)
 }
@@ -240,15 +305,7 @@ func (data *MCTestData) probeFromPodInCluster(
 		corev1.ProtocolUDP:  "udp",
 		corev1.ProtocolSCTP: "sctp",
 	}
-	// There seems to be an issue when running Antrea in Kind where tunnel traffic is dropped at
-	// first. This leads to the first test being run consistently failing. To avoid this issue
-	// until it is resolved, we try to connect 3 times.
-	// See https://github.com/antrea-io/antrea/issues/467.
-	cmd := []string{
-		"/bin/sh",
-		"-c",
-		fmt.Sprintf("for i in $(seq 1 3); do /agnhost connect %s:%d --timeout=1s --protocol=%s; done;", dstAddr, port, protocolStr[protocol]),
-	}
+	cmd := antreae2e.ProbeCommand(fmt.Sprintf("%s:%d", dstAddr, port), protocolStr[protocol], "")
 	log.Tracef("Running: kubectl exec %s -c %s -n %s -- %s", podName, containerName, podNamespace, strings.Join(cmd, " "))
 	stdout, stderr, err := data.runCommandFromPod(cluster, podNamespace, podName, containerName, cmd)
 	// It needs to check both err and stderr because:

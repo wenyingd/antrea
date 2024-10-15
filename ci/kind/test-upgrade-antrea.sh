@@ -148,8 +148,18 @@ fi
 
 echo "Running upgrade test for tag $FROM_TAG"
 
-DOCKER_IMAGES=("busybox" "projects.registry.vmware.com/antrea/antrea-ubuntu:$FROM_TAG")
+function version_lt() { test "$(printf '%s\n' "$@" | sort -rV | head -n 1)" != "$1"; }
 
+DOCKER_IMAGES=()
+if version_lt "$FROM_TAG" v1.15; then
+    DOCKER_IMAGES+=("antrea/antrea-ubuntu:$FROM_TAG")
+else
+    DOCKER_IMAGES+=("antrea/antrea-agent-ubuntu:$FROM_TAG" \
+                    "antrea/antrea-controller-ubuntu:$FROM_TAG")
+fi
+
+# Silence CLI suggestions.
+export DOCKER_CLI_HINTS=false
 for img in "${DOCKER_IMAGES[@]}"; do
     echo "Pulling $img"
     for i in `seq 3`; do
@@ -158,7 +168,8 @@ for img in "${DOCKER_IMAGES[@]}"; do
     done
 done
 
-DOCKER_IMAGES+=("projects.registry.vmware.com/antrea/antrea-ubuntu:latest")
+DOCKER_IMAGES+=("antrea/antrea-agent-ubuntu:latest" \
+                "antrea/antrea-controller-ubuntu:latest")
 
 echo "Creating Kind cluster"
 IMAGES="${DOCKER_IMAGES[@]}"
@@ -178,7 +189,9 @@ $ROOT_DIR/hack/generate-manifest.sh --on-delete | docker exec -i kind-control-pl
 TMP_ANTREA_DIR=$(mktemp -d)
 git clone --branch $FROM_TAG --depth 1 https://github.com/antrea-io/antrea.git $TMP_ANTREA_DIR
 pushd $TMP_ANTREA_DIR > /dev/null
-export IMG_NAME=projects.registry.vmware.com/antrea/antrea-ubuntu
+export IMG_NAME=antrea/antrea-ubuntu
+export AGENT_IMG_NAME=antrea/antrea-agent-ubuntu
+export CONTROLLER_IMG_NAME=antrea/antrea-controller-ubuntu
 export IMG_TAG=$FROM_TAG
 ./hack/generate-manifest.sh --mode release | kubectl apply -f -
 ./hack/generate-manifest.sh --mode release | docker exec -i kind-control-plane dd of=/root/antrea.yml

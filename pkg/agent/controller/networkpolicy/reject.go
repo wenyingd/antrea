@@ -15,10 +15,9 @@
 package networkpolicy
 
 import (
-	"encoding/binary"
 	"fmt"
+	"net"
 
-	"antrea.io/libOpenflow/openflow15"
 	"antrea.io/libOpenflow/protocol"
 	"antrea.io/ofnet/ofctrl"
 
@@ -28,67 +27,55 @@ import (
 	binding "antrea.io/antrea/pkg/ovs/openflow"
 )
 
-const (
-	IPv4HdrLen uint16 = 20
-	IPv6HdrLen uint16 = 40
-
-	ICMPUnusedHdrLen uint16 = 4
-
-	TCPAck uint8 = 0b010000
-	TCPRst uint8 = 0b000100
-
-	ICMPDstUnreachableType         uint8 = 3
-	ICMPDstHostAdminProhibitedCode uint8 = 10
-
-	ICMPv6DstUnreachableType     uint8 = 1
-	ICMPv6DstAdminProhibitedCode uint8 = 1
-)
-
-type RejectType int
+type rejectType int
 
 const (
-	// RejectPodLocal represents this packetOut is used to reject Pod-to-Pod traffic
+	// rejectPodLocal represents this packetOut is used to reject Pod-to-Pod traffic
 	// and for this response, the srcPod and the dstPod are on the same Node.
-	RejectPodLocal RejectType = iota
-	// RejectPodRemoteToLocal represents this packetOut is used to reject Pod-to-Pod
+	rejectPodLocal rejectType = iota
+	// rejectPodRemoteToLocal represents this packetOut is used to reject Pod-to-Pod
 	// traffic and for this response, the srcPod is on a remote Node and the dstPod is
 	// on the local Node.
-	RejectPodRemoteToLocal
-	// RejectLocalToRemote represents this packetOut is used to reject traffic and for
-	// this response, the srcPod is on the local Node and the dstPod is on a remote Node.
-	// While generating rejection from local to remote, there is no difference between
-	// Service traffic and Pod traffic.
-	RejectLocalToRemote
-	// RejectServiceLocal represents this packetOut is used to reject Service traffic,
+	rejectPodRemoteToLocal
+	// rejectPodLocalToRemote represents this packetOut is used to reject Pod-to-Pod
+	// traffic and for this response, the srcPod is on the local Node and the dstPod is
+	// on a remote Node.
+	rejectPodLocalToRemote
+	// rejectServiceLocal represents this packetOut is used to reject Service traffic,
 	// when AntreaProxy is enabled. The EndpointPod and the dstPod of the reject
 	// response are on the same Node.
-	RejectServiceLocal
-	// RejectServiceRemoteToLocal represents this packetOut is used to reject Service
+	rejectServiceLocal
+	// rejectServiceRemoteToLocal represents this packetOut is used to reject Service
 	// traffic, when AntreaProxy is enabled. The EndpointPod is on a remote Node and
 	// the dstPod of the reject response is on the local Node.
-	RejectServiceRemoteToLocal
-	// RejectNoAPServiceLocal represents this packetOut is used to reject Service
+	rejectServiceRemoteToLocal
+	// rejectServiceLocalToRemote represents this packetOut is used to reject Service
+	// traffic, when AntreaProxy is enabled. The EndpointPod is on the local Node and
+	// the dstPod of the reject response is on a remote Node.
+	rejectServiceLocalToRemote
+	// rejectNoAPServiceLocal represents this packetOut is used to reject Service
 	// traffic, when AntreaProxy is disabled. The EndpointPod and the dstPod of the
 	// reject response are on the same Node.
-	RejectNoAPServiceLocal
-	// RejectNoAPServiceRemoteToLocal represents this packetOut is used to reject
+	rejectNoAPServiceLocal
+	// rejectNoAPServiceRemoteToLocal represents this packetOut is used to reject
 	// Service traffic, when AntreaProxy is disabled. The EndpointPod is on a remote
 	// Node and the dstPod of the reject response is on the local Node.
-	RejectNoAPServiceRemoteToLocal
-	// RejectServiceRemoteToExternal represents this packetOut is used to reject
+	rejectNoAPServiceRemoteToLocal
+	// rejectServiceRemoteToExternal represents this packetOut is used to reject
 	// Service traffic, when AntreaProxy is enabled. The EndpointPod is on a remote
 	// Node and the destination of the reject response is an external client.
-	RejectServiceRemoteToExternal
-	// Unsupported indicates that Antrea couldn't generate packetOut for current
+	rejectServiceRemoteToExternal
+	// unsupported indicates that Antrea couldn't generate packetOut for current
 	// packetIn.
-	Unsupported
+	unsupported
 )
 
 // rejectRequest sends reject response to the requesting client, based on the
 // packet-in message.
 func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
+	// All src/dst mean the source/destination of the reject packet, which are destination/source of the incoming packet.
 	// Get ethernet data.
-	ethernetPkt, err := getEthernetPacket(pktIn)
+	ethernetPkt, err := openflow.GetEthernetPacket(pktIn)
 	if err != nil {
 		return err
 	}
@@ -116,8 +103,25 @@ func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
 		isIPv6 = true
 	}
 
-	sIface, srcFound := c.ifaceStore.GetInterfaceByIP(srcIP)
-	dIface, dstFound := c.ifaceStore.GetInterfaceByIP(dstIP)
+	sIface, srcIsLocal := c.ifaceStore.GetInterfaceByIP(srcIP)
+	dIface, dstIsLocal := c.ifaceStore.GetInterfaceByIP(dstIP)
+	// dstIsDirect means that the reject packet destination is on the same Node and the reject packet can be forwarded
+	// without leaving the OVS bridge.
+	dstIsDirect := dstIsLocal
+	matches := pktIn.GetMatches()
+	if c.antreaProxyEnabled && dstIsLocal {
+		// Check if OVS InPort matches dIface.
+		// If port doesn't match, set dstIsDirect to false since the reject packet destination should not be sent to
+		// local Pod directly.
+		if match := matches.GetMatchByName(binding.OxmFieldInPort); match != nil {
+			dstIsDirect = match.GetValue().(uint32) == uint32(dIface.OFPort)
+		}
+	}
+	isFlexibleIPAMSrc, isFlexibleIPAMDst, ctZone, err := parseFlexibleIPAMStatus(pktIn, c.nodeConfig, srcIP, srcIsLocal, dstIP, dstIsLocal)
+	if err != nil {
+		return err
+	}
+
 	// isServiceTraffic checks if it's a Service traffic when the destination of the
 	// reject response is on local Node. When the destination of the reject response is
 	// remote, isServiceTraffic will always return false. Because there is no
@@ -126,6 +130,7 @@ func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
 	// There are two situations in which it can be determined that this is a service
 	// traffic:
 	// 1. When AntreaProxy is enabled, EpSelectedRegMark is set in ServiceEPStateField.
+	//    AntreaProxy is required for FlexibleIPAM feature.
 	// 2. When AntreaProxy is disabled, dstIP of reject response is on the local Node
 	//    and dstMAC of reject response is antrea-gw's MAC. In this case, the reject
 	//    response is being generated for locally-originated traffic that went through
@@ -146,13 +151,13 @@ func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
 			return false
 		}
 		gwIfaces := c.ifaceStore.GetInterfacesByType(interfacestore.GatewayInterface)
-		return dstFound && dstMAC == gwIfaces[0].MAC.String()
+		return dstIsLocal && dstMAC == gwIfaces[0].MAC.String()
 	}
-	packetOutType := getRejectType(isServiceTraffic(), c.antreaProxyEnabled, srcFound, dstFound)
-	if packetOutType == Unsupported {
+	packetOutType := getRejectType(isServiceTraffic(), c.antreaProxyEnabled, srcIsLocal, dstIsDirect)
+	if packetOutType == unsupported {
 		return fmt.Errorf("error when generating reject response for the packet from: %s to %s: neither source nor destination are on this Node", dstIP, srcIP)
 	}
-	if packetOutType == RejectServiceRemoteToExternal {
+	if packetOutType == rejectServiceRemoteToExternal {
 		dstMAC = openflow.GlobalVirtualMAC.String()
 	}
 	// When in AntreaIPAM mode, even though srcPod and dstPod are on the same Node, MAC
@@ -161,57 +166,15 @@ func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
 	// L3ForwardingTable. So we need to re-write MAC here. There is no need to check
 	// whether AntreaIPAM mode is enabled. Because if AntreaIPAM mode is disabled,
 	// this re-write doesn't change anything.
-	if packetOutType == RejectPodLocal {
+	if packetOutType == rejectPodLocal {
 		srcMAC = sIface.MAC.String()
 		dstMAC = dIface.MAC.String()
 	}
-	tunPort := c.tunPort
-	if tunPort == 0 {
-		// openflow15.P_CONTROLLER is used with noEncap mode when tunnel interface is not found.
-		// It won't cause a loop with openflow15.P_CONTROLLER because it is used as the input port but not output port
-		// in the packet out message.
-		tunPort = uint32(openflow15.P_CONTROLLER)
-	}
-	inPort, outPort := getRejectOFPorts(packetOutType, sIface, dIface, c.gwPort, tunPort)
-	mutateFunc := getRejectPacketOutMutateFunc(packetOutType, c.nodeType)
 
-	if proto == protocol.Type_TCP {
-		// Get TCP data.
-		oriTCPSrcPort, oriTCPDstPort, oriTCPSeqNum, _, _, err := binding.GetTCPHeaderData(ethernetPkt.Data)
-		if err != nil {
-			return err
-		}
-		// While sending TCP reject packet-out, switch original src/dst port,
-		// set the ackNum as original seqNum+1 and set the flag as ack+rst.
-		return c.ofClient.SendTCPPacketOut(
-			srcMAC,
-			dstMAC,
-			srcIP,
-			dstIP,
-			inPort,
-			outPort,
-			isIPv6,
-			oriTCPDstPort,
-			oriTCPSrcPort,
-			oriTCPSeqNum+1,
-			TCPAck|TCPRst,
-			mutateFunc)
-	}
-	// Use ICMP host administratively prohibited for ICMP, UDP, SCTP reject.
-	icmpType := ICMPDstUnreachableType
-	icmpCode := ICMPDstHostAdminProhibitedCode
-	ipHdrLen := IPv4HdrLen
-	if isIPv6 {
-		icmpType = ICMPv6DstUnreachableType
-		icmpCode = ICMPv6DstAdminProhibitedCode
-		ipHdrLen = IPv6HdrLen
-	}
-	ipHdr, _ := ethernetPkt.Data.MarshalBinary()
-	icmpData := make([]byte, int(ICMPUnusedHdrLen+ipHdrLen+8))
-	// Put ICMP unused header in Data prop and set it to zero.
-	binary.BigEndian.PutUint32(icmpData[:ICMPUnusedHdrLen], 0)
-	copy(icmpData[ICMPUnusedHdrLen:], ipHdr[:ipHdrLen+8])
-	return c.ofClient.SendICMPPacketOut(
+	inPort, outPort := getRejectOFPorts(packetOutType, sIface, dIface, c.gwPort, c.tunPort)
+	mutateFunc := getRejectPacketOutMutateFunc(packetOutType, c.nodeType, isFlexibleIPAMSrc, isFlexibleIPAMDst, ctZone)
+
+	return openflow.SendRejectPacketOut(c.ofClient,
 		srcMAC,
 		dstMAC,
 		srcIP,
@@ -219,101 +182,171 @@ func (c *Controller) rejectRequest(pktIn *ofctrl.PacketIn) error {
 		inPort,
 		outPort,
 		isIPv6,
-		icmpType,
-		icmpCode,
-		icmpData,
+		ethernetPkt,
+		proto,
 		mutateFunc)
 }
 
-// getRejectType returns RejectType of a rejection.
-func getRejectType(isServiceTraffic, antreaProxyEnabled, srcIsLocal, dstIsLocal bool) RejectType {
+// getRejectType returns rejectType of a rejection.
+func getRejectType(isServiceTraffic, antreaProxyEnabled, srcIsLocal, dstIsLocal bool) rejectType {
 	if !isServiceTraffic {
 		if srcIsLocal {
 			if dstIsLocal {
-				return RejectPodLocal
+				return rejectPodLocal
 			}
-			return RejectLocalToRemote
+			return rejectPodLocalToRemote
 		}
 		if dstIsLocal {
-			return RejectPodRemoteToLocal
+			return rejectPodRemoteToLocal
 		}
-		return Unsupported
+		return unsupported
 	}
 	if !antreaProxyEnabled {
 		if srcIsLocal {
-			return RejectNoAPServiceLocal
+			return rejectNoAPServiceLocal
 		}
 		if dstIsLocal {
-			return RejectNoAPServiceRemoteToLocal
+			return rejectNoAPServiceRemoteToLocal
 		}
-		return Unsupported
+		return unsupported
 	}
 	if srcIsLocal {
 		if dstIsLocal {
-			return RejectServiceLocal
+			return rejectServiceLocal
 		}
-		return RejectLocalToRemote
+		return rejectServiceLocalToRemote
 	}
 	if dstIsLocal {
-		return RejectServiceRemoteToLocal
+		return rejectServiceRemoteToLocal
 	}
-	return RejectServiceRemoteToExternal
+	return rejectServiceRemoteToExternal
 }
 
-// getRejectOFPorts returns the inPort and outPort of a packetOut based on the RejectType.
-func getRejectOFPorts(rejectType RejectType, sIface, dIface *interfacestore.InterfaceConfig, gwOFPort, tunOFPort uint32) (uint32, uint32) {
+// getRejectOFPorts returns the inPort and outPort of a packetOut based on the rejectType.
+func getRejectOFPorts(rejectType rejectType, sIface, dIface *interfacestore.InterfaceConfig, gwOFPort, tunOFPort uint32) (uint32, uint32) {
 	inPort := gwOFPort
 	outPort := uint32(0)
 	switch rejectType {
-	case RejectPodLocal:
+	case rejectPodLocal:
 		inPort = uint32(sIface.OFPort)
 		outPort = uint32(dIface.OFPort)
-	case RejectServiceLocal:
+	case rejectServiceLocal:
+		fallthrough
+	case rejectServiceLocalToRemote:
+		// For rejectServiceLocal and rejectServiceLocalToRemote, we set inPort as the
+		// OFPort of the srcPod to simulate its rejection. And we don't set outPort, since
+		// it's Service traffic load-balanced by AntreaProxy. The reject response packet
+		// needs to be UnDNATed by the pipeline, instead of directly sending it out
+		// through outPort.
 		inPort = uint32(sIface.OFPort)
-	case RejectPodRemoteToLocal:
+	case rejectPodRemoteToLocal:
 		if dIface.Type == interfacestore.ExternalEntityInterface {
 			inPort = uint32(dIface.EntityInterfaceConfig.UplinkPort.OFPort)
 		} else {
 			inPort = gwOFPort
 		}
 		outPort = uint32(dIface.OFPort)
-	case RejectServiceRemoteToLocal:
+	case rejectServiceRemoteToLocal:
 		inPort = gwOFPort
-	case RejectLocalToRemote:
+	case rejectPodLocalToRemote:
 		inPort = uint32(sIface.OFPort)
 		if sIface.Type == interfacestore.ExternalEntityInterface {
 			outPort = uint32(sIface.EntityInterfaceConfig.UplinkPort.OFPort)
 		}
-	case RejectNoAPServiceLocal:
+	case rejectNoAPServiceLocal:
 		inPort = uint32(sIface.OFPort)
 		outPort = gwOFPort
-	case RejectNoAPServiceRemoteToLocal:
+	case rejectNoAPServiceRemoteToLocal:
 		inPort = tunOFPort
+		if inPort == 0 {
+			// If tunnel interface is not found, which means we are in noEncap mode, then use
+			// gateway port as inPort.
+			inPort = gwOFPort
+		}
 		outPort = gwOFPort
-	case RejectServiceRemoteToExternal:
+	case rejectServiceRemoteToExternal:
 		inPort = tunOFPort
+		if inPort == 0 {
+			// If tunnel interface is not found, which means we are in noEncap mode, then use
+			// gateway port as inPort.
+			inPort = gwOFPort
+		}
 	}
 	return inPort, outPort
 }
 
-// getRejectPacketOutMutateFunc returns the mutate func of a packetOut based on the RejectType.
-func getRejectPacketOutMutateFunc(rejectType RejectType, nodeType config.NodeType) func(binding.PacketOutBuilder) binding.PacketOutBuilder {
+// getRejectPacketOutMutateFunc returns the mutate func of a packetOut based on the rejectType.
+func getRejectPacketOutMutateFunc(rejectType rejectType, nodeType config.NodeType, isFlexibleIPAMSrc, isFlexibleIPAMDst bool, ctZone uint32) func(binding.PacketOutBuilder) binding.PacketOutBuilder {
 	var mutatePacketOut func(binding.PacketOutBuilder) binding.PacketOutBuilder
+	mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
+		return packetOutBuilder.AddLoadRegMark(openflow.GeneratedRejectPacketOutRegMark)
+	}
 	switch rejectType {
-	case RejectServiceLocal:
+	case rejectServiceLocal:
 		tableID := openflow.ConntrackTable.GetID()
-		mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
-			return packetOutBuilder.AddResubmitAction(nil, &tableID)
+		if isFlexibleIPAMSrc {
+			mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
+				return packetOutBuilder.AddLoadRegMark(openflow.GeneratedRejectPacketOutRegMark).
+					AddLoadRegMark(openflow.AntreaFlexibleIPAMRegMark).AddLoadRegMark(binding.NewRegMark(openflow.CtZoneField, ctZone)).
+					AddResubmitAction(nil, &tableID)
+			}
+		} else {
+			mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
+				return packetOutBuilder.AddLoadRegMark(openflow.GeneratedRejectPacketOutRegMark).
+					AddLoadRegMark(binding.NewRegMark(openflow.CtZoneField, ctZone)).
+					AddResubmitAction(nil, &tableID)
+			}
 		}
-	case RejectLocalToRemote:
+	case rejectPodLocalToRemote:
 		tableID := openflow.L3ForwardingTable.GetID()
 		// L3ForwardingTable is not initialized for ExternalNode case since layer 3 is not needed.
 		if nodeType == config.ExternalNode {
 			tableID = openflow.L2ForwardingCalcTable.GetID()
 		}
-		mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
-			return packetOutBuilder.AddResubmitAction(nil, &tableID)
+		if isFlexibleIPAMSrc {
+			mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
+				return packetOutBuilder.AddLoadRegMark(openflow.GeneratedRejectPacketOutRegMark).
+					AddLoadRegMark(openflow.AntreaFlexibleIPAMRegMark).AddLoadRegMark(binding.NewRegMark(openflow.CtZoneField, ctZone)).
+					AddResubmitAction(nil, &tableID)
+			}
+		} else {
+			mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
+				return packetOutBuilder.AddLoadRegMark(openflow.GeneratedRejectPacketOutRegMark).
+					AddLoadRegMark(binding.NewRegMark(openflow.CtZoneField, ctZone)).
+					AddResubmitAction(nil, &tableID)
+			}
+		}
+	case rejectServiceRemoteToLocal:
+		if isFlexibleIPAMDst {
+			tableID := openflow.ConntrackTable.GetID()
+			mutatePacketOut = func(packetOutBuilder binding.PacketOutBuilder) binding.PacketOutBuilder {
+				return packetOutBuilder.AddLoadRegMark(openflow.GeneratedRejectPacketOutRegMark).
+					AddLoadRegMark(binding.NewRegMark(openflow.CtZoneField, ctZone)).
+					AddResubmitAction(nil, &tableID)
+			}
 		}
 	}
 	return mutatePacketOut
+}
+
+func parseFlexibleIPAMStatus(pktIn *ofctrl.PacketIn, nodeConfig *config.NodeConfig, srcIP string, srcIsLocal bool, dstIP string, dstIsLocal bool) (isFlexibleIPAMSrc bool, isFlexibleIPAMDst bool, ctZone uint32, err error) {
+	// isFlexibleIPAMSrc is true if srcIP belongs to a local FlexibleIPAM Pod.
+	// isFlexibleIPAMDst is true if dstIP belongs to a local FlexibleIPAM Pod.
+	// ctZone is not zero if FlexibleIPAM is enabled.
+	if srcIsLocal && nodeConfig.PodIPv4CIDR != nil && !nodeConfig.PodIPv4CIDR.Contains(net.ParseIP(srcIP)) {
+		isFlexibleIPAMSrc = true
+	}
+	if dstIsLocal && nodeConfig.PodIPv4CIDR != nil && !nodeConfig.PodIPv4CIDR.Contains(net.ParseIP(dstIP)) {
+		isFlexibleIPAMDst = true
+	}
+	// ctZone is read from the incoming packet.
+	// The generated reject packet should have same ctZone with the incoming packet, otherwise the conntrack cannot work properly.
+	matches := pktIn.GetMatches()
+	if match := getMatchRegField(matches, openflow.CtZoneField); match != nil {
+		ctZone, err = getInfoInReg(match, openflow.CtZoneField.GetRange().ToNXRange())
+		if err != nil {
+			return false, false, 0, err
+		}
+	}
+	return
 }

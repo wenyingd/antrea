@@ -46,27 +46,9 @@ rules:
   resources:
   - clusterclaims
   verbs:
-  - create
-  - delete
   - get
   - list
-  - patch
-  - update
   - watch
-- apiGroups:
-  - multicluster.crd.antrea.io
-  resources:
-  - clusterclaims/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - multicluster.crd.antrea.io
-  resources:
-  - clusterclaims/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - multicluster.crd.antrea.io
   resources:
@@ -251,14 +233,11 @@ metadata:
 rules:
 - apiGroups:
   - admissionregistration.k8s.io
-  resourceNames:
-  - antrea-multicluster-antrea-mc-mutating-webhook-configuration
-  - antrea-multicluster-antrea-mc-validating-webhook-configuration
   resources:
   - mutatingwebhookconfigurations
   - validatingwebhookconfigurations
   verbs:
-  - get
+  - list
   - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -316,19 +295,32 @@ data:
     health:
       healthProbeBindAddress: :8080
     metrics:
-      bindAddress: 0
+      bindAddress: "0"
     webhook:
       port: 9443
-    leaderElection:
-      leaderElect: false
     serviceCIDR: ""
+    podCIDRs:
+      - ""
     gatewayIPPrecedence: "private"
+    endpointIPType: "ClusterIP"
+    enableStretchedNetworkPolicy: false
 kind: ConfigMap
 metadata:
   labels:
     app: antrea
-  name: antrea-mc-controller-config-hbdmg9b87m
+  name: antrea-mc-controller-config
   namespace: antrea-multicluster
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  annotations:
+    kubernetes.io/service-account.name: antrea-mc-member-access-sa
+  labels:
+    app: antrea
+  name: antrea-mc-member-access-token
+  namespace: antrea-multicluster
+type: kubernetes.io/service-account-token
 ---
 apiVersion: v1
 kind: Service
@@ -361,6 +353,8 @@ spec:
       component: antrea-mc-controller
   template:
     metadata:
+      annotations:
+        checksum/config: 81ec1a33aace39ae40ac2f5d909b5d1d0208bbe6a1e8d1d9ada232bcc583b76a
       labels:
         app: antrea
         component: antrea-mc-controller
@@ -376,7 +370,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        image: projects.registry.vmware.com/antrea/antrea-mc-controller:latest
+        image: antrea/antrea-mc-controller:latest
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -409,15 +403,17 @@ spec:
       terminationGracePeriodSeconds: 10
       volumes:
       - configMap:
-          name: antrea-mc-controller-config-hbdmg9b87m
+          name: antrea-mc-controller-config
         name: antrea-mc-controller-config
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  creationTimestamp: null
   labels:
     app: antrea
+    role: leader
+    served-by: antrea-mc-controller
+    served-in: antrea-multicluster
   name: antrea-multicluster-antrea-mc-mutating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
@@ -448,9 +444,11 @@ webhooks:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
-  creationTimestamp: null
   labels:
     app: antrea
+    role: leader
+    served-by: antrea-mc-controller
+    served-in: antrea-multicluster
   name: antrea-multicluster-antrea-mc-validating-webhook-configuration
 webhooks:
 - admissionReviewVersions:
@@ -460,9 +458,9 @@ webhooks:
     service:
       name: antrea-mc-webhook-service
       namespace: antrea-multicluster
-      path: /validate-multicluster-crd-antrea-io-v1alpha2-clusterclaim
+      path: /validate-multicluster-crd-antrea-io-v1alpha2-clusterset
   failurePolicy: Fail
-  name: vclusterclaim.kb.io
+  name: vclusterset.kb.io
   namespaceSelector:
     matchLabels:
       kubernetes.io/metadata.name: antrea-multicluster
@@ -475,30 +473,6 @@ webhooks:
     - CREATE
     - UPDATE
     - DELETE
-    resources:
-    - clusterclaims
-  sideEffects: None
-- admissionReviewVersions:
-  - v1
-  - v1beta1
-  clientConfig:
-    service:
-      name: antrea-mc-webhook-service
-      namespace: antrea-multicluster
-      path: /validate-multicluster-crd-antrea-io-v1alpha1-clusterset
-  failurePolicy: Fail
-  name: vclusterset.kb.io
-  namespaceSelector:
-    matchLabels:
-      kubernetes.io/metadata.name: antrea-multicluster
-  rules:
-  - apiGroups:
-    - multicluster.crd.antrea.io
-    apiVersions:
-    - v1alpha1
-    operations:
-    - CREATE
-    - UPDATE
     resources:
     - clustersets
   sideEffects: None

@@ -7,7 +7,17 @@ This script prepares environment needed by antrea-agent which includes:
 - Cleaning stale Antrea network resources if they exist.
 - Prepare a network interface which is needed by kube-proxy. Without the interface, kube-proxy cannot
   provide the proxy for Kubernetes Services.
+
+.PARAMETER InstallKubeProxy
+[DEPRECATED] Specifies whether kube-proxy interface is included in the installation.
+
+.PARAMETER RunOVSServices
+Specifies whether the OVS userspace daemons should be started as Windows services.
 #>
+Param(
+    [parameter(Mandatory = $false)] [bool] $InstallKubeProxy = $false,
+    [parameter(Mandatory = $false)] [bool] $RunOVSServices= $true
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -24,14 +34,23 @@ if ($AntreaHnsNetwork) {
     }
 }
 if ($NeedCleanNetwork) {
+    $ovsRunMode = "service"
+    if ($RunOVSServices -eq $false) {
+        $ovsRunMode = "container"
+    }
     Write-Host "Cleaning stale Antrea network resources if they exist..."
-    & $CleanAntreaNetworkScript
+    & $CleanAntreaNetworkScript -OVSRunMode $ovsRunMode
 }
 # Enure OVS services are running.
-Write-Host "Starting ovsdb-server service..."
-Start-Service ovsdb-server
-Write-Host "Starting ovs-vswitchd service..."
-Start-Service ovs-vswitchd
+if ($RunOVSServices -eq $true) {
+    Write-Host "Starting ovsdb-server service..."
+    Start-Service ovsdb-server
+    Write-Host "Starting ovs-vswitchd service..."
+    Start-Service ovs-vswitchd
+}
 # Prepare service network interface for kube-proxy.
-Write-Host "Preparing service network interface for kube-proxy..."
-& $PrepareServiceInterfaceScript
+if ($InstallKubeProxy -eq $true) {
+    Write-Host "Running Antrea with kube-proxy is no longer supported, this parameter will be removed soon"
+    Write-Host "Preparing service network interface for kube-proxy..."
+    & $PrepareServiceInterfaceScript
+}

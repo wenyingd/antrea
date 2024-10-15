@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package config
+package agent
 
 import (
 	componentbaseconfig "k8s.io/component-base/config"
@@ -33,12 +33,8 @@ type AgentConfig struct {
 	// Make sure it doesn't conflict with your existing OpenVSwitch bridges.
 	// Defaults to br-int.
 	OVSBridge string `yaml:"ovsBridge,omitempty"`
-	// Datapath type to use for the OpenVSwitch bridge created by Antrea. Supported values are:
-	// - system
-	// - netdev
-	// 'system' is the default value and corresponds to the kernel datapath. Use 'netdev' to run
-	// OVS in userspace mode (not fully supported yet). Userspace mode requires the tun device
-	// driver to be available.
+	// Datapath type to use for the OpenVSwitch bridge created by Antrea. At the moment, the only supported
+	// value is 'system', which corresponds to the kernel datapath.
 	OVSDatapathType string `yaml:"ovsDatapathType,omitempty"`
 	// Runtime data directory used by Open vSwitch.
 	// Default value:
@@ -65,6 +61,9 @@ type AgentConfig struct {
 	// the external network needs not be SNAT'd. In the networkPolicyOnly mode, antrea-agent never
 	// performs SNAT and this option will be ignored; for other modes it must be set to false.
 	NoSNAT bool `yaml:"noSNAT,omitempty"`
+	// Fully randomize source port mapping in SNAT rules used for egress traffic from Pods to
+	// the external network. Default is false.
+	SNATFullyRandomPorts bool `yaml:"snatFullyRandomPorts"`
 	// Tunnel protocols used for encapsulating traffic across Nodes. Supported values:
 	// - geneve (default)
 	// - vxlan
@@ -75,6 +74,14 @@ type AgentConfig struct {
 	// If zero, it will use the assigned IANA port for the protocol, i.e. 6081 for Geneve, 4789 for VXLAN,
 	// and 7471 for STT.
 	TunnelPort int32 `yaml:"tunnelPort,omitempty"`
+	// TunnelCsum determines whether to compute UDP encapsulation header (Geneve or VXLAN) checksums on outgoing
+	// packets. For Linux kernel before Mar 2021, UDP checksum must be present to trigger GRO on the receiver for better
+	// performance of Geneve and VXLAN tunnels. The issue has been fixed by
+	// https://github.com/torvalds/linux/commit/89e5c58fc1e2857ccdaae506fb8bc5fed57ee063, thus computing UDP checksum is
+	// no longer necessary.
+	// Default is false. It should only be set to true when you are using an unpatched Linux kernel and observing poor
+	// transfer performance.
+	TunnelCsum bool `yaml:"tunnelCsum,omitempty"`
 	// Default MTU to use for the host gateway interface and the network interface of each Pod.
 	// If omitted, antrea-agent will discover the MTU of the Node's primary interface and
 	// also adjust MTU to accommodate for tunnel encapsulation overhead (if applicable).
@@ -94,8 +101,6 @@ type AgentConfig struct {
 	// --service-cluster-ip-range. When AntreaProxy is enabled, this parameter is not needed.
 	// No default value for this field.
 	ServiceCIDRv6 string `yaml:"serviceCIDRv6,omitempty"`
-	// Deprecated. Use TrafficEncryptionMode instead.
-	EnableIPSecTunnel bool `yaml:"enableIPSecTunnel,omitempty"`
 	// Determines how tunnel traffic is encrypted.
 	// It has the following options:
 	// - none (default): Inter-node Pod traffic will not be encrypted.
@@ -129,15 +134,143 @@ type AgentConfig struct {
 	// Enable metrics exposure via Prometheus. Initializes Prometheus metrics listener
 	// Defaults to true.
 	EnablePrometheusMetrics *bool `yaml:"enablePrometheusMetrics,omitempty"`
+	// Deprecated. Use the FlowExporter config options instead.
+	FlowCollectorAddr string `yaml:"flowCollectorAddr,omitempty"`
+	// Deprecated. Use the FlowExporter config options instead.
+	FlowPollInterval string `yaml:"flowPollInterval,omitempty"`
+	// Deprecated. Use the FlowExporter config options instead.
+	ActiveFlowExportTimeout string `yaml:"activeFlowExportTimeout,omitempty"`
+	// Deprecated. Use the FlowExporter config options instead.
+	IdleFlowExportTimeout string `yaml:"idleFlowExportTimeout,omitempty"`
+	// NodePortLocal (NPL) configuration options.
+	NodePortLocal NodePortLocalConfig `yaml:"nodePortLocal,omitempty"`
+	// FlowExporter configuration options.
+	FlowExporter FlowExporterConfig `yaml:"flowExporter,omitempty"`
+	// Provide the address of Kubernetes apiserver, to override any value provided in kubeconfig or
+	// InClusterConfig. It is typically used when kube-proxy is not deployed (replaced by AntreaProxy).
+	// Defaults to "". It must be a host string, a host:port pair, or a URL to the base of the apiserver.
+	KubeAPIServerOverride string `yaml:"kubeAPIServerOverride,omitempty"`
+	// Provide the address of DNS server, to override the kube-dns Service. It's used to resolve
+	// hostnames in a FQDN policy.
+	// Defaults to "". It must be a host string or a host:port pair of the DNS server (e.g. 10.96.0.10,
+	// 10.96.0.10:53, [fd00:10:96::a]:53).
+	DNSServerOverride string `yaml:"dnsServerOverride,omitempty"`
+	// Cipher suites to use.
+	TLSCipherSuites string `yaml:"tlsCipherSuites,omitempty"`
+	// TLS min version.
+	TLSMinVersion string `yaml:"tlsMinVersion,omitempty"`
+	// The name of the interface on Node which is used for tunneling or routing the traffic across Nodes.
+	// If there are multiple IP addresses configured on the interface, the first one is used. The IP
+	// address used for tunneling or routing traffic to remote Nodes is decided in the following order of
+	// preference (from highest to lowest):
+	// 1. TransportInterface
+	// 2. TransportInterfaceCIDRs
+	// 3. The Node IP
+	TransportInterface string `yaml:"transportInterface,omitempty"`
+	// The network CIDRs of the interface on Node which is used for tunneling or routing the traffic across
+	// Nodes. If there are multiple interfaces configured the same network CIDR, the first one is used. The
+	// IP address used for tunneling or routing traffic to remote Nodes is decided in the following order of
+	// preference (from highest to lowest):
+	// 1. TransportInterface
+	// 2. TransportInterfaceCIDRs
+	// 3. The Node IP
+	TransportInterfaceCIDRs []string `yaml:"transportInterfaceCIDRs,omitempty"`
+	// Multicast configuration options.
+	Multicast MulticastConfig `yaml:"multicast,omitempty"`
+	// AntreaProxy contains AntreaProxy related configuration options.
+	AntreaProxy AntreaProxyConfig `yaml:"antreaProxy,omitempty"`
+	// Egress related configurations.
+	Egress EgressConfig `yaml:"egress"`
+	// IPsec related configurations.
+	IPsec IPsecConfig `yaml:"ipsec"`
+	// Multicluster configuration options.
+	Multicluster MulticlusterConfig `yaml:"multicluster,omitempty"`
+	// NodeType is type of the Node where Antrea Agent is running.
+	// Defaults to "k8sNode". Valid values include "k8sNode", and "externalNode".
+	NodeType string `yaml:"nodeType,omitempty"`
+	// ExternalNode related configurations.
+	ExternalNode ExternalNodeConfig `yaml:"externalNode,omitempty"`
+	// AuditLogging supports configuring log rotation for audit logs.
+	AuditLogging AuditLoggingConfig `yaml:"auditLogging,omitempty"`
+	// Antrea's native secondary network configuration.
+	SecondaryNetwork SecondaryNetworkConfig `yaml:"secondaryNetwork,omitempty"`
+	// PacketInRate defines the OVS controller packet rate limits for different
+	// features. All features will apply this rate-limit individually on packet-in
+	// messages sent to antrea-agent. The number stands for the rate as packets per
+	// second(pps) and the burst size will be automatically set to twice the rate.
+	// When the rate and burst size are exceeded, new packets will be dropped.
+	PacketInRate int `yaml:"packetInRate,omitempty"`
+}
+
+type AntreaProxyConfig struct {
+	// To disable AntreaProxy, set this to false.
+	Enable *bool `yaml:"enable,omitempty"`
+	// ProxyAll tells antrea-agent to proxy all Service traffic, including NodePort, LoadBalancer, and ClusterIP traffic,
+	// regardless of where they come from. Therefore, running kube-proxy is no longer required.
+	ProxyAll bool `yaml:"proxyAll,omitempty"`
+	// A string array of values which specifies the host IPv4/IPv6 addresses for NodePorts. Values may be valid IP blocks.
+	// (e.g. 1.2.3.0/24, 1.2.3.4/32). An empty string slice is meant to select all host IPv4/IPv6 addresses.
+	NodePortAddresses []string `yaml:"nodePortAddresses,omitempty"`
+	// An array of string values to specify a list of Services which should be ignored by AntreaProxy (traffic to these
+	// Services will not be load-balanced). Values can be a valid ClusterIP (e.g. 10.11.1.2) or a Service name
+	// with Namespace (e.g. kube-system/kube-dns)
+	SkipServices []string `yaml:"skipServices,omitempty"`
+	// When ProxyLoadBalancerIPs is set to false, AntreaProxy no longer load-balances traffic destined to the
+	// External IPs of LoadBalancer Services. This is useful when the external LoadBalancer provides additional
+	// capabilities (e.g. TLS termination) and it is desirable for Pod-to-ExternalIP traffic to be sent to the
+	// external LoadBalancer instead of being load-balanced to an Endpoint directly by AntreaProxy.
+	// Note that setting ProxyLoadBalancerIPs to false usually only makes sense when ProxyAll is set to true and
+	// kube-proxy is removed from the cluser, otherwise kube-proxy will still load-balance this traffic.
+	// Defaults to true.
+	ProxyLoadBalancerIPs *bool `yaml:"proxyLoadBalancerIPs,omitempty"`
+	// The value of service.kubernetes.io/service-proxy-name label for AntreaProxy to match. If it is set, then
+	// AntreaProxy only handles the Service objects matching this label. The default value is empty string, which
+	// means that AntreaProxy will manage all Service objects without the mentioned label.
+	ServiceProxyName string `yaml:"serviceProxyName,omitempty"`
+	// Determines how external traffic is processed when it's load balanced across Nodes by default.
+	// It has the following options:
+	// - nat (default): External traffic is SNAT'd when it's load balanced across Nodes to ensure symmetric path.
+	// - dsr:           External traffic is never SNAT'd. Backend Pods running on Nodes that are not the ingress Node
+	//                  can reply to clients directly, bypassing the ingress Node.
+	// A Service's load balancer mode can be overridden by annotating it with `service.antrea.io/load-balancer-mode`.
+	DefaultLoadBalancerMode string `yaml:"defaultLoadBalancerMode,omitempty"`
+}
+
+type WireGuardConfig struct {
+	// The port for the WireGuard to receive traffic. Defaults to 51820.
+	Port int `yaml:"port,omitempty"`
+}
+
+type NodePortLocalConfig struct {
+	// Enable NodePortLocal, a feature used to make Pods reachable using port forwarding on the
+	// host. To enable this feature, you need to set "enable" to true, and ensure that the
+	// NodePortLocal feature gate is also enabled (which is the default).
+	Enable bool `yaml:"enable,omitempty"`
+	// Provide the port range used by NodePortLocal. When the NodePortLocal feature is enabled,
+	// a port from that range will be assigned whenever a Pod's container defines a specific
+	// port to be exposed (each container can define a list of ports as
+	// pod.spec.containers[].ports), and all Node traffic directed to that port will be
+	// forwarded to the Pod.
+	PortRange string `yaml:"portRange,omitempty"`
+}
+
+type FlowExporterConfig struct {
+	// Enable FlowExporter, a feature used to export polled conntrack connections as
+	// IPFIX flow records from each agent to a configured collector. To enable this
+	// feature, you need to set "enable" to true, and ensure that the FlowExporter
+	// feature gate is also enabled.
+	Enable bool `yaml:"enable,omitempty"`
 	// Provide the IPFIX collector address as a string with format <HOST>:[<PORT>][:<PROTO>].
-	// HOST can either be the DNS name or the IP of the Flow Collector. For example,
-	// "flow-aggregator.flow-aggregator.svc" can be provided as DNS name to connect
-	// to the Antrea Flow Aggregator service. If IP, it can be either IPv4 or IPv6.
-	// However, IPv6 address should be wrapped with [].
+	// HOST can either be the DNS name, IP, or Service name of the Flow Collector. If
+	// using an IP, it can be either IPv4 or IPv6. However, IPv6 address should be
+	// wrapped with []. When the collector is running in-cluster as a Service, set
+	// <HOST> to <Service namespace>/<Service name>. For example,
+	// "flow-aggregator/flow-aggregator" can be provided to connect to the Antrea
+	// Flow Aggregator Service.
 	// If PORT is empty, we default to 4739, the standard IPFIX port.
 	// If no PROTO is given, we consider "tcp" as default. We support "tcp" and
 	// "udp" L4 transport protocols.
-	// Defaults to "flow-aggregator.flow-aggregator.svc:4739:tcp".
+	// Defaults to "flow-aggregator/flow-aggregator:4739:tcp".
 	FlowCollectorAddr string `yaml:"flowCollectorAddr,omitempty"`
 	// Provide flow poll interval in format "0s". This determines how often flow
 	// exporter dumps connections in conntrack module. Flow poll interval should
@@ -160,109 +293,34 @@ type AgentConfig struct {
 	// Defaults to "15s". Valid time units are "ns", "us" (or "µs"), "ms", "s",
 	// "m", "h".
 	IdleFlowExportTimeout string `yaml:"idleFlowExportTimeout,omitempty"`
-	// Deprecated. Use the NodePortLocal config options instead.
-	NPLPortRange string `yaml:"nplPortRange,omitempty"`
-	// NodePortLocal (NPL) configuration options.
-	NodePortLocal NodePortLocalConfig `yaml:"nodePortLocal,omitempty"`
-	// Provide the address of Kubernetes apiserver, to override any value provided in kubeconfig or InClusterConfig.
-	// Defaults to "". It must be a host string, a host:port pair, or a URL to the base of the apiserver.
-	KubeAPIServerOverride string `yaml:"kubeAPIServerOverride,omitempty"`
-	// Provide the address of DNS server, to override the kube-dns service. It's used to resolve hostname in FQDN policy.
-	// Defaults to "". It must be a host string or a host:port pair of the DNS server (e.g. 10.96.0.10, 10.96.0.10:53,
-	// [fd00:10:96::a]:53).
-	DNSServerOverride string `yaml:"dnsServerOverride,omitempty"`
-	// Cipher suites to use.
-	TLSCipherSuites string `yaml:"tlsCipherSuites,omitempty"`
-	// TLS min version.
-	TLSMinVersion string `yaml:"tlsMinVersion,omitempty"`
-	// The name of the interface on Node which is used for tunneling or routing the traffic across Nodes.
-	// If there are multiple IP addresses configured on the interface, the first one is used. The IP
-	// address used for tunneling or routing traffic to remote Nodes is decided in the following order of
-	// preference (from highest to lowest):
-	// 1. TransportInterface
-	// 2. TransportInterfaceCIDRs
-	// 3. The Node IP
-	TransportInterface string `yaml:"transportInterface,omitempty"`
-	// The network CIDRs of the interface on Node which is used for tunneling or routing the traffic across
-	// Nodes. If there are multiple interfaces configured the same network CIDR, the first one is used. The
-	// IP address used for tunneling or routing traffic to remote Nodes is decided in the following order of
-	// preference (from highest to lowest):
-	// 1. TransportInterface
-	// 2. TransportInterfaceCIDRs
-	// 3. The Node IP
-	TransportInterfaceCIDRs []string `yaml:"transportInterfaceCIDRs,omitempty"`
-	// The names of the interfaces on Nodes that are used to forward multicast traffic.
-	// Defaults to transport interface if not set.
-	// Deprecated: use Multicast.MulticastInterfaces instead.
-	MulticastInterfaces []string `yaml:"multicastInterfaces,omitempty"`
-	// Multicast configuration options.
-	Multicast MulticastConfig `yaml:"multicast,omitempty"`
-	// AntreaProxy contains AntreaProxy related configuration options.
-	AntreaProxy AntreaProxyConfig `yaml:"antreaProxy,omitempty"`
-	// Egress related configurations.
-	Egress EgressConfig `yaml:"egress"`
-	// IPsec related configurations.
-	IPsec IPsecConfig `yaml:"ipsec"`
-	// Multicluster configuration options.
-	Multicluster MulticlusterConfig `yaml:"multicluster,omitempty"`
-	// NodeType is type of the Node where Antrea Agent is running.
-	// Defaults to "k8sNode". Valid values include "k8sNode", and "externalNode".
-	NodeType string `yaml:"nodeType,omitempty"`
-	// ExternalNode related configurations.
-	ExternalNode ExternalNodeConfig `yaml:"externalNode,omitempty"`
-}
-
-type AntreaProxyConfig struct {
-	// ProxyAll tells antrea-agent to proxy all Service traffic, including NodePort, LoadBalancer, and ClusterIP traffic,
-	// regardless of where they come from. Therefore, running kube-proxy is no longer required. This requires the AntreaProxy
-	// feature to be enabled.
-	ProxyAll bool `yaml:"proxyAll,omitempty"`
-	// A string array of values which specifies the host IPv4/IPv6 addresses for NodePorts. Values may be valid IP blocks.
-	// (e.g. 1.2.3.0/24, 1.2.3.4/32). An empty string slice is meant to select all host IPv4/IPv6 addresses.
-	NodePortAddresses []string `yaml:"nodePortAddresses,omitempty"`
-	// An array of string values to specify a list of Services which should be ignored by AntreaProxy (traffic to these
-	// Services will not be load-balanced). Values can be a valid ClusterIP (e.g. 10.11.1.2) or a Service name
-	// with Namespace (e.g. kube-system/kube-dns)
-	SkipServices []string `yaml:"skipServices,omitempty"`
-	// When ProxyLoadBalancerIPs is set to false, AntreaProxy no longer load-balances traffic destined to the
-	// External IPs of LoadBalancer Services. This is useful when the external LoadBalancer provides additional
-	// capabilities (e.g. TLS termination) and it is desirable for Pod-to-ExternalIP traffic to be sent to the
-	// external LoadBalancer instead of being load-balanced to an Endpoint directly by AntreaProxy.
-	// Note that setting ProxyLoadBalancerIPs to false usually only makes sense when ProxyAll is set to true and
-	// kube-proxy is removed from the cluser, otherwise kube-proxy will still load-balance this traffic.
-	// Defaults to true.
-	ProxyLoadBalancerIPs *bool `yaml:"proxyLoadBalancerIPs,omitempty"`
-}
-
-type WireGuardConfig struct {
-	// The port for the WireGuard to receive traffic. Defaults to 51820.
-	Port int `yaml:"port,omitempty"`
-}
-
-type NodePortLocalConfig struct {
-	// Enable NodePortLocal, a feature used to make Pods reachable using port forwarding on the
-	// host. To enable this feature, you need to set "enable" to true, and ensure that the
-	// NodePortLocal feature gate is also enabled (which is the default).
-	Enable bool `yaml:"enable,omitempty"`
-	// Provide the port range used by NodePortLocal. When the NodePortLocal feature is enabled,
-	// a port from that range will be assigned whenever a Pod's container defines a specific
-	// port to be exposed (each container can define a list of ports as
-	// pod.spec.containers[].ports), and all Node traffic directed to that port will be
-	// forwarded to the Pod.
-	PortRange string `yaml:"portRange,omitempty"`
 }
 
 type MulticastConfig struct {
+	// To enable Multicast, you need to set "enable" to true, and ensure that the
+	// Multicast feature gate is also enabled (which is the default).
+	Enable bool `yaml:"enable,omitempty"`
 	// The names of the interfaces on Nodes that are used to forward multicast traffic.
 	// Defaults to transport interface if not set.
 	MulticastInterfaces []string `yaml:"multicastInterfaces,omitempty"`
 	// The interval for antrea-agent to send IGMP queries to Pods.
 	// Defaults to 125 seconds.
 	IGMPQueryInterval string `yaml:"igmpQueryInterval"`
+	// The versions of IGMP queries antrea-agent sends to Pods.
+	// Defaults to [1, 2, 3].
+	IGMPQueryVersions []int `yaml:"igmpQueryVersions"`
 }
 
 type EgressConfig struct {
 	ExceptCIDRs []string `yaml:"exceptCIDRs,omitempty"`
+	// The maximum number of Egress IPs that can be assigned to a Node. It's useful when the Node network restricts
+	// the number of secondary IPs a Node can have, e.g. EKS. It must not be greater than 255.
+	// Defaults to 255.
+	MaxEgressIPsPerNode int `yaml:"maxEgressIPsPerNode,omitempty"`
+	// Fully randomize source port mapping in Egress SNAT rules. This has no impact on the
+	// default SNAT rules enforced by each Node for local Pod traffic. By default, we use the
+	// same value as for the top-level snatFullyRandomPorts configuration, but this field can be
+	// used as an override.
+	SNATFullyRandomPorts *bool `yaml:"snatFullyRandomPorts,omitempty"`
 }
 
 type IPsecConfig struct {
@@ -273,12 +331,25 @@ type IPsecConfig struct {
 }
 
 type MulticlusterConfig struct {
-	// Enable Multicluster which allow cross-cluster traffic between member clusters
-	// in a ClusterSet.
-	Enable bool `yaml:"enable,omitempty"`
-	// The Namespace where the Antrea Multi-cluster controller is running.
+	// Enable Multi-cluster Gateway.
+	EnableGateway bool `yaml:"enableGateway,omitempty"`
+	// The Namespace where Antrea Multi-cluster Controller is running.
 	// The default is antrea-agent's Namespace.
 	Namespace string `yaml:"namespace,omitempty"`
+	// Enable Multi-cluster NetworkPolicy which allows Antrea-native policy ingress rules to select peers
+	// from all clusters in a ClusterSet.
+	EnableStretchedNetworkPolicy bool `yaml:"enableStretchedNetworkPolicy,omitempty"`
+	// Enable Multi-cluster Pod to Pod connectivity which allows one Pod access to another Pod in other member
+	// clusters directly. This feature also requires Pod CIDRs to be provided in the Multi-cluster Controller
+	// configuration.
+	EnablePodToPodConnectivity bool `yaml:"enablePodToPodConnectivity,omitempty"`
+	// Antrea Multi-cluster WireGuard tunnel configuration.
+	WireGuard WireGuardConfig `yaml:"wireGuard,omitempty"`
+	// Determines how cross-cluster traffic is encrypted.
+	// It has the following options:
+	// - none (default): Cross-cluster traffic will not be encrypted.
+	// - wireGuard:      Enable WireGuard for tunnel traffic encryption.
+	TrafficEncryptionMode string `yaml:"trafficEncryptionMode,omitempty"`
 }
 
 type ExternalNodeConfig struct {
@@ -302,4 +373,30 @@ type PolicyBypassRule struct {
 	CIDR string `json:"cidr,omitempty"`
 	// The destination port of the given protocol.
 	Port int `yaml:"port,omitempty"`
+}
+
+type AuditLoggingConfig struct {
+	// MaxSize is the maximum size in MB of a log file before it gets rotated. Defaults to 500MB.
+	MaxSize int32 `yaml:"maxSize,omitempty"`
+	// MaxBackups is the maximum number of old log files to retain. If set to 0, all log files
+	// will be retained (unless MaxAge causes them to be deleted). Defaults to 3.
+	MaxBackups *int32 `yaml:"maxBackups,omitempty"`
+	// MaxAge is the maximum number of days to retain old log files based on the timestamp
+	// encoded in their filename. If set to 0, old log files are not removed based on age.
+	// Defaults to 28.
+	MaxAge *int32 `yaml:"maxAge,omitempty"`
+	// Compress enables gzip compression on rotated files. Defaults to true.
+	Compress *bool `yaml:"compress,omitempty"`
+}
+
+type SecondaryNetworkConfig struct {
+	// Configuration of OVS bridges for secondary networks. At the moment, only a
+	// single OVS bridge is supported.
+	OVSBridges []OVSBridgeConfig `yaml:"ovsBridges,omitempty"`
+}
+
+type OVSBridgeConfig struct {
+	BridgeName string `yaml:"bridgeName"`
+	// Names of physical interfaces to be connected to the bridge.
+	PhysicalInterfaces []string `yaml:"physicalInterfaces,omitempty"`
 }

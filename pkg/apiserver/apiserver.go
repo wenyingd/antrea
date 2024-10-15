@@ -26,10 +26,12 @@ import (
 	"k8s.io/apiserver/pkg/registry/rest"
 	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/client-go/informers"
+	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 
+	"antrea.io/antrea/pkg/apis"
 	"antrea.io/antrea/pkg/apis/controlplane"
 	cpinstall "antrea.io/antrea/pkg/apis/controlplane/install"
 	apistats "antrea.io/antrea/pkg/apis/stats"
@@ -43,24 +45,32 @@ import (
 	"antrea.io/antrea/pkg/apiserver/handlers/webhook"
 	"antrea.io/antrea/pkg/apiserver/registry/controlplane/egressgroup"
 	"antrea.io/antrea/pkg/apiserver/registry/controlplane/nodestatssummary"
+	"antrea.io/antrea/pkg/apiserver/registry/controlplane/supportbundlecollection"
 	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/addressgroup"
 	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/appliedtogroup"
 	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/clustergroupmember"
 	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/groupassociation"
+	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/groupmember"
+	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/ipgroupassociation"
 	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/networkpolicy"
+	"antrea.io/antrea/pkg/apiserver/registry/networkpolicy/networkpolicyevaluation"
 	"antrea.io/antrea/pkg/apiserver/registry/stats/antreaclusternetworkpolicystats"
 	"antrea.io/antrea/pkg/apiserver/registry/stats/antreanetworkpolicystats"
 	"antrea.io/antrea/pkg/apiserver/registry/stats/multicastgroup"
 	"antrea.io/antrea/pkg/apiserver/registry/stats/networkpolicystats"
+	"antrea.io/antrea/pkg/apiserver/registry/stats/nodelatencystats"
 	"antrea.io/antrea/pkg/apiserver/registry/system/controllerinfo"
 	"antrea.io/antrea/pkg/apiserver/registry/system/supportbundle"
 	"antrea.io/antrea/pkg/apiserver/storage"
+	crdv1a2informers "antrea.io/antrea/pkg/client/informers/externalversions/crd/v1alpha2"
 	"antrea.io/antrea/pkg/controller/egress"
 	"antrea.io/antrea/pkg/controller/externalippool"
 	"antrea.io/antrea/pkg/controller/ipam"
 	controllernetworkpolicy "antrea.io/antrea/pkg/controller/networkpolicy"
 	"antrea.io/antrea/pkg/controller/querier"
 	"antrea.io/antrea/pkg/controller/stats"
+	controllerbundlecollection "antrea.io/antrea/pkg/controller/supportbundlecollection"
+	"antrea.io/antrea/pkg/controller/traceflow"
 	"antrea.io/antrea/pkg/features"
 )
 
@@ -73,8 +83,14 @@ var (
 	// ParameterCodec defines methods for serializing and deserializing url values
 	// to versioned API objects and back.
 	parameterCodec = runtime.NewParameterCodec(Scheme)
-	// #nosec G101: false positive triggered by variable name which includes "token"
-	TokenPath = "/var/run/antrea/apiserver/loopback-client-token"
+
+	// antreaServedLabelSelector selects resources served by antrea-controller.
+	antreaServedLabelSelector = &metav1.LabelSelector{
+		MatchLabels: map[string]string{
+			"app":       "antrea",
+			"served-by": "antrea-controller",
+		},
+	}
 )
 
 func init() {
@@ -93,6 +109,9 @@ type ExtraConfig struct {
 	appliedToGroupStore           storage.Interface
 	networkPolicyStore            storage.Interface
 	egressGroupStore              storage.Interface
+	bundleCollectionStore         storage.Interface
+	podInformer                   coreinformers.PodInformer
+	eeInformer                    crdv1a2informers.ExternalEntityInformer
 	controllerQuerier             querier.ControllerQuerier
 	endpointQuerier               controllernetworkpolicy.EndpointQuerier
 	networkPolicyController       *controllernetworkpolicy.NetworkPolicyController
@@ -101,6 +120,8 @@ type ExtraConfig struct {
 	caCertController              *certificate.CACertController
 	statsAggregator               *stats.Aggregator
 	networkPolicyStatusController *controllernetworkpolicy.StatusController
+	bundleCollectionController    *controllerbundlecollection.Controller
+	traceflowController           *traceflow.Controller
 }
 
 // Config defines the config for Antrea apiserver.
@@ -122,7 +143,7 @@ func (s *APIServer) Run(ctx context.Context) error {
 	}
 	go s.caCertController.Run(ctx, 1)
 
-	return s.GenericAPIServer.PrepareRun().Run(ctx.Done())
+	return s.GenericAPIServer.PrepareRun().RunWithContext(ctx)
 }
 
 type completedConfig struct {
@@ -133,14 +154,19 @@ type completedConfig struct {
 func NewConfig(
 	genericConfig *genericapiserver.Config,
 	k8sClient kubernetes.Interface,
-	addressGroupStore, appliedToGroupStore, networkPolicyStore, groupStore, egressGroupStore storage.Interface,
+	addressGroupStore, appliedToGroupStore, networkPolicyStore, egressGroupStore, supportBundleCollectionStore storage.Interface,
+	podInformer coreinformers.PodInformer,
+	eeInformer crdv1a2informers.ExternalEntityInformer,
 	caCertController *certificate.CACertController,
 	statsAggregator *stats.Aggregator,
 	controllerQuerier querier.ControllerQuerier,
 	networkPolicyStatusController *controllernetworkpolicy.StatusController,
 	endpointQuerier controllernetworkpolicy.EndpointQuerier,
 	npController *controllernetworkpolicy.NetworkPolicyController,
-	egressController *egress.EgressController) *Config {
+	egressController *egress.EgressController,
+	externalIPPoolController *externalippool.ExternalIPPoolController,
+	bundleCollectionController *controllerbundlecollection.Controller,
+	traceflowController *traceflow.Controller) *Config {
 	return &Config{
 		genericConfig: genericConfig,
 		extraConfig: ExtraConfig{
@@ -149,6 +175,9 @@ func NewConfig(
 			appliedToGroupStore:           appliedToGroupStore,
 			networkPolicyStore:            networkPolicyStore,
 			egressGroupStore:              egressGroupStore,
+			bundleCollectionStore:         supportBundleCollectionStore,
+			podInformer:                   podInformer,
+			eeInformer:                    eeInformer,
 			caCertController:              caCertController,
 			statsAggregator:               statsAggregator,
 			controllerQuerier:             controllerQuerier,
@@ -156,6 +185,9 @@ func NewConfig(
 			networkPolicyController:       npController,
 			networkPolicyStatusController: networkPolicyStatusController,
 			egressController:              egressController,
+			externalIPPoolController:      externalIPPoolController,
+			bundleCollectionController:    bundleCollectionController,
+			traceflowController:           traceflowController,
 		},
 	}
 }
@@ -169,20 +201,30 @@ func installAPIGroup(s *APIServer, c completedConfig) error {
 	appliedToGroupStorage := appliedtogroup.NewREST(c.extraConfig.appliedToGroupStore)
 	networkPolicyStorage := networkpolicy.NewREST(c.extraConfig.networkPolicyStore)
 	networkPolicyStatusStorage := networkpolicy.NewStatusREST(c.extraConfig.networkPolicyStatusController)
+	networkPolicyEvaluationStorage := networkpolicyevaluation.NewREST(controllernetworkpolicy.NewPolicyRuleQuerier(c.extraConfig.endpointQuerier))
 	clusterGroupMembershipStorage := clustergroupmember.NewREST(c.extraConfig.networkPolicyController)
+	groupMembershipStorage := groupmember.NewREST(c.extraConfig.networkPolicyController)
 	groupAssociationStorage := groupassociation.NewREST(c.extraConfig.networkPolicyController)
+	ipGroupAssociationStorage := ipgroupassociation.NewREST(c.extraConfig.podInformer, c.extraConfig.eeInformer, c.extraConfig.networkPolicyController, c.extraConfig.networkPolicyController)
 	nodeStatsSummaryStorage := nodestatssummary.NewREST(c.extraConfig.statsAggregator)
 	egressGroupStorage := egressgroup.NewREST(c.extraConfig.egressGroupStore)
+	bundleCollectionStorage := supportbundlecollection.NewREST(c.extraConfig.bundleCollectionStore)
+	bundleCollectionStatusStorage := supportbundlecollection.NewStatusREST(c.extraConfig.bundleCollectionController)
 	cpGroup := genericapiserver.NewDefaultAPIGroupInfo(controlplane.GroupName, Scheme, parameterCodec, Codecs)
 	cpv1beta2Storage := map[string]rest.Storage{}
 	cpv1beta2Storage["addressgroups"] = addressGroupStorage
 	cpv1beta2Storage["appliedtogroups"] = appliedToGroupStorage
 	cpv1beta2Storage["networkpolicies"] = networkPolicyStorage
 	cpv1beta2Storage["networkpolicies/status"] = networkPolicyStatusStorage
+	cpv1beta2Storage["networkpolicyevaluation"] = networkPolicyEvaluationStorage
 	cpv1beta2Storage["nodestatssummaries"] = nodeStatsSummaryStorage
 	cpv1beta2Storage["groupassociations"] = groupAssociationStorage
+	cpv1beta2Storage["ipgroupassociations"] = ipGroupAssociationStorage
 	cpv1beta2Storage["clustergroupmembers"] = clusterGroupMembershipStorage
+	cpv1beta2Storage["groupmembers"] = groupMembershipStorage
 	cpv1beta2Storage["egressgroups"] = egressGroupStorage
+	cpv1beta2Storage["supportbundlecollections"] = bundleCollectionStorage
+	cpv1beta2Storage["supportbundlecollections/status"] = bundleCollectionStatusStorage
 	cpGroup.VersionedResourcesStorageMap["v1beta2"] = cpv1beta2Storage
 
 	systemGroup := genericapiserver.NewDefaultAPIGroupInfo(system.GroupName, Scheme, metav1.ParameterCodec, Codecs)
@@ -199,6 +241,7 @@ func installAPIGroup(s *APIServer, c completedConfig) error {
 	statsStorage["antreaclusternetworkpolicystats"] = antreaclusternetworkpolicystats.NewREST(c.extraConfig.statsAggregator)
 	statsStorage["antreanetworkpolicystats"] = antreanetworkpolicystats.NewREST(c.extraConfig.statsAggregator)
 	statsStorage["multicastgroups"] = multicastgroup.NewREST(c.extraConfig.statsAggregator)
+	statsStorage["nodelatencystats"] = nodelatencystats.NewREST()
 	statsGroup.VersionedResourcesStorageMap["v1alpha1"] = statsStorage
 
 	groups := []*genericapiserver.APIGroupInfo{&cpGroup, &systemGroup, &statsGroup}
@@ -238,13 +281,7 @@ func CleanupDeprecatedAPIServices(aggregatorClient clientset.Interface) error {
 	// deprecates a registered APIService, the APIService should be deleted,
 	// otherwise K8s will fail to delete an existing Namespace.
 	// Also check: https://github.com/antrea-io/antrea/issues/494
-	deprecatedAPIServices := []string{
-		"v1beta1.networking.antrea.tanzu.vmware.com",
-		"v1beta1.controlplane.antrea.tanzu.vmware.com",
-		"v1alpha1.stats.antrea.tanzu.vmware.com",
-		"v1beta1.system.antrea.tanzu.vmware.com",
-		"v1beta2.controlplane.antrea.tanzu.vmware.com",
-	}
+	deprecatedAPIServices := []string{}
 	for _, as := range deprecatedAPIServices {
 		err := aggregatorClient.ApiregistrationV1().APIServices().Delete(context.TODO(), as, metav1.DeleteOptions{})
 		if err == nil {
@@ -262,11 +299,13 @@ func installHandlers(c *ExtraConfig, s *genericapiserver.GenericAPIServer) {
 	s.Handler.NonGoRestfulMux.HandleFunc("/endpoint", endpoint.HandleFunc(c.endpointQuerier))
 	// Webhook to mutate Namespace labels and add its metadata.name as a label
 	s.Handler.NonGoRestfulMux.HandleFunc("/mutate/namespace", webhook.HandleMutationLabels())
+
 	if features.DefaultFeatureGate.Enabled(features.AntreaPolicy) {
 		// Get new NetworkPolicyMutator
 		m := controllernetworkpolicy.NewNetworkPolicyMutator(c.networkPolicyController)
 		// Install handlers for NetworkPolicy related mutation
 		s.Handler.NonGoRestfulMux.HandleFunc("/mutate/acnp", webhook.HandleMutationNetworkPolicy(m))
+		s.Handler.NonGoRestfulMux.HandleFunc("/mutate/annp", webhook.HandleMutationNetworkPolicy(m))
 		s.Handler.NonGoRestfulMux.HandleFunc("/mutate/anp", webhook.HandleMutationNetworkPolicy(m))
 
 		// Get new NetworkPolicyValidator
@@ -274,16 +313,20 @@ func installHandlers(c *ExtraConfig, s *genericapiserver.GenericAPIServer) {
 		// Install handlers for NetworkPolicy related validation
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/tier", webhook.HandlerForValidateFunc(v.Validate))
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/acnp", webhook.HandlerForValidateFunc(v.Validate))
+		s.Handler.NonGoRestfulMux.HandleFunc("/validate/annp", webhook.HandlerForValidateFunc(v.Validate))
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/anp", webhook.HandlerForValidateFunc(v.Validate))
+		s.Handler.NonGoRestfulMux.HandleFunc("/validate/banp", webhook.HandlerForValidateFunc(v.Validate))
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/clustergroup", webhook.HandlerForValidateFunc(v.Validate))
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/group", webhook.HandlerForValidateFunc(v.Validate))
 
-		// Install handlers for CRD conversion between versions
-		s.Handler.NonGoRestfulMux.HandleFunc("/convert/clustergroup", webhook.HandleCRDConversion(controllernetworkpolicy.ConvertClusterGroupCRD))
-
 		// Install a post start hook to initialize Tiers on start-up
 		s.AddPostStartHook("initialize-tiers", func(context genericapiserver.PostStartHookContext) error {
-			go c.networkPolicyController.InitializeTiers()
+			go func() {
+				// context gets cancelled when the server stops.
+				if err := c.networkPolicyController.InitializeTiers(context); err != nil {
+					klog.ErrorS(err, "Failed to initialize system Tiers")
+				}
+			}()
 			return nil
 		})
 	}
@@ -296,36 +339,33 @@ func installHandlers(c *ExtraConfig, s *genericapiserver.GenericAPIServer) {
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/egress", webhook.HandlerForValidateFunc(c.egressController.ValidateEgress))
 	}
 
-	if features.DefaultFeatureGate.Enabled(features.AntreaIPAM) {
+	if features.DefaultFeatureGate.Enabled(features.AntreaIPAM) || features.DefaultFeatureGate.Enabled(features.SecondaryNetwork) {
+		s.Handler.NonGoRestfulMux.HandleFunc("/convert/ippool", webhook.HandleCRDConversion(ipam.ConvertIPPool))
 		s.Handler.NonGoRestfulMux.HandleFunc("/validate/ippool", webhook.HandlerForValidateFunc(ipam.ValidateIPPool))
+	}
+
+	if features.DefaultFeatureGate.Enabled(features.SupportBundleCollection) {
+		s.Handler.NonGoRestfulMux.HandleFunc("/validate/supportbundlecollection", webhook.HandlerForValidateFunc(c.bundleCollectionController.Validate))
+	}
+
+	if features.DefaultFeatureGate.Enabled(features.Traceflow) {
+		s.Handler.NonGoRestfulMux.HandleFunc("/validate/traceflow", webhook.HandlerForValidateFunc(c.traceflowController.Validate))
 	}
 }
 
 func DefaultCAConfig() *certificate.CAConfig {
 	return &certificate.CAConfig{
-		CAConfigMapName: certificate.AntreaCAConfigMapName,
-		APIServiceNames: []string{
-			"v1alpha1.stats.antrea.io",
-			"v1beta1.system.antrea.io",
-			"v1beta2.controlplane.antrea.io",
-		},
-		ValidatingWebhooks: []string{
-			"crdvalidator.antrea.io",
-		},
-		MutationWebhooks: []string{
-			"crdmutator.antrea.io",
-		},
-		OptionalMutationWebhooks: []string{
-			"labelsmutator.antrea.io",
-		},
-		CRDsWithConversionWebhooks: []string{
-			"clustergroups.crd.antrea.io",
-		},
-		CertDir:           "/var/run/antrea/antrea-controller-tls",
-		SelfSignedCertDir: "/var/run/antrea/antrea-controller-self-signed",
-		CertReadyTimeout:  2 * time.Minute,
-		MaxRotateDuration: time.Hour * (24 * 365),
-		ServiceName:       certificate.AntreaServiceName,
-		PairName:          "antrea-controller",
+		CAConfigMapName:              apis.AntreaCAConfigMapName,
+		TLSSecretName:                apis.AntreaControllerTLSSecretName,
+		APIServiceSelector:           antreaServedLabelSelector,
+		ValidatingWebhookSelector:    antreaServedLabelSelector,
+		MutationWebhookSelector:      antreaServedLabelSelector,
+		CRDConversionWebhookSelector: antreaServedLabelSelector,
+		CertDir:                      "/var/run/antrea/antrea-controller-tls",
+		SelfSignedCertDir:            "/var/run/antrea/antrea-controller-self-signed",
+		CertReadyTimeout:             2 * time.Minute,
+		MinValidDuration:             time.Hour * 24 * 90, // Rotate the certificate 90 days in advance.
+		ServiceName:                  apis.AntreaServiceName,
+		PairName:                     "antrea-controller",
 	}
 }

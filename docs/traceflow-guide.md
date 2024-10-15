@@ -1,16 +1,16 @@
 # Traceflow User Guide
 
 Antrea supports using Traceflow for network diagnosis. It can inject a packet
-into OVS on a Node and trace the forwarding path of the packet across Nodes,
-and it can also trace a matched packet of real traffic from or to a Pod. In
-either case, a Traceflow operation is triggered by a Traceflow CRD which
-specifies the type of Traceflow, the source and destination of the packet to
-trace, and the headers of the packet. And the Traceflow results will be
-populated to the `status` field of the Traceflow CRD, which include the
-observations of the trace packet at various observations points in the
-forwarding path. Besides creating the Traceflow CRD using kubectl, users can
-also start a Traceflow using `antctl`, or from the Antrea Octant Plugin. When
-using the Antrea Octant plugin, the Traceflow results can be visualized using a
+into OVS on a Node and trace the forwarding path of the packet across Nodes, and
+it can also trace a matched packet of real traffic from or to a Pod. In either
+case, a Traceflow operation is triggered by a Traceflow CRD which specifies the
+type of Traceflow, the source and destination of the packet to trace, and the
+headers of the packet. And the Traceflow results will be populated to the
+`status` field of the Traceflow CRD, which include the observations of the trace
+packet at various observations points in the forwarding path. Besides creating
+the Traceflow CRD using kubectl, users can also start a Traceflow using
+`antctl`, or from the [Antrea web UI](https://github.com/antrea-io/antrea-ui).
+When using the Antrea web UI, the Traceflow results can be visualized using a
 graph.
 
 ## Table of Contents
@@ -22,41 +22,21 @@ graph.
   - [Using kubectl and YAML file (IPv6)](#using-kubectl-and-yaml-file-ipv6)
   - [Live-traffic Traceflow](#live-traffic-traceflow)
   - [Using antctl](#using-antctl)
-  - [Using Octant with antrea-octant-plugin](#using-octant-with-antrea-octant-plugin)
+  - [Using the Antrea web UI](#using-the-antrea-web-ui)
 - [View Traceflow Result and Graph](#view-traceflow-result-and-graph)
-- [View Traceflow CRDs](#view-traceflow-crds)
 - [RBAC](#rbac)
 <!-- /toc -->
 
 ## Prerequisites
 
-The Traceflow feature is enabled by default since Antrea version 0.11.0. If you
-are using an Antrea version before 0.11.0, you need to enable Traceflow from the
-featureGates map defined in antrea.yml for both Controller and Agent. In order
-to use a Service as the destination in traces, you also need to ensure [AntreaProxy](feature-gates.md)
-is enabled in the Agent configuration:
-
-```yaml
-  antrea-controller.conf: |
-    featureGates:
-    # Enable traceflow which provides packet tracing feature to diagnose network issue.
-      Traceflow: true
-  antrea-agent.conf: |
-    featureGates:
-    # Enable traceflow which provides packet tracing feature to diagnose network issue.
-      Traceflow: true
-    # Enable AntreaProxy which provides ServiceLB for in-cluster Services in antrea-agent.
-    # It should be enabled on Windows, otherwise NetworkPolicy will not take effect on
-    # Service traffic.
-      AntreaProxy: true
-```
-
-For antrea-octant-plugin installation, please refer to [antrea-octant-installation](octant-plugin-installation.md).
+The Traceflow feature is enabled by default since Antrea version v0.11. In order
+to use a Service as the destination in traces, Antrea Proxy (also enabled by
+default since v0.11) is required.
 
 ## Start a New Traceflow
 
 You can choose to use `kubectl` together with a YAML file, the `antctl traceflow`
-command, or the Octant UI to start a new trace.
+command, or the Antrea UI to start a new trace.
 
 When starting a new trace, you can provide the following information which will be used to build the trace packet:
 
@@ -71,7 +51,7 @@ You can start a new trace by creating Traceflow CRD via kubectl and a YAML file 
 configuration of Traceflow CRD. An example YAML file of Traceflow CRD might look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: Traceflow
 metadata:
   name: tf-test
@@ -88,8 +68,9 @@ spec:
       protocol: 6 # Protocol here can be 6 (TCP), 17 (UDP) or 1 (ICMP), default value is 1 (ICMP)
     transportHeader:
       tcp:
-        srcPort: 10000 # Source port needs to be set when Protocol is TCP/UDP.
+        srcPort: 10000 # Source port for TCP/UDP. If omitted, a random port will be used.
         dstPort: 80 # Destination port needs to be set when Protocol is TCP/UDP.
+        flags: 2 # Construct a SYN packet: 2 is also the default value when the flags field is omitted.
 ```
 
 The CRD above starts a new trace from port 10000 of source Pod named `tcp-sts-0` to port 80
@@ -100,7 +81,7 @@ of destination Pod named `tcp-sts-2` using TCP protocol.
 Antrea Traceflow supports IPv6 traffic. An example YAML file of Traceflow CRD might look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: Traceflow
 metadata:
   name: tf-test-ipv6
@@ -142,7 +123,7 @@ will fail. But you can specify a different timeout value, by adding
 `timeout: <value-in-seconds>` to the Traceflow `spec`.
 
 In some cases, it might be useful to capture the packets dropped by
-NetworkPolicies (inc. K8s NetworkPolicies or Antrea native policies). You can
+NetworkPolicies (inc. K8s NetworkPolicies or Antrea-native policies). You can
 add `droppedOnly: true` to the live-traffic Traceflow `spec`, then the first
 packet that matches the Traceflow spec and is dropped by a NetworkPolicy will
 be captured and traced.
@@ -151,7 +132,7 @@ The following example is a live-traffic Traceflow that captures a dropped UDP
 packet to UDP port 1234 of Pod udp-server, within 1 minute:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: Traceflow
 metadata:
   name: tf-test
@@ -172,44 +153,17 @@ spec:
 
 Please refer to the corresponding [antctl page](antctl.md#traceflow).
 
-### Using Octant with antrea-octant-plugin
+### Using the Antrea web UI
 
-<img src="https://downloads.antrea.io/static/tf_create.1.png" width="600" alt="Start a New Trace">
-
-From Octant dashboard, you need to click on left navigation bar named "Antrea" and then
-choose category named "Traceflow" to lead you to the Traceflow UI displayed on the right side.
-
-Now, you can start a new trace by clicking on the button named "Start New Trace" and submitting the form with trace details.
-It helps you create a Traceflow CRD and generates a corresponding Traceflow Graph.
+Please refer to the [Antrea UI documentation](https://github.com/antrea-io/antrea-ui)
+for installation instructions. Once you can access the UI in your browser,
+navigate to the `Traceflow` page.
 
 ## View Traceflow Result and Graph
 
 You can always view Traceflow result directly via Traceflow CRD status and see if the packet is successfully delivered
 or somehow dropped by certain packet-processing stage. Antrea also provides a more user-friendly way by showing the
-Traceflow result via a trace graph on UI.
-
-<img src="https://downloads.antrea.io/static/tf_graph_success.png" width="600" alt="Show Successful Trace">
-
-From the graph above, we can see the inter-node traffic between two Pods has been successfully delivered.
-Sometimes the traffic may not be successfully delivered and we can always easily identify where the traffic is dropped
-via a trace graph like below.
-
-<img src="https://downloads.antrea.io/static/tf_graph_failure.png" width="600" alt="Show Failing Trace">
-
-You can also generate a historical trace graph by providing a specific Traceflow CRD name (assuming the CRD has not been deleted yet)
-as shown below.
-
-<img src="https://downloads.antrea.io/static/tf_historical_graph.png" width="600" alt="Generate Historical Trace">
-
-## View Traceflow CRDs
-
-<img src="https://downloads.antrea.io/static/tf_overview.png" width="600" alt="Antrea Overview">
-
-As shown above, you can check the existing Traceflow CRDs in the "Traceflow Info" table of the Antrea Overview web page
-in the Octant UI. You can generate a trace graph for any of these CRDs, as explained in the previous section.
-Also, you can view all the Traceflow CRDs from the Traceflow page by clicking the right tab named "Traceflow Info" like below.
-
-<img src="https://downloads.antrea.io/static/tf_table.png" width="600" alt="Traceflow CRDs">
+Traceflow result via a trace graph when using the Antrea UI.
 
 ## RBAC
 

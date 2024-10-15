@@ -25,12 +25,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	coreinformers "k8s.io/client-go/informers/core/v1"
-	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	"antrea.io/antrea/pkg/agent/ipassigner"
 	"antrea.io/antrea/pkg/agent/memberlist"
 	"antrea.io/antrea/pkg/agent/types"
@@ -63,13 +63,11 @@ type ServiceExternalIPController struct {
 	serviceLister       corelisters.ServiceLister
 	serviceListerSynced cache.InformerSynced
 
-	client kubernetes.Interface
-
 	endpointsInformer     cache.SharedIndexInformer
 	endpointsLister       corelisters.EndpointsLister
 	endpointsListerSynced cache.InformerSynced
 
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[apimachinerytypes.NamespacedName]
 
 	externalIPStates      map[apimachinerytypes.NamespacedName]externalIPState
 	externalIPStatesMutex sync.RWMutex
@@ -77,7 +75,7 @@ type ServiceExternalIPController struct {
 	cluster    memberlist.Interface
 	ipAssigner ipassigner.IPAssigner
 
-	assignedIPs      map[string]sets.String
+	assignedIPs      map[string]sets.Set[string]
 	assignedIPsMutex sync.Mutex
 }
 
@@ -86,16 +84,19 @@ var _ querier.ServiceExternalIPStatusQuerier = (*ServiceExternalIPController)(ni
 func NewServiceExternalIPController(
 	nodeName string,
 	nodeTransportInterface string,
-	client kubernetes.Interface,
 	cluster memberlist.Interface,
 	serviceInformer coreinformers.ServiceInformer,
 	endpointsInformer coreinformers.EndpointsInformer,
 ) (*ServiceExternalIPController, error) {
 	c := &ServiceExternalIPController{
-		nodeName:              nodeName,
-		client:                client,
-		cluster:               cluster,
-		queue:                 workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "AgentServiceExternalIP"),
+		nodeName: nodeName,
+		cluster:  cluster,
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[apimachinerytypes.NamespacedName](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[apimachinerytypes.NamespacedName]{
+				Name: "AgentServiceExternalIP",
+			},
+		),
 		serviceInformer:       serviceInformer.Informer(),
 		serviceLister:         serviceInformer.Lister(),
 		serviceListerSynced:   serviceInformer.Informer().HasSynced,
@@ -103,7 +104,7 @@ func NewServiceExternalIPController(
 		endpointsLister:       endpointsInformer.Lister(),
 		endpointsListerSynced: endpointsInformer.Informer().HasSynced,
 		externalIPStates:      make(map[apimachinerytypes.NamespacedName]externalIPState),
-		assignedIPs:           make(map[string]sets.String),
+		assignedIPs:           make(map[string]sets.Set[string]),
 	}
 	ipAssigner, err := ipassigner.NewIPAssigner(nodeTransportInterface, "")
 	if err != nil {
@@ -257,16 +258,12 @@ func (c *ServiceExternalIPController) worker() {
 }
 
 func (c *ServiceExternalIPController) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
-	defer c.queue.Done(obj)
-	if key, ok := obj.(apimachinerytypes.NamespacedName); !ok {
-		c.queue.Forget(obj)
-		klog.Errorf("Expected NamespacedName in work queue but got %#v", obj)
-		return true
-	} else if err := c.syncService(key); err == nil {
+	defer c.queue.Done(key)
+	if err := c.syncService(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.queue.Forget(key)
@@ -393,10 +390,10 @@ func (c *ServiceExternalIPController) assignIP(ip string, service apimachineryty
 	c.assignedIPsMutex.Lock()
 	defer c.assignedIPsMutex.Unlock()
 	if _, ok := c.assignedIPs[ip]; !ok {
-		if err := c.ipAssigner.AssignIP(ip); err != nil {
+		if _, err := c.ipAssigner.AssignIP(ip, nil, true); err != nil {
 			return err
 		}
-		c.assignedIPs[ip] = sets.NewString(service.String())
+		c.assignedIPs[ip] = sets.New[string](service.String())
 	} else {
 		c.assignedIPs[ip].Insert(service.String())
 	}
@@ -411,7 +408,7 @@ func (c *ServiceExternalIPController) unassignIP(ip string, service apimachinery
 		return nil
 	}
 	if assigned.Len() == 1 && assigned.Has(service.String()) {
-		if err := c.ipAssigner.UnassignIP(ip); err != nil {
+		if _, err := c.ipAssigner.UnassignIP(ip); err != nil {
 			return err
 		}
 		delete(c.assignedIPs, ip)
@@ -422,8 +419,8 @@ func (c *ServiceExternalIPController) unassignIP(ip string, service apimachinery
 }
 
 // nodesHasHealthyServiceEndpoint returns the set of Nodes which has at least one healthy endpoint.
-func (c *ServiceExternalIPController) nodesHasHealthyServiceEndpoint(service *corev1.Service) (sets.String, error) {
-	nodes := sets.NewString()
+func (c *ServiceExternalIPController) nodesHasHealthyServiceEndpoint(service *corev1.Service) (sets.Set[string], error) {
+	nodes := sets.New[string]()
 	endpoints, err := c.endpointsLister.Endpoints(service.Namespace).Get(service.Name)
 	if err != nil {
 		return nodes, err
@@ -439,12 +436,12 @@ func (c *ServiceExternalIPController) nodesHasHealthyServiceEndpoint(service *co
 	return nodes, nil
 }
 
-func (c *ServiceExternalIPController) GetServiceExternalIPStatus() []querier.ServiceExternalIPInfo {
+func (c *ServiceExternalIPController) GetServiceExternalIPStatus() []apis.ServiceExternalIPInfo {
 	c.externalIPStatesMutex.RLock()
 	defer c.externalIPStatesMutex.RUnlock()
-	info := make([]querier.ServiceExternalIPInfo, 0, len(c.externalIPStates))
+	info := make([]apis.ServiceExternalIPInfo, 0, len(c.externalIPStates))
 	for k, v := range c.externalIPStates {
-		info = append(info, querier.ServiceExternalIPInfo{
+		info = append(info, apis.ServiceExternalIPInfo{
 			ServiceName:    k.Name,
 			Namespace:      k.Namespace,
 			ExternalIP:     v.ip,

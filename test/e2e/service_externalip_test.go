@@ -19,14 +19,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -35,10 +33,10 @@ import (
 	"k8s.io/client-go/util/retry"
 	utilnet "k8s.io/utils/net"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	antreaagenttypes "antrea.io/antrea/pkg/agent/types"
-	"antrea.io/antrea/pkg/apis/crd/v1alpha2"
+	"antrea.io/antrea/pkg/apis/crd/v1beta1"
 	"antrea.io/antrea/pkg/features"
-	"antrea.io/antrea/pkg/querier"
 )
 
 func TestServiceExternalIP(t *testing.T) {
@@ -58,12 +56,13 @@ func TestServiceExternalIP(t *testing.T) {
 	t.Run("testServiceExternalTrafficPolicyLocal", func(t *testing.T) { testServiceExternalTrafficPolicyLocal(t, data) })
 	t.Run("testServiceNodeFailure", func(t *testing.T) { testServiceNodeFailure(t, data) })
 	t.Run("testExternalIPAccess", func(t *testing.T) { testExternalIPAccess(t, data) })
+	t.Run("testServiceSharingLoadBalancerIP", func(t *testing.T) { testServiceSharingLoadBalancerIP(t, data) })
 }
 
 func testServiceExternalTrafficPolicyLocal(t *testing.T, data *TestData) {
 	tests := []struct {
 		name                    string
-		ipRange                 v1alpha2.IPRange
+		ipRange                 v1beta1.IPRange
 		nodeSelector            metav1.LabelSelector
 		originalEndpointSubsets []v1.EndpointSubset
 		expectedExternalIP      string
@@ -73,7 +72,7 @@ func testServiceExternalTrafficPolicyLocal(t *testing.T, data *TestData) {
 	}{
 		{
 			name:    "endpoint created",
-			ipRange: v1alpha2.IPRange{CIDR: "169.254.100.0/30"},
+			ipRange: v1beta1.IPRange{CIDR: "169.254.100.0/30"},
 			nodeSelector: metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
@@ -100,7 +99,7 @@ func testServiceExternalTrafficPolicyLocal(t *testing.T, data *TestData) {
 		},
 		{
 			name:    "endpoint created IPv6",
-			ipRange: v1alpha2.IPRange{CIDR: "2021:1::aaa0/124"},
+			ipRange: v1beta1.IPRange{CIDR: "2021:1::aaa0/124"},
 			nodeSelector: metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
@@ -127,7 +126,7 @@ func testServiceExternalTrafficPolicyLocal(t *testing.T, data *TestData) {
 		},
 		{
 			name:    "endpoint changed",
-			ipRange: v1alpha2.IPRange{CIDR: "169.254.100.0/30"},
+			ipRange: v1beta1.IPRange{CIDR: "169.254.100.0/30"},
 			nodeSelector: metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
@@ -163,7 +162,7 @@ func testServiceExternalTrafficPolicyLocal(t *testing.T, data *TestData) {
 		},
 		{
 			name:    "endpoint changed IPv6",
-			ipRange: v1alpha2.IPRange{CIDR: "2021:1::aaa0/124"},
+			ipRange: v1beta1.IPRange{CIDR: "2021:1::aaa0/124"},
 			nodeSelector: metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
@@ -208,14 +207,14 @@ func testServiceExternalTrafficPolicyLocal(t *testing.T, data *TestData) {
 			var err error
 			var service *v1.Service
 			var eps *v1.Endpoints
-			ipPool := data.createExternalIPPool(t, "test-service-pool-", tt.ipRange, tt.nodeSelector.MatchExpressions, tt.nodeSelector.MatchLabels)
-			defer data.crdClient.CrdV1alpha2().ExternalIPPools().Delete(context.TODO(), ipPool.Name, metav1.DeleteOptions{})
+			ipPool := data.createExternalIPPool(t, "test-service-pool-", tt.ipRange, nil, tt.nodeSelector.MatchExpressions, tt.nodeSelector.MatchLabels)
+			defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(context.TODO(), ipPool.Name, metav1.DeleteOptions{})
 
 			annotation := map[string]string{
 				antreaagenttypes.ServiceExternalIPPoolAnnotationKey: ipPool.Name,
 			}
 			service, err = data.CreateServiceWithAnnotations(fmt.Sprintf("test-svc-local-%d", idx),
-				data.testNamespace, 80, 80, corev1.ProtocolTCP, nil, false, true, v1.ServiceTypeLoadBalancer, nil, annotation)
+				data.testNamespace, 80, 80, v1.ProtocolTCP, nil, false, true, v1.ServiceTypeLoadBalancer, nil, annotation)
 			require.NoError(t, err)
 			defer data.clientset.CoreV1().Services(service.Namespace).Delete(context.TODO(), service.Name, metav1.DeleteOptions{})
 
@@ -257,39 +256,39 @@ func stringPtr(s string) *string {
 func testServiceWithExternalIPCRUD(t *testing.T, data *TestData) {
 	tests := []struct {
 		name               string
-		ipRange            v1alpha2.IPRange
+		ipRange            v1beta1.IPRange
 		nodeSelector       metav1.LabelSelector
 		expectedExternalIP string
-		expectedNodes      sets.String
+		expectedNodes      sets.Set[string]
 		expectedTotal      int
 	}{
 		{
 			name:    "single matching Node",
-			ipRange: v1alpha2.IPRange{CIDR: "169.254.100.0/30"},
+			ipRange: v1beta1.IPRange{CIDR: "169.254.100.0/30"},
 			nodeSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					v1.LabelHostname: nodeName(0),
 				},
 			},
 			expectedExternalIP: "169.254.100.1",
-			expectedNodes:      sets.NewString(nodeName(0)),
+			expectedNodes:      sets.New[string](nodeName(0)),
 			expectedTotal:      2,
 		},
 		{
 			name:    "single matching Node with IPv6 range",
-			ipRange: v1alpha2.IPRange{CIDR: "2021:1::aaa0/124"},
+			ipRange: v1beta1.IPRange{CIDR: "2021:1::aaa0/124"},
 			nodeSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					v1.LabelHostname: nodeName(0),
 				},
 			},
 			expectedExternalIP: "2021:1::aaa1",
-			expectedNodes:      sets.NewString(nodeName(0)),
+			expectedNodes:      sets.New[string](nodeName(0)),
 			expectedTotal:      15,
 		},
 		{
 			name:    "two matching Nodes",
-			ipRange: v1alpha2.IPRange{Start: "169.254.101.10", End: "169.254.101.11"},
+			ipRange: v1beta1.IPRange{Start: "169.254.101.10", End: "169.254.101.11"},
 			nodeSelector: metav1.LabelSelector{
 				MatchExpressions: []metav1.LabelSelectorRequirement{
 					{
@@ -300,19 +299,19 @@ func testServiceWithExternalIPCRUD(t *testing.T, data *TestData) {
 				},
 			},
 			expectedExternalIP: "169.254.101.10",
-			expectedNodes:      sets.NewString(nodeName(0), nodeName(1)),
+			expectedNodes:      sets.New[string](nodeName(0), nodeName(1)),
 			expectedTotal:      2,
 		},
 		{
 			name:    "no matching Node",
-			ipRange: v1alpha2.IPRange{CIDR: "169.254.102.0/30"},
+			ipRange: v1beta1.IPRange{CIDR: "169.254.102.0/30"},
 			nodeSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"foo": "bar",
 				},
 			},
 			expectedExternalIP: "169.254.102.1",
-			expectedNodes:      sets.NewString(),
+			expectedNodes:      sets.New[string](),
 			expectedTotal:      2,
 		},
 	}
@@ -325,14 +324,14 @@ func testServiceWithExternalIPCRUD(t *testing.T, data *TestData) {
 			}
 			var err error
 			var service *v1.Service
-			ipPool := data.createExternalIPPool(t, "crud-pool-", tt.ipRange, tt.nodeSelector.MatchExpressions, tt.nodeSelector.MatchLabels)
-			defer data.crdClient.CrdV1alpha2().ExternalIPPools().Delete(context.TODO(), ipPool.Name, metav1.DeleteOptions{})
+			ipPool := data.createExternalIPPool(t, "crud-pool-", tt.ipRange, nil, tt.nodeSelector.MatchExpressions, tt.nodeSelector.MatchLabels)
+			defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(context.TODO(), ipPool.Name, metav1.DeleteOptions{})
 
 			annotation := map[string]string{
 				antreaagenttypes.ServiceExternalIPPoolAnnotationKey: ipPool.Name,
 			}
 			service, err = data.CreateServiceWithAnnotations(fmt.Sprintf("test-svc-eip-%d", idx),
-				data.testNamespace, 80, 80, corev1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotation)
+				data.testNamespace, 80, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotation)
 			require.NoError(t, err)
 
 			defer data.clientset.CoreV1().Services(service.Namespace).Delete(context.TODO(), service.Name, metav1.DeleteOptions{})
@@ -345,20 +344,21 @@ func testServiceWithExternalIPCRUD(t *testing.T, data *TestData) {
 
 			checkEIPStatus := func(expectedUsed int) {
 				var gotUsed, gotTotal int
-				err := wait.PollImmediate(200*time.Millisecond, 2*time.Second, func() (done bool, err error) {
-					pool, err := data.crdClient.CrdV1alpha2().ExternalIPPools().Get(context.TODO(), ipPool.Name, metav1.GetOptions{})
-					if err != nil {
-						return false, fmt.Errorf("failed to get ExternalIPPool: %v", err)
-					}
-					gotUsed, gotTotal = pool.Status.Usage.Used, pool.Status.Usage.Total
-					if expectedUsed != pool.Status.Usage.Used {
-						return false, nil
-					}
-					if tt.expectedTotal != pool.Status.Usage.Total {
-						return false, nil
-					}
-					return true, nil
-				})
+				err := wait.PollUntilContextTimeout(context.Background(), 200*time.Millisecond, 2*time.Second, true,
+					func(ctx context.Context) (done bool, err error) {
+						pool, err := data.crdClient.CrdV1beta1().ExternalIPPools().Get(context.TODO(), ipPool.Name, metav1.GetOptions{})
+						if err != nil {
+							return false, fmt.Errorf("failed to get ExternalIPPool: %v", err)
+						}
+						gotUsed, gotTotal = pool.Status.Usage.Used, pool.Status.Usage.Total
+						if expectedUsed != pool.Status.Usage.Used {
+							return false, nil
+						}
+						if tt.expectedTotal != pool.Status.Usage.Total {
+							return false, nil
+						}
+						return true, nil
+					})
 				require.NoError(t, err, "ExternalIPPool status not match: expectedTotal=%d, got=%d, expectedUsed=%d, got=%d", tt.expectedTotal, gotTotal, expectedUsed, gotUsed)
 			}
 			checkEIPStatus(1)
@@ -369,41 +369,104 @@ func testServiceWithExternalIPCRUD(t *testing.T, data *TestData) {
 	}
 }
 
+func testServiceSharingLoadBalancerIP(t *testing.T, data *TestData) {
+	ctx := context.Background()
+	pool := data.createExternalIPPool(t, "pool-", v1beta1.IPRange{CIDR: "172.30.0.0/28"}, nil, nil, nil)
+	defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(ctx, pool.Name, metav1.DeleteOptions{})
+
+	annotationNormal := map[string]string{
+		antreaagenttypes.ServiceExternalIPPoolAnnotationKey: pool.Name,
+	}
+	annotationAllowingSharedIP := map[string]string{
+		antreaagenttypes.ServiceExternalIPPoolAnnotationKey: pool.Name,
+		antreaagenttypes.ServiceAllowSharedIPAnnotationKey:  "true",
+	}
+	loadBalancerIPMutator := func(svc *v1.Service) { svc.Spec.LoadBalancerIP = "172.30.0.1" }
+
+	t.Run("services-allowing-shared-ip", func(t *testing.T) {
+		svc1, err := data.CreateServiceWithAnnotations("svc1",
+			data.testNamespace, 80, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotationAllowingSharedIP,
+			loadBalancerIPMutator)
+		require.NoError(t, err)
+		defer data.clientset.CoreV1().Services(svc1.Namespace).Delete(ctx, svc1.Name, metav1.DeleteOptions{})
+
+		require.NoError(t, data.waitForServiceLoadBalancerIP(svc1, "172.30.0.1"))
+
+		svc2, err := data.CreateServiceWithAnnotations("svc2",
+			data.testNamespace, 81, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotationAllowingSharedIP,
+			loadBalancerIPMutator)
+		require.NoError(t, err)
+		defer data.clientset.CoreV1().Services(svc2.Namespace).Delete(ctx, svc2.Name, metav1.DeleteOptions{})
+		svc3, err := data.CreateServiceWithAnnotations("svc3",
+			data.testNamespace, 82, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotationNormal,
+			loadBalancerIPMutator)
+		require.NoError(t, err)
+		defer data.clientset.CoreV1().Services(svc3.Namespace).Delete(ctx, svc3.Name, metav1.DeleteOptions{})
+
+		assert.NoError(t, data.waitForServiceLoadBalancerIP(svc2, "172.30.0.1"), "svc2 should get the shared IP assigned")
+		assert.NoError(t, data.waitForServiceLoadBalancerIP(svc3, ""), "svc3 should not get the shared IP assigned")
+	})
+
+	t.Run("services-not-allowing-shared-ip", func(t *testing.T) {
+		svc1, err := data.CreateServiceWithAnnotations("svc1",
+			data.testNamespace, 80, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotationNormal,
+			loadBalancerIPMutator)
+		require.NoError(t, err)
+		defer data.clientset.CoreV1().Services(svc1.Namespace).Delete(ctx, svc1.Name, metav1.DeleteOptions{})
+
+		require.NoError(t, data.waitForServiceLoadBalancerIP(svc1, "172.30.0.1"))
+
+		svc2, err := data.CreateServiceWithAnnotations("svc2",
+			data.testNamespace, 81, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotationAllowingSharedIP,
+			loadBalancerIPMutator)
+		require.NoError(t, err)
+		defer data.clientset.CoreV1().Services(svc2.Namespace).Delete(ctx, svc2.Name, metav1.DeleteOptions{})
+		svc3, err := data.CreateServiceWithAnnotations("svc3",
+			data.testNamespace, 82, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotationNormal,
+			loadBalancerIPMutator)
+		require.NoError(t, err)
+		defer data.clientset.CoreV1().Services(svc3.Namespace).Delete(ctx, svc3.Name, metav1.DeleteOptions{})
+
+		assert.NoError(t, data.waitForServiceLoadBalancerIP(svc2, ""), "svc2 should not get the exclusive IP assigned")
+		assert.NoError(t, data.waitForServiceLoadBalancerIP(svc3, ""), "svc3 should not get the exclusive IP assigned")
+	})
+}
+
 func testServiceUpdateExternalIP(t *testing.T, data *TestData) {
 	tests := []struct {
 		name               string
 		originalNode       string
 		newNode            string
-		originalIPRange    v1alpha2.IPRange
+		originalIPRange    v1beta1.IPRange
 		originalExternalIP string
-		newIPRange         v1alpha2.IPRange
+		newIPRange         v1beta1.IPRange
 		newExternalIP      string
 	}{
 		{
 			name:               "same Node",
 			originalNode:       nodeName(0),
 			newNode:            nodeName(0),
-			originalIPRange:    v1alpha2.IPRange{CIDR: "169.254.100.0/30"},
+			originalIPRange:    v1beta1.IPRange{CIDR: "169.254.100.0/30"},
 			originalExternalIP: "169.254.100.1",
-			newIPRange:         v1alpha2.IPRange{CIDR: "169.254.101.0/30"},
+			newIPRange:         v1beta1.IPRange{CIDR: "169.254.101.0/30"},
 			newExternalIP:      "169.254.101.1",
 		},
 		{
 			name:               "different Nodes",
 			originalNode:       nodeName(0),
 			newNode:            nodeName(1),
-			originalIPRange:    v1alpha2.IPRange{CIDR: "169.254.100.0/30"},
+			originalIPRange:    v1beta1.IPRange{CIDR: "169.254.100.0/30"},
 			originalExternalIP: "169.254.100.1",
-			newIPRange:         v1alpha2.IPRange{CIDR: "169.254.101.0/30"},
+			newIPRange:         v1beta1.IPRange{CIDR: "169.254.101.0/30"},
 			newExternalIP:      "169.254.101.1",
 		},
 		{
 			name:               "different Nodes in IPv6 cluster",
 			originalNode:       nodeName(0),
 			newNode:            nodeName(1),
-			originalIPRange:    v1alpha2.IPRange{CIDR: "2021:2::aaa0/124"},
+			originalIPRange:    v1beta1.IPRange{CIDR: "2021:2::aaa0/124"},
 			originalExternalIP: "2021:2::aaa1",
-			newIPRange:         v1alpha2.IPRange{CIDR: "2021:2::bbb0/124"},
+			newIPRange:         v1beta1.IPRange{CIDR: "2021:2::bbb0/124"},
 			newExternalIP:      "2021:2::bbb1",
 		},
 	}
@@ -415,16 +478,16 @@ func testServiceUpdateExternalIP(t *testing.T, data *TestData) {
 				skipIfNotIPv4Cluster(t)
 			}
 
-			originalPool := data.createExternalIPPool(t, "originalpool-", tt.originalIPRange, nil, map[string]string{v1.LabelHostname: tt.originalNode})
-			defer data.crdClient.CrdV1alpha2().ExternalIPPools().Delete(context.TODO(), originalPool.Name, metav1.DeleteOptions{})
-			newPool := data.createExternalIPPool(t, "newpool-", tt.newIPRange, nil, map[string]string{v1.LabelHostname: tt.newNode})
-			defer data.crdClient.CrdV1alpha2().ExternalIPPools().Delete(context.TODO(), newPool.Name, metav1.DeleteOptions{})
+			originalPool := data.createExternalIPPool(t, "originalpool-", tt.originalIPRange, nil, nil, map[string]string{v1.LabelHostname: tt.originalNode})
+			defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(context.TODO(), originalPool.Name, metav1.DeleteOptions{})
+			newPool := data.createExternalIPPool(t, "newpool-", tt.newIPRange, nil, nil, map[string]string{v1.LabelHostname: tt.newNode})
+			defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(context.TODO(), newPool.Name, metav1.DeleteOptions{})
 
 			annotation := map[string]string{
 				antreaagenttypes.ServiceExternalIPPoolAnnotationKey: originalPool.Name,
 			}
 			service, err := data.CreateServiceWithAnnotations(fmt.Sprintf("test-update-eip-%d", idx),
-				data.testNamespace, 80, 80, corev1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotation)
+				data.testNamespace, 80, 80, v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotation)
 			require.NoError(t, err)
 			defer data.clientset.CoreV1().Services(service.Namespace).Delete(context.TODO(), service.Name, metav1.DeleteOptions{})
 
@@ -451,17 +514,17 @@ func testServiceUpdateExternalIP(t *testing.T, data *TestData) {
 func testServiceNodeFailure(t *testing.T, data *TestData) {
 	tests := []struct {
 		name       string
-		ipRange    v1alpha2.IPRange
+		ipRange    v1beta1.IPRange
 		expectedIP string
 	}{
 		{
 			name:       "IPv4 cluster",
-			ipRange:    v1alpha2.IPRange{CIDR: "169.254.100.0/30"},
+			ipRange:    v1beta1.IPRange{CIDR: "169.254.100.0/30"},
 			expectedIP: "169.254.100.1",
 		},
 		{
 			name:       "IPv6 cluster",
-			ipRange:    v1alpha2.IPRange{CIDR: "2021:4::aaa0/124"},
+			ipRange:    v1beta1.IPRange{CIDR: "2021:4::aaa0/124"},
 			expectedIP: "2021:4::aaa1",
 		},
 	}
@@ -492,21 +555,21 @@ func testServiceNodeFailure(t *testing.T, data *TestData) {
 				signalAgent(evictNode, "CONT")
 			}
 
-			nodeCandidates := sets.NewString(nodeName(0), nodeName(1))
+			nodeCandidates := sets.New[string](nodeName(0), nodeName(1))
 			matchExpressions := []metav1.LabelSelectorRequirement{
 				{
 					Key:      v1.LabelHostname,
 					Operator: metav1.LabelSelectorOpIn,
-					Values:   nodeCandidates.List(),
+					Values:   sets.List(nodeCandidates),
 				},
 			}
-			externalIPPoolTwoNodes := data.createExternalIPPool(t, "pool-with-two-nodes-", tt.ipRange, matchExpressions, nil)
-			defer data.crdClient.CrdV1alpha2().ExternalIPPools().Delete(context.TODO(), externalIPPoolTwoNodes.Name, metav1.DeleteOptions{})
+			externalIPPoolTwoNodes := data.createExternalIPPool(t, "pool-with-two-nodes-", tt.ipRange, nil, matchExpressions, nil)
+			defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(context.TODO(), externalIPPoolTwoNodes.Name, metav1.DeleteOptions{})
 			annotation := map[string]string{
 				antreaagenttypes.ServiceExternalIPPoolAnnotationKey: externalIPPoolTwoNodes.Name,
 			}
 			service, err := data.CreateServiceWithAnnotations("test-service-node-failure", data.testNamespace, 80, 80,
-				corev1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotation)
+				v1.ProtocolTCP, nil, false, false, v1.ServiceTypeLoadBalancer, nil, annotation)
 			require.NoError(t, err)
 			defer data.clientset.CoreV1().Services(service.Namespace).Delete(context.TODO(), service.Name, metav1.DeleteOptions{})
 
@@ -522,12 +585,12 @@ func testServiceNodeFailure(t *testing.T, data *TestData) {
 				expectedMigratedNode = nodeName(0)
 			}
 			// The Agent on the original Node is paused. Run antctl from the expected migrated Node instead.
-			err = wait.PollImmediate(200*time.Millisecond, 15*time.Second, func() (done bool, err error) {
-				assigndNode, err := data.getServiceAssignedNode(expectedMigratedNode, service)
+			err = wait.PollUntilContextTimeout(context.Background(), 200*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (done bool, err error) {
+				assignedNode, err := data.getServiceAssignedNode(expectedMigratedNode, service)
 				if err != nil {
 					return false, nil
 				}
-				return assigndNode == expectedMigratedNode, nil
+				return assignedNode == expectedMigratedNode, nil
 			})
 			assert.NoError(t, err)
 			restoreAgent(originalNode)
@@ -565,22 +628,22 @@ func testExternalIPAccess(t *testing.T, data *TestData) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ipFamily := corev1.IPv4Protocol
+			ipFamily := v1.IPv4Protocol
 			if utilnet.IsIPv6CIDRString(tt.externalIPCIDR) {
 				skipIfNotIPv6Cluster(t)
-				ipFamily = corev1.IPv6Protocol
+				ipFamily = v1.IPv6Protocol
 			} else {
 				skipIfNotIPv4Cluster(t)
 			}
 			nodes := []string{nodeName(0), nodeName(1)}
-			ipRange := v1alpha2.IPRange{CIDR: tt.externalIPCIDR}
-			ipPool := data.createExternalIPPool(t, "ippool-", ipRange, nil, nil)
-			defer data.crdClient.CrdV1alpha2().ExternalIPPools().Delete(context.TODO(), ipPool.Name, metav1.DeleteOptions{})
+			ipRange := v1beta1.IPRange{CIDR: tt.externalIPCIDR}
+			ipPool := data.createExternalIPPool(t, "ippool-", ipRange, nil, nil, nil)
+			defer data.crdClient.CrdV1beta1().ExternalIPPools().Delete(context.TODO(), ipPool.Name, metav1.DeleteOptions{})
 			agnhosts := []string{"agnhost-0", "agnhost-1"}
 			// Create agnhost Pods on each Node.
 			for idx, node := range nodes {
 				createAgnhostPod(t, data, agnhosts[idx], node, false)
-				defer data.deletePodAndWait(defaultTimeout, agnhosts[idx], data.testNamespace)
+				defer data.DeletePodAndWait(defaultTimeout, agnhosts[idx], data.testNamespace)
 			}
 			var port int32 = 8080
 			externalIPTestCases := []struct {
@@ -601,8 +664,8 @@ func testExternalIPAccess(t *testing.T, data *TestData) {
 			}
 			waitExternalIPConfigured := func(service *v1.Service) (string, string, error) {
 				var ip string
-				var assigndNode string
-				err := wait.PollImmediate(200*time.Millisecond, 5*time.Second, func() (done bool, err error) {
+				var assignedNode string
+				err := wait.PollUntilContextTimeout(context.Background(), 200*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (done bool, err error) {
 					service, err = data.clientset.CoreV1().Services(service.Namespace).Get(context.TODO(), service.Name, metav1.GetOptions{})
 					if err != nil {
 						return false, err
@@ -610,21 +673,21 @@ func testExternalIPAccess(t *testing.T, data *TestData) {
 					if len(service.Status.LoadBalancer.Ingress) == 0 || service.Status.LoadBalancer.Ingress[0].IP == "" {
 						return false, nil
 					}
-					assigndNode, err = data.getServiceAssignedNode("", service)
+					assignedNode, err = data.getServiceAssignedNode("", service)
 					if err != nil {
 						return false, nil
 					}
 					ip = service.Status.LoadBalancer.Ingress[0].IP
 					return true, nil
 				})
-				return ip, assigndNode, err
+				return ip, assignedNode, err
 			}
 			for _, et := range externalIPTestCases {
 				t.Run(et.name, func(t *testing.T) {
 					annotations := map[string]string{
 						antreaagenttypes.ServiceExternalIPPoolAnnotationKey: ipPool.Name,
 					}
-					service, err := data.CreateServiceWithAnnotations(et.serviceName, data.testNamespace, port, port, corev1.ProtocolTCP, map[string]string{"app": "agnhost"}, false, et.externalTrafficPolicyLocal, corev1.ServiceTypeLoadBalancer, &ipFamily, annotations)
+					service, err := data.CreateServiceWithAnnotations(et.serviceName, data.testNamespace, port, port, v1.ProtocolTCP, map[string]string{"app": "agnhost"}, false, et.externalTrafficPolicyLocal, v1.ServiceTypeLoadBalancer, &ipFamily, annotations)
 					require.NoError(t, err)
 					defer data.deleteService(service.Namespace, service.Name)
 
@@ -632,25 +695,16 @@ func testExternalIPAccess(t *testing.T, data *TestData) {
 					require.NoError(t, err)
 
 					// Create a pod in a different netns with the same subnet of the external IP to mock as another Node in the same subnet.
-					cmd := fmt.Sprintf(`ip netns add %[1]s && \
-ip link add dev %[1]s-a type veth peer name %[1]s-b && \
-ip link set dev %[1]s-a netns %[1]s && \
-ip addr add %[3]s/%[4]d dev %[1]s-b && \
-ip link set dev %[1]s-b up && \
-ip netns exec %[1]s ip addr add %[2]s/%[4]d dev %[1]s-a && \
-ip netns exec %[1]s ip link set dev %[1]s-a up && \
-ip netns exec %[1]s ip route replace default via %[3]s && \
-ip netns exec %[1]s \
-sleep 3600`, tt.clientName, tt.clientIP, tt.localIP, tt.clientIPMaskLen)
+					cmd, netns := getCommandInFakeExternalNetwork("sleep 3600", tt.clientIPMaskLen, tt.clientIP, tt.localIP)
 
-					baseUrl := net.JoinHostPort(externalIP, strconv.FormatInt(int64(port), 10))
+					baseURL := getHTTPURLFromIPPort(externalIP, port)
 
 					require.NoError(t, NewPodBuilder(tt.clientName, data.testNamespace, agnhostImage).OnNode(host).WithCommand([]string{"sh", "-c", cmd}).InHostNetwork().Privileged().WithMutateFunc(func(pod *v1.Pod) {
 						delete(pod.Labels, "app")
 						// curl will exit immediately if the destination IP is unreachable and will NOT retry despite having retry flags set.
 						// Use an exec readiness probe to ensure the route is configured to the interface.
 						// Refer to https://github.com/curl/curl/issues/1603.
-						probeCmd := strings.Split(fmt.Sprintf("ip netns exec %s curl -s %s", tt.clientName, baseUrl), " ")
+						probeCmd := strings.Split(fmt.Sprintf("ip netns exec %s curl -s %s", netns, baseURL), " ")
 						pod.Spec.Containers[0].ReadinessProbe = &v1.Probe{
 							ProbeHandler: v1.ProbeHandler{
 								Exec: &v1.ExecAction{
@@ -664,17 +718,17 @@ sleep 3600`, tt.clientName, tt.clientIP, tt.localIP, tt.clientIPMaskLen)
 
 					_, err = data.PodWaitFor(defaultTimeout, tt.clientName, data.testNamespace, func(p *v1.Pod) (bool, error) {
 						for _, condition := range p.Status.Conditions {
-							if condition.Type == corev1.PodReady {
-								return condition.Status == corev1.ConditionTrue, nil
+							if condition.Type == v1.PodReady {
+								return condition.Status == v1.ConditionTrue, nil
 							}
 						}
 						return false, nil
 					})
 					require.NoError(t, err)
-					defer data.deletePodAndWait(defaultTimeout, tt.clientName, data.testNamespace)
+					defer data.DeletePodAndWait(defaultTimeout, tt.clientName, data.testNamespace)
 
-					hostNameUrl := fmt.Sprintf("%s/%s", baseUrl, "hostname")
-					probeCmd := fmt.Sprintf("ip netns exec %s curl --connect-timeout 1 --retry 5 --retry-connrefused %s", tt.clientName, hostNameUrl)
+					hostNameURL := fmt.Sprintf("%s/hostname", baseURL)
+					probeCmd := fmt.Sprintf("ip netns exec %s curl --connect-timeout 1 --retry 5 --retry-connrefused %s", netns, hostNameURL)
 					hostname, stderr, err := data.RunCommandFromPod(data.testNamespace, tt.clientName, "", []string{"sh", "-c", probeCmd})
 					assert.NoError(t, err, "External IP should be able to be connected from remote: %s", stderr)
 
@@ -684,8 +738,8 @@ sleep 3600`, tt.clientName, tt.clientIP, tt.localIP, tt.clientIPMaskLen)
 								assert.Equal(t, agnhosts[idx], hostname, "Hostname should match when ExternalTrafficPolicy setting to Local")
 							}
 						}
-						clientIPUrl := fmt.Sprintf("%s/clientip", baseUrl)
-						probeClientIPCmd := fmt.Sprintf("ip netns exec %s curl --connect-timeout 1 --retry 5 --retry-connrefused %s", tt.clientName, clientIPUrl)
+						clientIPURL := fmt.Sprintf("%s/clientip", baseURL)
+						probeClientIPCmd := fmt.Sprintf("ip netns exec %s curl --connect-timeout 1 --retry 5 --retry-connrefused %s", netns, clientIPURL)
 						clientIPPort, stderr, err := data.RunCommandFromPod(data.testNamespace, tt.clientName, "", []string{"sh", "-c", probeClientIPCmd})
 						assert.NoError(t, err, "External IP should be able to be connected from remote: %s", stderr)
 						clientIP, _, err := net.SplitHostPort(clientIPPort)
@@ -712,7 +766,7 @@ func (data *TestData) getServiceAssignedNode(node string, service *v1.Service) (
 	if err != nil {
 		return "", err
 	}
-	var serviceExternalIPInfo []querier.ServiceExternalIPInfo
+	var serviceExternalIPInfo []apis.ServiceExternalIPInfo
 	if err := json.Unmarshal([]byte(stdout), &serviceExternalIPInfo); err != nil {
 		return "", err
 	}
@@ -722,9 +776,9 @@ func (data *TestData) getServiceAssignedNode(node string, service *v1.Service) (
 	return serviceExternalIPInfo[0].AssignedNode, nil
 }
 
-func (data *TestData) waitForServiceConfigured(service *v1.Service, expectedExternalIP string, expectedNodeName string) (*corev1.Service, string, error) {
+func (data *TestData) waitForServiceConfigured(service *v1.Service, expectedExternalIP string, expectedNodeName string) (*v1.Service, string, error) {
 	var assignedNode string
-	err := wait.PollImmediate(200*time.Millisecond, 15*time.Second, func() (done bool, err error) {
+	err := wait.PollUntilContextTimeout(context.Background(), 200*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (done bool, err error) {
 		service, err = data.clientset.CoreV1().Services(service.Namespace).Get(context.TODO(), service.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -746,4 +800,24 @@ func (data *TestData) waitForServiceConfigured(service *v1.Service, expectedExte
 			service.Name, err, expectedExternalIP, expectedNodeName, service.Status, assignedNode)
 	}
 	return service, assignedNode, nil
+}
+
+func (data *TestData) waitForServiceLoadBalancerIP(service *v1.Service, expectedLoadBalancerIP string) error {
+	// Do not poll immediate to avoid false negative when the expected IP is empty.
+	return wait.PollUntilContextTimeout(context.Background(), 500*time.Millisecond, 5*time.Second, false, func(ctx context.Context) (done bool, err error) {
+		service, err = data.clientset.CoreV1().Services(service.Namespace).Get(context.TODO(), service.Name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		if expectedLoadBalancerIP == "" {
+			if len(service.Status.LoadBalancer.Ingress) > 0 {
+				return false, err
+			}
+		} else {
+			if len(service.Status.LoadBalancer.Ingress) == 0 || service.Status.LoadBalancer.Ingress[0].IP != expectedLoadBalancerIP {
+				return false, nil
+			}
+		}
+		return true, nil
+	})
 }

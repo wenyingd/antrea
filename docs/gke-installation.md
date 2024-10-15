@@ -32,17 +32,16 @@ on both VPC-native Enable/Disable modes.
 You can use any method to create a GKE cluster (gcloud SDK, gcloud Console, etc). The example
 given here is using the Google Cloud SDK.
 
-**Note:** Antrea is supported on Ubuntu Nodes only for GKE cluster. Also, it is a must to select service
-CIDR at the time of cluster deployment.
+**Note:** Antrea is supported on Ubuntu Nodes only for GKE cluster. When creating the cluster, you
+  must use the default network provider and must *not* enable "Dataplane V2".
 
 1. Create a GKE cluster
 
     ```bash
     export GKE_ZONE="us-west1"
     export GKE_HOST="UBUNTU"
-    export GKE_SERVICE_CIDR="10.94.0.0/16"
     gcloud container --project $GKE_PROJECT clusters create cluster1 --image-type $GKE_HOST \
-       --zone $GKE_ZONE --enable-ip-alias --services-ipv4-cidr $GKE_SERVICE_CIDR
+       --zone $GKE_ZONE --enable-ip-alias
     ```
 
 2. Access your cluster
@@ -50,8 +49,8 @@ CIDR at the time of cluster deployment.
     ```bash
     kubectl get nodes
     NAME                                      STATUS   ROLES    AGE     VERSION
-    gke-cluster1-default-pool-93d7da1c-61z4   Ready    <none>   3m11s   v1.14.10-gke.17
-    gke-cluster1-default-pool-93d7da1c-rkbm   Ready    <none>   3m9s    v1.14.10-gke.17
+    gke-cluster1-default-pool-93d7da1c-61z4   Ready    <none>   3m11s   1.25.7-gke.1000
+    gke-cluster1-default-pool-93d7da1c-rkbm   Ready    <none>   3m9s    1.25.7-gke.1000
     ```
 
 3. Create a cluster-admin ClusterRoleBinding
@@ -91,7 +90,7 @@ you can deploy Antrea as follows:
     ```
 
     To deploy the latest version of Antrea (built from the main branch), use the
-checked-in [deployment yaml](/build/yamls/antrea-gke.yml):
+checked-in [deployment yaml](../build/yamls/antrea-gke.yml):
 
     ```bash
     kubectl apply -f https://raw.githubusercontent.com/antrea-io/antrea/main/build/yamls/antrea-gke.yml
@@ -111,17 +110,24 @@ you should be able to see these Pods running in your cluster:
 
 3. Restart remaining Pods
 
-    Once Antrea is up and running, restart all Pods in all Namespaces (kube-system, etc) so they can be managed by Antrea.
+    Once Antrea is up and running, restart all Pods in all Namespaces (kube-system, gmp-system, etc) so they can be managed by Antrea.
 
     ```bash
-    $ kubectl delete pods -n kube-system $(kubectl get pods -n kube-system -o custom-columns=NAME:.metadata.name,HOSTNETWORK:.spec.hostNetwork --no-headers=true | grep '<none>' | awk '{ print $1 }')
-    pod "event-exporter-v0.2.5-7df89f4b8f-cm5r5" deleted
-    pod "fluentd-gcp-scaler-54ccb89d5-2glmv" deleted
-    pod "heapster-gke-6dd876579c-fc7xd" deleted
-    pod "kube-dns-5877696fb4-7cfbc" deleted
-    pod "kube-dns-5877696fb4-9zdpb" deleted
-    pod "kube-dns-autoscaler-8687c64fc-h4dtg" deleted
-    pod "l7-default-backend-8f479dd9-z42mx" deleted
-    pod "metrics-server-v0.3.1-cf56c77fc-7xgvc" deleted
-    pod "stackdriver-metadata-agent-cluster-level-6d96ccfd4-5rmwh" deleted
+    $ for ns in $(kubectl get ns -o=jsonpath=''{.items[*].metadata.name}'' --no-headers=true); do \
+        pods=$(kubectl get pods -n $ns -o custom-columns=NAME:.metadata.name,HOSTNETWORK:.spec.hostNetwork --no-headers=true | grep '<none>' | awk '{ print $1 }'); \
+        [ -z "$pods" ] || kubectl delete pods -n $ns $pods; done
+    pod "alertmanager-0" deleted
+    pod "collector-4sfvd" deleted
+    pod "collector-gtlxf" deleted
+    pod "gmp-operator-67c4678f5c-ffktp" deleted
+    pod "rule-evaluator-85b8bb96dc-trnqj" deleted
+    pod "event-exporter-gke-7bf6c99dcb-4r62c" deleted
+    pod "konnectivity-agent-autoscaler-6dfdb49cf7-hfv9g" deleted
+    pod "konnectivity-agent-cc655669b-2cjc9" deleted
+    pod "konnectivity-agent-cc655669b-d79vf" deleted
+    pod "kube-dns-5bfd847c64-ksllw" deleted
+    pod "kube-dns-5bfd847c64-qv9tq" deleted
+    pod "kube-dns-autoscaler-84b8db4dc7-2pb2b" deleted
+    pod "l7-default-backend-64679d9c86-q69lm" deleted
+    pod "metrics-server-v0.5.2-6bf74b5d5f-22gqq" deleted
     ```

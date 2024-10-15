@@ -27,7 +27,7 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	"antrea.io/antrea/pkg/agent"
+	"antrea.io/antrea/pkg/agent/client"
 	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
 )
 
@@ -61,7 +61,7 @@ type StatusController struct {
 	// realizedRules keeps track of the realized NetworkPolicy rules.
 	realizedRules cache.Indexer
 	// queue maintains the UIDs of the NetworkPolicy that need to be processed.
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[types.UID]
 }
 
 // realizedRule is the struct kept by StatusController for storing a realized rule.
@@ -82,7 +82,7 @@ func realizedRulePolicyIndexFunc(obj interface{}) ([]string, error) {
 	return []string{string(rule.policyID)}, nil
 }
 
-func newStatusController(antreaClientProvider agent.AntreaClientProvider, nodeName string, ruleCache *ruleCache) *StatusController {
+func newStatusController(antreaClientProvider client.AntreaClientProvider, nodeName string, ruleCache *ruleCache) *StatusController {
 	return &StatusController{
 		statusControlInterface: &networkPolicyStatusControl{antreaClientProvider: antreaClientProvider},
 		nodeName:               nodeName,
@@ -90,7 +90,12 @@ func newStatusController(antreaClientProvider agent.AntreaClientProvider, nodeNa
 		realizedRules: cache.NewIndexer(realizedRuleKeyFunc, cache.Indexers{
 			realizedRulePolicyIndex: realizedRulePolicyIndexFunc,
 		}),
-		queue: workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "networkpolicystatus"),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[types.UID](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[types.UID]{
+				Name: "networkpolicystatus",
+			},
+		),
 	}
 }
 
@@ -128,7 +133,7 @@ func (c *StatusController) worker() {
 }
 
 func (c *StatusController) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
@@ -136,17 +141,9 @@ func (c *StatusController) processNextWorkItem() bool {
 	// must remember to call Forget if we do not want this work item being re-queued. For
 	// example, we do not call Forget if a transient error occurs, instead the item is put back
 	// on the workqueue and attempted again after a back-off period.
-	defer c.queue.Done(obj)
+	defer c.queue.Done(key)
 
-	// We expect NetworkPolicy UID to come off the workqueue.
-	if key, ok := obj.(types.UID); !ok {
-		// As the item in the workqueue is actually invalid, we call Forget here else we'd
-		// go into a loop of attempting to process a work item that is invalid.
-		// This should not happen: enqueueNode only enqueues UIDs.
-		c.queue.Forget(obj)
-		klog.Errorf("Expected UID in work queue but got %#v", obj)
-		return true
-	} else if err := c.syncHandler(key); err == nil {
+	if err := c.syncHandler(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.queue.Forget(key)
@@ -174,7 +171,7 @@ func (c *StatusController) syncHandler(uid types.UID) error {
 	if len(desiredRules) != len(actualRules) {
 		return nil
 	}
-	desiredRuleSet := sets.NewString()
+	desiredRuleSet := sets.New[string]()
 	for _, r := range desiredRules {
 		desiredRuleSet.Insert(r.ID)
 	}
@@ -197,8 +194,9 @@ func (c *StatusController) syncHandler(uid types.UID) error {
 		},
 		Nodes: []v1beta2.NetworkPolicyNodeStatus{
 			{
-				NodeName:   c.nodeName,
-				Generation: policy.Generation,
+				NodeName:           c.nodeName,
+				Generation:         policy.Generation,
+				RealizationFailure: false,
 			},
 		},
 	}
@@ -222,7 +220,7 @@ type networkPolicyStatusControlInterface interface {
 }
 
 type networkPolicyStatusControl struct {
-	antreaClientProvider agent.AntreaClientProvider
+	antreaClientProvider client.AntreaClientProvider
 }
 
 func (c *networkPolicyStatusControl) UpdateNetworkPolicyStatus(name string, status *v1beta2.NetworkPolicyStatus) error {

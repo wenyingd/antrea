@@ -15,6 +15,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -24,7 +25,6 @@ import (
 
 	"antrea.io/antrea/pkg/agent/util"
 	agentconfig "antrea.io/antrea/pkg/config/agent"
-	controllerconfig "antrea.io/antrea/pkg/config/controller"
 	"antrea.io/antrea/pkg/features"
 )
 
@@ -42,6 +42,7 @@ func TestIPSec(t *testing.T) {
 		t.Fatalf("Error when setting up test: %v", err)
 	}
 	defer teardownTest(t, data)
+	skipIfMulticastEnabled(t, data)
 
 	t.Logf("Redeploy Antrea with IPsec tunnel enabled")
 	data.redeployAntrea(t, deployAntreaIPsec)
@@ -49,24 +50,32 @@ func TestIPSec(t *testing.T) {
 	defer data.redeployAntrea(t, deployAntreaDefault)
 
 	t.Run("testIPSecPSKAuth", func(t *testing.T) {
-		cc := func(config *controllerconfig.ControllerConfig) {
-		}
-		ac := func(config *agentconfig.AgentConfig) {
-			config.IPsec.AuthenticationMode = "psk"
-		}
-		if err := data.mutateAntreaConfigMap(cc, ac, true, true); err != nil {
-			t.Fatalf("Failed to enable IPsecCertAuth feature: %v", err)
+		conf, err := data.getAgentConf(antreaNamespace)
+		failOnError(err, t)
+		if conf.IPsec.AuthenticationMode != "psk" {
+			t.Logf("Restarting Antrea Agent with IPsec PSK authentication mode. Current mode: %s", conf.IPsec.AuthenticationMode)
+			ac := func(config *agentconfig.AgentConfig) {
+				config.IPsec.AuthenticationMode = "psk"
+			}
+			if err := data.mutateAntreaConfigMap(nil, ac, false, true); err != nil {
+				t.Fatalf("Failed to change IPsec authentication mode to PSK: %v", err)
+			}
 		}
 		t.Run("testIPSecTunnelConnectivity", func(t *testing.T) { testIPSecTunnelConnectivity(t, data, false) })
 	})
 
 	t.Run("testIPSecCertificateAuth", func(t *testing.T) {
 		skipIfFeatureDisabled(t, features.IPsecCertAuth, true, true)
-		ac := func(config *agentconfig.AgentConfig) {
-			config.IPsec.AuthenticationMode = "cert"
-		}
-		if err := data.mutateAntreaConfigMap(nil, ac, false, true); err != nil {
-			t.Fatalf("Failed to enable IPsecCertAuth feature: %v", err)
+		conf, err := data.getAgentConf(antreaNamespace)
+		failOnError(err, t)
+		if conf.IPsec.AuthenticationMode != "cert" {
+			t.Logf("Restarting Antrea Agent with IPsec Certificate authentication mode. Current mode: %s", conf.IPsec.AuthenticationMode)
+			ac := func(config *agentconfig.AgentConfig) {
+				config.IPsec.AuthenticationMode = "cert"
+			}
+			if err := data.mutateAntreaConfigMap(nil, ac, false, true); err != nil {
+				t.Fatalf("Failed to change IPsec authentication mode to Certificate: %v", err)
+			}
 		}
 		t.Run("testIPSecTunnelConnectivity", func(t *testing.T) { testIPSecTunnelConnectivity(t, data, true) })
 	})
@@ -129,11 +138,13 @@ func testIPSecTunnelConnectivity(t *testing.T, data *TestData, certAuth bool) {
 	}
 	podInfos, deletePods := createPodsOnDifferentNodes(t, data, data.testNamespace, tag)
 	defer deletePods()
-	data.runPingMesh(t, podInfos[:2], agnhostContainerName)
+	t.Logf("Executing ping tests across Nodes: '%s' <-> '%s'", podInfos[0].NodeName, podInfos[1].NodeName)
+	// PMTU is wrong when using GRE+IPsec with some Linux kernel versions, do not set DF to work around.
+	// See https://github.com/antrea-io/antrea/issues/5922 for more details.
+	data.runPingMesh(t, podInfos[:2], toolboxContainerName, false)
 
-	// We know that testPodConnectivityDifferentNodes always creates a Pod on Node 0 for the
-	// inter-Node ping test.
-	nodeName := nodeName(0)
+	// Check that there is at least one 'up' Security Association on the Node
+	nodeName := podInfos[0].NodeName
 	if up, _, isCertAuth, err := data.readSecurityAssociationsStatus(nodeName); err != nil {
 		t.Errorf("Error when reading Security Associations: %v", err)
 	} else if up == 0 {
@@ -171,9 +182,9 @@ func testIPSecDeleteStaleTunnelPorts(t *testing.T, data *TestData) {
 	}
 
 	t.Logf("Checking that tunnel port has been created")
-	if err := wait.PollImmediate(defaultInterval, defaultTimeout, func() (found bool, err error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), defaultInterval, defaultTimeout, true, func(ctx context.Context) (found bool, err error) {
 		return doesOVSPortExist(), nil
-	}); err == wait.ErrWaitTimeout {
+	}); wait.Interrupted(err) {
 		t.Fatalf("Timed out while waiting for OVS tunnel port to be created")
 	} else if err != nil {
 		t.Fatalf("Error while waiting for OVS tunnel port to be created")
@@ -183,9 +194,9 @@ func testIPSecDeleteStaleTunnelPorts(t *testing.T, data *TestData) {
 	data.redeployAntrea(t, deployAntreaDefault)
 
 	t.Logf("Checking that tunnel port has been deleted")
-	if err := wait.PollImmediate(defaultInterval, defaultTimeout, func() (found bool, err error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), defaultInterval, defaultTimeout, true, func(ctx context.Context) (found bool, err error) {
 		return !doesOVSPortExist(), nil
-	}); err == wait.ErrWaitTimeout {
+	}); wait.Interrupted(err) {
 		t.Fatalf("Timed out while waiting for OVS tunnel port to be deleted")
 	} else if err != nil {
 		t.Fatalf("Error while waiting for OVS tunnel port to be	deleted")

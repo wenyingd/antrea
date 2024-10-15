@@ -19,8 +19,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,10 +30,10 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/util/workqueue"
 
+	"antrea.io/antrea/pkg/agent/apis"
 	ipassignertest "antrea.io/antrea/pkg/agent/ipassigner/testing"
 	"antrea.io/antrea/pkg/agent/memberlist"
 	"antrea.io/antrea/pkg/agent/types"
-	"antrea.io/antrea/pkg/querier"
 )
 
 const (
@@ -76,8 +76,8 @@ var _ memberlist.Interface = (*fakeMemberlistCluster)(nil)
 func (f *fakeMemberlistCluster) AddClusterEventHandler(h memberlist.ClusterNodeEventHandler) {
 }
 
-func (f *fakeMemberlistCluster) AliveNodes() sets.String {
-	return sets.NewString(f.nodes...)
+func (f *fakeMemberlistCluster) AliveNodes() sets.Set[string] {
+	return sets.New[string](f.nodes...)
 }
 
 func (f *fakeMemberlistCluster) SelectNodeForIP(ip, externalIPPool string, filters ...func(string) bool) (string, error) {
@@ -101,10 +101,13 @@ func (f *fakeMemberlistCluster) SelectNodeForIP(ip, externalIPPool string, filte
 	return selectNode, nil
 }
 
+func (f *fakeMemberlistCluster) ShouldSelectIP(ip string, pool string, filters ...func(node string) bool) (bool, error) {
+	return false, nil
+}
+
 type fakeController struct {
 	*ServiceExternalIPController
 	mockController        *gomock.Controller
-	clientset             *fake.Clientset
 	informerFactory       informers.SharedInformerFactory
 	mockIPAssigner        *ipassignertest.MockIPAssigner
 	fakeMemberlistCluster *fakeMemberlistCluster
@@ -131,17 +134,20 @@ func newFakeController(t *testing.T, objs ...runtime.Object) *fakeController {
 		endpointsInformer:     endpointInformer.Informer(),
 		endpointsListerSynced: endpointInformer.Informer().HasSynced,
 		endpointsLister:       endpointInformer.Lister(),
-		queue:                 workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "serviceExternalIP"),
-		client:                clientset,
-		externalIPStates:      make(map[apimachinerytypes.NamespacedName]externalIPState),
-		cluster:               memberlistCluster,
-		ipAssigner:            mockIPAssigner,
-		assignedIPs:           make(map[string]sets.String),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[apimachinerytypes.NamespacedName](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[apimachinerytypes.NamespacedName]{
+				Name: "ServiceExternalIP",
+			},
+		),
+		externalIPStates: make(map[apimachinerytypes.NamespacedName]externalIPState),
+		cluster:          memberlistCluster,
+		ipAssigner:       mockIPAssigner,
+		assignedIPs:      make(map[string]sets.Set[string]),
 	}
 	return &fakeController{
 		ServiceExternalIPController: eipController,
 		mockController:              controller,
-		clientset:                   clientset,
 		informerFactory:             informerFactory,
 		mockIPAssigner:              mockIPAssigner,
 		fakeMemberlistCluster:       memberlistCluster,
@@ -224,7 +230,7 @@ func TestCreateService(t *testing.T) {
 			serviceToCreate:          servicePolicyCluster,
 			healthyNodes:             []string{fakeNode1, fakeNode2},
 			expectedCalls: func(mockIPAssigner *ipassignertest.MockIPAssigner) {
-				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP1)
+				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP1, nil, true)
 			},
 			expectedExternalIPStates: map[apimachinerytypes.NamespacedName]externalIPState{
 				keyFor(servicePolicyCluster): {
@@ -265,7 +271,7 @@ func TestCreateService(t *testing.T) {
 			serviceToCreate: servicePolicyLocal,
 			healthyNodes:    []string{fakeNode1, fakeNode2},
 			expectedCalls: func(mockIPAssigner *ipassignertest.MockIPAssigner) {
-				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP1)
+				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP1, nil, true)
 			},
 			expectedExternalIPStates: map[apimachinerytypes.NamespacedName]externalIPState{
 				keyFor(servicePolicyLocal): {
@@ -382,7 +388,6 @@ func TestCreateService(t *testing.T) {
 			}
 			objs = append(objs, tt.serviceToCreate)
 			c := newFakeController(t, objs...)
-			defer c.mockController.Finish()
 			stopCh := make(chan struct{})
 			defer close(stopCh)
 			c.informerFactory.Start(stopCh)
@@ -394,7 +399,7 @@ func TestCreateService(t *testing.T) {
 			c.externalIPStates = tt.previousExternalIPStates
 			for service, state := range tt.previousExternalIPStates {
 				if c.assignedIPs[state.ip] == nil {
-					c.assignedIPs[state.ip] = sets.NewString()
+					c.assignedIPs[state.ip] = sets.New[string]()
 				}
 				c.assignedIPs[state.ip].Insert(service.String())
 			}
@@ -451,7 +456,7 @@ func TestUpdateService(t *testing.T) {
 			healthyNodes: []string{fakeNode1, fakeNode2},
 			expectedCalls: func(mockIPAssigner *ipassignertest.MockIPAssigner) {
 				mockIPAssigner.EXPECT().UnassignIP(fakeServiceExternalIP1)
-				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP2)
+				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP2, nil, true)
 			},
 			expectError: false,
 		},
@@ -469,7 +474,7 @@ func TestUpdateService(t *testing.T) {
 			},
 			healthyNodes: []string{fakeNode1, fakeNode2},
 			expectedCalls: func(mockIPAssigner *ipassignertest.MockIPAssigner) {
-				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP2)
+				mockIPAssigner.EXPECT().AssignIP(fakeServiceExternalIP2, nil, true)
 			},
 			expectError: false,
 		},
@@ -591,7 +596,6 @@ func TestUpdateService(t *testing.T) {
 			objs = append(objs, tt.serviceToUpdate)
 			c := newFakeController(t, objs...)
 			c.externalIPStates = tt.previousExternalIPStates
-			defer c.mockController.Finish()
 			stopCh := make(chan struct{})
 			defer close(stopCh)
 			c.informerFactory.Start(stopCh)
@@ -602,7 +606,7 @@ func TestUpdateService(t *testing.T) {
 			}
 			for service, state := range tt.previousExternalIPStates {
 				if c.assignedIPs[state.ip] == nil {
-					c.assignedIPs[state.ip] = sets.NewString()
+					c.assignedIPs[state.ip] = sets.New[string]()
 				}
 				c.assignedIPs[state.ip].Insert(service.String())
 			}
@@ -634,7 +638,7 @@ func TestServiceExternalIPController_nodesHasHealthyServiceEndpoint(t *testing.T
 		name                 string
 		endpoints            []*corev1.Endpoints
 		serviceToTest        *corev1.Service
-		expectedHealthyNodes sets.String
+		expectedHealthyNodes sets.Set[string]
 	}{
 		{
 			name: "all Endpoints are healthy",
@@ -648,7 +652,7 @@ func TestServiceExternalIPController_nodesHasHealthyServiceEndpoint(t *testing.T
 				),
 			},
 			serviceToTest:        servicePolicyLocal.DeepCopy(),
-			expectedHealthyNodes: sets.NewString(fakeNode1, fakeNode2),
+			expectedHealthyNodes: sets.New[string](fakeNode1, fakeNode2),
 		},
 		{
 			name: "one Node does not have any healthy Endpoints",
@@ -663,7 +667,7 @@ func TestServiceExternalIPController_nodesHasHealthyServiceEndpoint(t *testing.T
 				),
 			},
 			serviceToTest:        servicePolicyLocal.DeepCopy(),
-			expectedHealthyNodes: sets.NewString(fakeNode1),
+			expectedHealthyNodes: sets.New[string](fakeNode1),
 		},
 		{
 			name: "Node have both healthy Endpoints and unhealthy Endpoints",
@@ -680,7 +684,7 @@ func TestServiceExternalIPController_nodesHasHealthyServiceEndpoint(t *testing.T
 				),
 			},
 			serviceToTest:        servicePolicyLocal.DeepCopy(),
-			expectedHealthyNodes: sets.NewString(fakeNode1, fakeNode2),
+			expectedHealthyNodes: sets.New[string](fakeNode1, fakeNode2),
 		},
 	}
 	for _, tt := range tests {
@@ -705,19 +709,19 @@ func TestServiceExternalIPController_GetServiceExternalIPStatus(t *testing.T) {
 	tests := []struct {
 		name                          string
 		externalIPStates              map[apimachinerytypes.NamespacedName]externalIPState
-		expectedServiceExternalIPInfo []querier.ServiceExternalIPInfo
+		expectedServiceExternalIPInfo []apis.ServiceExternalIPInfo
 	}{
 		{
 			name:                          "no Service available should return empty slice",
 			externalIPStates:              map[apimachinerytypes.NamespacedName]externalIPState{},
-			expectedServiceExternalIPInfo: []querier.ServiceExternalIPInfo{},
+			expectedServiceExternalIPInfo: []apis.ServiceExternalIPInfo{},
 		},
 		{
 			name: "one Service processed",
 			externalIPStates: map[apimachinerytypes.NamespacedName]externalIPState{
 				keyFor(servicePolicyCluster): {fakeServiceExternalIP1, fakeExternalIPPoolName, fakeNode1},
 			},
-			expectedServiceExternalIPInfo: []querier.ServiceExternalIPInfo{
+			expectedServiceExternalIPInfo: []apis.ServiceExternalIPInfo{
 				{
 
 					ServiceName:    servicePolicyCluster.Name,
@@ -734,7 +738,7 @@ func TestServiceExternalIPController_GetServiceExternalIPStatus(t *testing.T) {
 				keyFor(servicePolicyCluster): {fakeServiceExternalIP1, fakeExternalIPPoolName, fakeNode1},
 				keyFor(servicePolicyLocal):   {fakeServiceExternalIP2, fakeExternalIPPoolName, fakeNode2},
 			},
-			expectedServiceExternalIPInfo: []querier.ServiceExternalIPInfo{
+			expectedServiceExternalIPInfo: []apis.ServiceExternalIPInfo{
 				{
 
 					ServiceName:    servicePolicyCluster.Name,

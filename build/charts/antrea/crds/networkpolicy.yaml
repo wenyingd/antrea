@@ -7,7 +7,7 @@ metadata:
 spec:
   group: crd.antrea.io
   versions:
-    - name: v1alpha1
+    - name: v1beta1
       served: true
       storage: true
       additionalPrinterColumns:
@@ -80,7 +80,10 @@ spec:
                                     type: string
                                     pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                           matchLabels:
-                            x-kubernetes-preserve-unknown-fields: true
+                            additionalProperties:
+                              type: string
+                              pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                            type: object
                       podSelector:
                         type: object
                         properties:
@@ -104,7 +107,10 @@ spec:
                                     type: string
                                     pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                           matchLabels:
-                            x-kubernetes-preserve-unknown-fields: true
+                            additionalProperties:
+                              type: string
+                              pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                            type: object
                       group:
                         type: string
                 ingress:
@@ -143,13 +149,16 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             group:
                               type: string
                       # Ensure that Action field allows only ALLOW, DROP, REJECT and PASS values
                       action:
                         type: string
-                        enum: ['Allow', 'Drop', 'Reject', 'Pass']
+                        enum: [ 'Allow', 'Drop', 'Reject', 'Pass' ]
                       ports:
                         type: array
                         items:
@@ -157,18 +166,22 @@ spec:
                           properties:
                             protocol:
                               type: string
-                              enum: ['TCP', 'UDP', 'SCTP']
+                              enum: [ 'TCP', 'UDP', 'SCTP' ]
                             port:
                               x-kubernetes-int-or-string: true
                             endPort:
+                              type: integer
+                            sourcePort:
+                              type: integer
+                            sourceEndPort:
                               type: integer
                       protocols:
                         type: array
                         items:
                           type: object
                           oneOf:
-                            - required: [icmp]
-                            - required: [igmp]
+                            - required: [ icmp ]
+                            - required: [ igmp ]
                           properties:
                             icmp:
                               type: object
@@ -193,6 +206,29 @@ spec:
                                   oneOf:
                                     - format: ipv4
                                     - format: ipv6
+                      l7Protocols:
+                        type: array
+                        items:
+                          type: object
+                          oneOf:
+                            - required: [ http ]
+                            - required: [ tls ]
+                          properties:
+                            http:
+                              type: object
+                              properties:
+                                host:
+                                  type: string
+                                method:
+                                  type: string
+                                  enum: [ 'GET', 'POST', 'PUT', 'HEAD', 'DELETE', 'TRACE', 'OPTIONS', 'CONNECT', 'PATCH' ]
+                                path:
+                                  type: string
+                            tls:
+                              type: object
+                              properties:
+                                sni:
+                                  type: string
                       from:
                         type: array
                         items:
@@ -221,7 +257,10 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             namespaceSelector:
                               type: object
                               properties:
@@ -245,7 +284,10 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             externalEntitySelector:
                               type: object
                               properties:
@@ -269,13 +311,21 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             ipBlock:
                               type: object
                               properties:
                                 cidr:
                                   type: string
                                   format: cidr
+                                except:
+                                  type: array
+                                  items:
+                                    type: string
+                                    format: cidr
                             nodeSelector:
                               type: object
                               properties:
@@ -299,13 +349,22 @@ spec:
                                     type: object
                                   type: array
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             group:
                               type: string
+                            scope:
+                              type: string
+                              enum: [ 'Cluster', 'ClusterSet' ]
                       name:
                         type: string
                       enableLogging:
                         type: boolean
+                      logLabel:
+                        type: string
+                        pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9])?$"
                 egress:
                   type: array
                   items:
@@ -342,13 +401,16 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             group:
                               type: string
                       # Ensure that Action field allows only ALLOW, DROP, REJECT and PASS values
                       action:
                         type: string
-                        enum: ['Allow', 'Drop', 'Reject', 'Pass']
+                        enum: [ 'Allow', 'Drop', 'Reject', 'Pass' ]
                       ports:
                         type: array
                         items:
@@ -356,18 +418,22 @@ spec:
                           properties:
                             protocol:
                               type: string
-                              enum: ['TCP', 'UDP', 'SCTP']
+                              enum: [ 'TCP', 'UDP', 'SCTP' ]
                             port:
                               x-kubernetes-int-or-string: true
                             endPort:
+                              type: integer
+                            sourcePort:
+                              type: integer
+                            sourceEndPort:
                               type: integer
                       protocols:
                         type: array
                         items:
                           type: object
                           oneOf:
-                            - required: [icmp]
-                            - required: [igmp]
+                            - required: [ icmp ]
+                            - required: [ igmp ]
                           properties:
                             icmp:
                               type: object
@@ -394,6 +460,29 @@ spec:
                                   oneOf:
                                     - format: ipv4
                                     - format: ipv6
+                      l7Protocols:
+                        type: array
+                        items:
+                          type: object
+                          oneOf:
+                            - required: [ http ]
+                            - required: [ tls ]
+                          properties:
+                            http:
+                              type: object
+                              properties:
+                                host:
+                                  type: string
+                                method:
+                                  type: string
+                                  enum: [ 'GET', 'POST', 'PUT', 'HEAD', 'DELETE', 'TRACE', 'OPTIONS', 'CONNECT', 'PATCH' ]
+                                path:
+                                  type: string
+                            tls:
+                              type: object
+                              properties:
+                                sni:
+                                  type: string
                       to:
                         type: array
                         items:
@@ -422,7 +511,10 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             namespaceSelector:
                               type: object
                               properties:
@@ -446,7 +538,10 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             externalEntitySelector:
                               type: object
                               properties:
@@ -470,13 +565,21 @@ spec:
                                           type: string
                                           pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             ipBlock:
                               type: object
                               properties:
                                 cidr:
                                   type: string
                                   format: cidr
+                                except:
+                                  type: array
+                                  items:
+                                    type: string
+                                    format: cidr
                             fqdn:
                               type: string
                             nodeSelector:
@@ -502,7 +605,10 @@ spec:
                                     type: object
                                   type: array
                                 matchLabels:
-                                  x-kubernetes-preserve-unknown-fields: true
+                                  additionalProperties:
+                                    type: string
+                                    pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+                                  type: object
                             group:
                               type: string
                       toServices:
@@ -510,16 +616,21 @@ spec:
                         items:
                           type: object
                           required:
-                          - name
+                            - name
                           properties:
                             name:
                               type: string
                             namespace:
                               type: string
+                            scope:
+                              type: string
                       name:
                         type: string
                       enableLogging:
                         type: boolean
+                      logLabel:
+                        type: string
+                        pattern: "^(([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9])?$"
             status:
               type: object
               properties:
@@ -547,11 +658,13 @@ spec:
                       message:
                         type: string
       subresources:
-        status: {}
+        status: { }
   scope: Namespaced
   names:
     plural: networkpolicies
     singular: networkpolicy
     kind: NetworkPolicy
     shortNames:
+      - annp
+      # Deprecated shortName and shall be removed in Antrea v1.14.0
       - anp

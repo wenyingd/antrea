@@ -16,6 +16,7 @@ package ip
 
 import (
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -82,32 +83,32 @@ func TestMergeCIDRs(t *testing.T) {
 		testList[2], testList[3]}
 	correctList0 := []*net.IPNet{testList[0], testList[1]}
 
-	ipNetList0 = mergeCIDRs(ipNetList0)
+	ipNetList0 = MergeCIDRs(ipNetList0)
 
 	assert.ElementsMatch(t, correctList0, ipNetList0)
 
 	ipNetList1 := []*net.IPNet{testList[0]}
 	correctList1 := []*net.IPNet{testList[0]}
 
-	ipNetList1 = mergeCIDRs(ipNetList1)
+	ipNetList1 = MergeCIDRs(ipNetList1)
 	assert.ElementsMatch(t, correctList1, ipNetList1)
 
 	ipNetList2 := []*net.IPNet{testList[2], testList[3]}
 	correctList2 := []*net.IPNet{testList[2], testList[3]}
 
-	ipNetList2 = mergeCIDRs(ipNetList2)
+	ipNetList2 = MergeCIDRs(ipNetList2)
 	assert.ElementsMatch(t, correctList2, ipNetList2)
 
 	ipNetList3 := []*net.IPNet{testList[0], testList[3]}
 	correctList3 := []*net.IPNet{testList[0], testList[3]}
 
-	ipNetList3 = mergeCIDRs(ipNetList3)
+	ipNetList3 = MergeCIDRs(ipNetList3)
 	assert.ElementsMatch(t, correctList3, ipNetList3)
 
 	ipNetList4 := []*net.IPNet{}
 	correctList4 := []*net.IPNet{}
 
-	ipNetList4 = mergeCIDRs(ipNetList4)
+	ipNetList4 = MergeCIDRs(ipNetList4)
 	assert.ElementsMatch(t, correctList4, ipNetList4)
 }
 
@@ -236,6 +237,178 @@ func TestAppendPortIfMissing(t *testing.T) {
 			if got := AppendPortIfMissing(tt.addr, tt.port); got != tt.want {
 				t.Errorf("AppendPortIfMissing() = %v, want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+func TestIPNetEqual(t *testing.T) {
+	tests := []struct {
+		name   string
+		ipNet1 *net.IPNet
+		ipNet2 *net.IPNet
+		want   bool
+	}{
+		{
+			name:   "equal",
+			ipNet1: MustParseCIDR("1.1.1.0/30"),
+			ipNet2: MustParseCIDR("1.1.1.0/30"),
+			want:   true,
+		},
+		{
+			name:   "different mask",
+			ipNet1: MustParseCIDR("1.1.1.0/30"),
+			ipNet2: MustParseCIDR("1.1.1.0/29"),
+			want:   false,
+		},
+		{
+			name:   "different prefix",
+			ipNet1: MustParseCIDR("1.1.1.4/30"),
+			ipNet2: MustParseCIDR("1.1.1.0/30"),
+			want:   false,
+		},
+		{
+			name:   "different family",
+			ipNet1: MustParseCIDR("1.1.1.4/30"),
+			ipNet2: MustParseCIDR("1:1:1:4::/30"),
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IPNetEqual(tt.ipNet1, tt.ipNet2))
+		})
+	}
+}
+
+func TestIPNetContains(t *testing.T) {
+	tests := []struct {
+		name   string
+		ipNet1 *net.IPNet
+		ipNet2 *net.IPNet
+		want   bool
+	}{
+		{
+			name:   "equal",
+			ipNet1: MustParseCIDR("10.0.0.0/24"),
+			ipNet2: MustParseCIDR("10.0.0.0/24"),
+			want:   true,
+		},
+		{
+			name:   "contain smaller subnet",
+			ipNet1: MustParseCIDR("10.0.0.0/24"),
+			ipNet2: MustParseCIDR("10.0.0.0/25"),
+			want:   true,
+		},
+		{
+			name:   "contain smaller subnet with different prefix",
+			ipNet1: MustParseCIDR("10.0.0.0/24"),
+			ipNet2: MustParseCIDR("10.0.0.128/25"),
+			want:   true,
+		},
+		{
+			name:   "not contain larger subnet",
+			ipNet1: MustParseCIDR("10.0.0.0/24"),
+			ipNet2: MustParseCIDR("10.0.0.0/23"),
+			want:   false,
+		},
+		{
+			name:   "not contain smaller subnet with different prefix",
+			ipNet1: MustParseCIDR("10.0.0.0/24"),
+			ipNet2: MustParseCIDR("10.0.1.0/25"),
+			want:   false,
+		},
+		{
+			name:   "not contain subnet of different family",
+			ipNet1: MustParseCIDR("1.1.1.4/30"),
+			ipNet2: MustParseCIDR("1:1:1:4::/30"),
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IPNetContains(tt.ipNet1, tt.ipNet2))
+		})
+	}
+}
+
+func TestGetStartAndEndOfPrefix(t *testing.T) {
+	testCases := []struct {
+		prefix string
+		start  string
+		end    string
+	}{
+		{
+			prefix: "10.20.30.0/26",
+			start:  "10.20.30.0",
+			end:    "10.20.30.63",
+		},
+		{
+			prefix: "10.10.40.0/24",
+			start:  "10.10.40.0",
+			end:    "10.10.40.255",
+		},
+		{
+			prefix: "10.20.30.0/20",
+			start:  "10.20.16.0",
+			end:    "10.20.31.255",
+		},
+		{
+			prefix: "10.30.20.0/16",
+			start:  "10.30.0.0",
+			end:    "10.30.255.255",
+		},
+		{
+			prefix: "10.10.10.10/12",
+			start:  "10.0.0.0",
+			end:    "10.15.255.255",
+		},
+		{
+			prefix: "10.10.10.10/6",
+			start:  "8.0.0.0",
+			end:    "11.255.255.255",
+		},
+		{
+			prefix: "2001:0db8::/42",
+			start:  "2001:db8::",
+			end:    "2001:db8:3f:ffff:ffff:ffff:ffff:ffff",
+		},
+		{
+			prefix: "2001:4860:4860::8888/56",
+			start:  "2001:4860:4860::",
+			end:    "2001:4860:4860:ff:ffff:ffff:ffff:ffff",
+		},
+		{
+			prefix: "2001:0db8::/64",
+			start:  "2001:db8::",
+			end:    "2001:db8::ffff:ffff:ffff:ffff",
+		},
+		{
+			prefix: "2001:0db8::/84",
+			start:  "2001:db8::",
+			end:    "2001:db8::fff:ffff:ffff",
+		},
+		{
+			prefix: "fd00:10:96::/100",
+			start:  "fd00:10:96::",
+			end:    "fd00:10:96::fff:ffff",
+		},
+		{
+			prefix: "fd00:10:96::/112",
+			start:  "fd00:10:96::",
+			end:    "fd00:10:96::ffff",
+		},
+		{
+			prefix: "2001:4860:4860::8888/124",
+			start:  "2001:4860:4860::8880",
+			end:    "2001:4860:4860::888f",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.prefix, func(t *testing.T) {
+			start, end := GetStartAndEndOfPrefix(netip.MustParsePrefix(tc.prefix))
+			assert.Equal(t, 0, netip.MustParseAddr(tc.start).Compare(start))
+			assert.Equal(t, 0, netip.MustParseAddr(tc.end).Compare(end))
 		})
 	}
 }

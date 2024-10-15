@@ -25,11 +25,6 @@ import (
 	"antrea.io/antrea/pkg/agent/nodeportlocal/rules"
 )
 
-const (
-	// stateInUse means that the NPL rule has been installed.
-	stateInUse protocolSocketState = 1
-)
-
 func addRuleForPort(podPortRules rules.PodPortRules, port int, podIP string, podPort int, protocol string) (ProtocolSocketData, error) {
 	// Only the protocol used here should be returned if NetNatStaticMapping rule
 	// can be inserted to an unused protocol port.
@@ -40,7 +35,6 @@ func addRuleForPort(podPortRules rules.PodPortRules, port int, podIP string, pod
 	}
 	protocolData := ProtocolSocketData{
 		Protocol: protocol,
-		State:    stateInUse,
 		socket:   nil,
 	}
 	return protocolData, nil
@@ -75,10 +69,10 @@ func (pt *PortTable) addRuleforFreePort(podIP string, podPort int, protocol stri
 	return 0, ProtocolSocketData{}, fmt.Errorf("no free port found")
 }
 
-func (pt *PortTable) AddRule(podIP string, podPort int, protocol string) (int, error) {
+func (pt *PortTable) AddRule(podKey string, podPort int, protocol string, podIP string) (int, error) {
 	pt.tableLock.Lock()
 	defer pt.tableLock.Unlock()
-	npData := pt.getEntryByPodIPPortProto(podIP, podPort, protocol)
+	npData := pt.getEntryByPodKeyPortProto(podKey, podPort, protocol)
 	exists := (npData != nil)
 	if !exists {
 		nodePort, protocolData, err := pt.addRuleforFreePort(podIP, podPort, protocol)
@@ -87,6 +81,7 @@ func (pt *PortTable) AddRule(podIP string, podPort int, protocol string) (int, e
 			return 0, err
 		}
 		npData = &NodePortData{
+			PodKey:   podKey,
 			NodePort: nodePort,
 			PodIP:    podIP,
 			PodPort:  podPort,
@@ -116,6 +111,7 @@ func (pt *PortTable) RestoreRules(allNPLPorts []rules.PodNodePort, synced chan<-
 		}
 
 		npData := &NodePortData{
+			PodKey:   nplPort.PodKey,
 			NodePort: nplPort.NodePort,
 			PodPort:  nplPort.PodPort,
 			PodIP:    nplPort.PodIP,
@@ -128,29 +124,31 @@ func (pt *PortTable) RestoreRules(allNPLPorts []rules.PodNodePort, synced chan<-
 	return nil
 }
 
-func (pt *PortTable) DeleteRule(podIP string, podPort int, protocol string) error {
+func (pt *PortTable) DeleteRule(podKey string, podPort int, protocol string) error {
 	pt.tableLock.Lock()
 	defer pt.tableLock.Unlock()
-	data := pt.getEntryByPodIPPortProto(podIP, podPort, protocol)
+	data := pt.getEntryByPodKeyPortProto(podKey, podPort, protocol)
 	if data == nil {
 		// Delete not required when the PortTable entry does not exist
 		return nil
 	}
 
-	if err := pt.PodPortRules.DeleteRule(data.NodePort, podIP, podPort, protocol); err != nil {
+	data.defunct = true
+	// Calling DeleteRule is idempotent.
+	if err := pt.PodPortRules.DeleteRule(data.NodePort, data.PodIP, podPort, protocol); err != nil {
 		return err
 	}
 	pt.deletePortTableCache(data)
 	return nil
 }
 
-func (pt *PortTable) DeleteRulesForPod(podIP string) error {
+func (pt *PortTable) DeleteRulesForPod(podKey string) error {
 	pt.tableLock.Lock()
 	defer pt.tableLock.Unlock()
-	podEntries := pt.getDataForPodIP(podIP)
+	podEntries := pt.getDataForPod(podKey)
 	for _, podEntry := range podEntries {
 		protocolSocketData := podEntry.Protocol
-		if err := pt.PodPortRules.DeleteRule(podEntry.NodePort, podIP, podEntry.PodPort, protocolSocketData.Protocol); err != nil {
+		if err := pt.PodPortRules.DeleteRule(podEntry.NodePort, podEntry.PodIP, podEntry.PodPort, protocolSocketData.Protocol); err != nil {
 			return err
 		}
 		pt.deletePortTableCache(podEntry)

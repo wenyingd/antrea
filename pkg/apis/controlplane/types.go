@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
-	crdv1alpha1 "antrea.io/antrea/pkg/apis/crd/v1alpha1"
+	crdv1beta1 "antrea.io/antrea/pkg/apis/crd/v1beta1"
 	statsv1alpha1 "antrea.io/antrea/pkg/apis/stats/v1alpha1"
 )
 
@@ -82,12 +82,12 @@ type GroupMember struct {
 	Pod *PodReference
 	// ExternalEntity maintains the reference to the ExternalEntity.
 	ExternalEntity *ExternalEntityReference
-	// Node maintains the reference to the Node.
-	Node *NodeReference
 	// IP is the IP address of the Endpoints associated with the GroupMember.
 	IPs []IPAddress
 	// Ports is the list NamedPort of the GroupMember.
 	Ports []NamedPort
+	// Node maintains the reference to the Node.
+	Node *NodeReference
 	// Service is the reference to the Service. It can only be used in an AppliedTo
 	// Group and only a NodePort type Service can be referred by this field.
 	Service *ServiceReference
@@ -95,8 +95,21 @@ type GroupMember struct {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// ClusterGroupMembers is a list of GroupMember objects or ipBlocks that are currently selected by a ClusterGroup.
+// ClusterGroupMembers is a list of GroupMember objects or IPBlocks that are currently selected by a ClusterGroup.
 type ClusterGroupMembers struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+	EffectiveMembers  []GroupMember
+	EffectiveIPBlocks []IPNet
+	TotalMembers      int64
+	TotalPages        int64
+	CurrentPage       int64
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// GroupMembers is a list of GroupMember objects or IPBlocks that are currently selected by a Group.
+type GroupMembers struct {
 	metav1.TypeMeta
 	metav1.ObjectMeta
 	EffectiveMembers  []GroupMember
@@ -187,6 +200,8 @@ const (
 	K8sNetworkPolicy           NetworkPolicyType = "K8sNetworkPolicy"
 	AntreaClusterNetworkPolicy NetworkPolicyType = "AntreaClusterNetworkPolicy"
 	AntreaNetworkPolicy        NetworkPolicyType = "AntreaNetworkPolicy"
+	AdminNetworkPolicy         NetworkPolicyType = "AdminNetworkPolicy"
+	BaselineAdminNetworkPolicy NetworkPolicyType = "BaselineAdminNetworkPolicy"
 )
 
 type NetworkPolicyReference struct {
@@ -250,7 +265,7 @@ type NetworkPolicyRule struct {
 	// Action specifies the action to be applied on the rule. i.e. Allow/Drop. An empty
 	// action “nil” defaults to Allow action, which would be the case for rules created for
 	// K8s NetworkPolicy.
-	Action *crdv1alpha1.RuleAction
+	Action *crdv1beta1.RuleAction
 	// EnableLogging is used to indicate if agent should generate logs
 	// when rules are matched. Should be default to false.
 	EnableLogging bool
@@ -258,6 +273,10 @@ type NetworkPolicyRule struct {
 	// Cannot be set in conjunction with NetworkPolicy.AppliedToGroups of the NetworkPolicy
 	// that this Rule is referred to.
 	AppliedToGroups []string
+	// L7Protocols is a list of application layer protocols which should be matched.
+	L7Protocols []L7Protocol
+	// LogLabel is a user-defined arbitrary string which will be printed in the NetworkPolicy logs.
+	LogLabel string
 }
 
 // Protocol defines network protocols supported for things like container ports.
@@ -287,10 +306,16 @@ type Service struct {
 	// and the Protocol is TCP, UDP, or SCTP, this matches all port numbers.
 	// +optional
 	Port *intstr.IntOrString
-	// EndPort defines the end of the port range, being the end included within the range.
+	// EndPort defines the end of the port range, inclusive.
 	// It can only be specified when a numerical `port` is specified.
 	// +optional
 	EndPort *int32
+	// SrcPort and SrcEndPort can only be specified, when the Protocol is TCP, UDP, or SCTP.
+	// It restricts the source port of the traffic.
+	// +optional
+	SrcPort *int32
+	// +optional
+	SrcEndPort *int32
 	// ICMPType and ICMPCode can only be specified, when the Protocol is ICMP. If they
 	// both are not specified and the Protocol is ICMP, this matches all ICMP traffic.
 	ICMPType *int32
@@ -301,8 +326,35 @@ type Service struct {
 	GroupAddress string
 }
 
+// L7Protocol defines application layer protocol to match.
+type L7Protocol struct {
+	HTTP *HTTPProtocol
+	TLS  *TLSProtocol
+}
+
+// HTTPProtocol matches HTTP requests with specific host, method, and path. All
+// fields could be used alone or together. If all fields are not provided, this
+// matches all HTTP requests.
+type HTTPProtocol struct {
+	// Host represents the hostname present in the URI or the HTTP Host header to match.
+	// It does not contain the port associated with the host.
+	Host string
+	// Method represents the HTTP method to match.
+	// It could be GET, POST, PUT, HEAD, DELETE, TRACE, OPTIONS, CONNECT and PATCH.
+	Method string
+	// Path represents the URI path to match (Ex. "/index.html", "/admin").
+	Path string
+}
+
+// TLSProtocol matches TLS handshake packets with specific SNI. If the field is not provided, this
+// matches all TLS handshake packets.
+type TLSProtocol struct {
+	// SNI (Server Name Indication) indicates the server domain name in the TLS/SSL hello message.
+	SNI string `json:"sni,omitempty" protobuf:"bytes,1,opt,name=sni"`
+}
+
 // NetworkPolicyPeer describes a peer of NetworkPolicyRules.
-// It could be a list of names of AddressGroups and/or a list of IPBlock.
+// It could contain one of the subfields or a combination of them.
 type NetworkPolicyPeer struct {
 	// A list of names of AddressGroups.
 	AddressGroups []string
@@ -314,6 +366,9 @@ type NetworkPolicyPeer struct {
 	// A list of ServiceReference.
 	// This field can only be possibly set for NetworkPolicyPeer of egress rules.
 	ToServices []ServiceReference
+	// A list of labelIdentities selected as ingress peers for stretched policy.
+	// This field can only be possibly set for NetworkPolicyPeer of ingress rules.
+	LabelIdentities []uint32
 }
 
 // IPBlock describes a particular CIDR (Ex. "192.168.1.1/24"). The except entry describes CIDRs that should
@@ -387,6 +442,47 @@ type NetworkPolicyNodeStatus struct {
 	NodeName string
 	// The generation realized by the Node.
 	Generation int64
+	// The flag to mark the NetworkPolicy realization is failed on the Node or not.
+	RealizationFailure bool
+	// The error message to describe why the NetworkPolicy realization is failed on the Node.
+	Message string
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// NetworkPolicyEvaluation contains the request and response for a NetworkPolicy evaluation.
+type NetworkPolicyEvaluation struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+	Request  *NetworkPolicyEvaluationRequest
+	Response *NetworkPolicyEvaluationResponse
+}
+
+// Entity contains Namespace and Pod name as a request parameter.
+type Entity struct {
+	Pod *PodReference
+}
+
+// NetworkPolicyEvaluationRequest is the request body of NetworkPolicy evaluation.
+type NetworkPolicyEvaluationRequest struct {
+	Source      Entity
+	Destination Entity
+}
+
+// RuleRef contains basic information for the rule.
+type RuleRef struct {
+	Direction Direction
+	Name      string
+	Action    *crdv1beta1.RuleAction
+}
+
+// NetworkPolicyEvaluationResponse is the response of NetworkPolicy evaluation.
+type NetworkPolicyEvaluationResponse struct {
+	// The reference of the effective NetworkPolicy.
+	NetworkPolicy NetworkPolicyReference
+	RuleIndex     int32
+	// The content of the effective rule.
+	Rule RuleRef
 }
 
 type GroupReference struct {
@@ -406,6 +502,17 @@ type GroupAssociation struct {
 	metav1.ObjectMeta
 	// AssociatedGroups is a list of GroupReferences that is associated with the
 	// Pod/ExternalEntity being queried.
+	AssociatedGroups []GroupReference
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// IPGroupAssociation is a list of GroupReferences for responses to IP association queries.
+type IPGroupAssociation struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+	// AssociatedGroups is a list of GroupReferences that is associated with the
+	// IP address being queried.
 	AssociatedGroups []GroupReference
 }
 
@@ -435,4 +542,73 @@ type EgressGroupList struct {
 	metav1.TypeMeta
 	metav1.ListMeta
 	Items []EgressGroup
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type SupportBundleCollection struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+	ExpiredAt      metav1.Time
+	SinceTime      string
+	FileServer     BundleFileServer
+	Authentication BundleServerAuthConfiguration
+}
+
+// BundleFileServer specifies the bundle file server information.
+type BundleFileServer struct {
+	// The URL of the bundle file server. It is set with format: scheme://host[:port][/path],
+	// e.g, https://api.example.com:8443/v1/supportbundles/. If scheme is not set, https is used by default.
+	URL string
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// SupportBundleCollectionList is a list of SupportBundleCollection objects.
+type SupportBundleCollectionList struct {
+	metav1.TypeMeta
+	metav1.ListMeta
+	Items []SupportBundleCollection
+}
+
+type BasicAuthentication struct {
+	Username string
+	Password string
+}
+
+type BundleServerAuthConfiguration struct {
+	BearerToken         string
+	APIKey              string
+	BasicAuthentication *BasicAuthentication
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// SupportBundleCollectionStatus is the status of a SupportBundleCollection.
+type SupportBundleCollectionStatus struct {
+	metav1.TypeMeta
+	metav1.ObjectMeta
+	// Nodes contains statuses produced on a list of Nodes.
+	Nodes []SupportBundleCollectionNodeStatus
+}
+
+type SupportBundleCollectionNodeType string
+
+const (
+	SupportBundleCollectionNodeTypeNode         SupportBundleCollectionNodeType = "Node"
+	SupportBundleCollectionNodeTypeExternalNode SupportBundleCollectionNodeType = "ExternalNode"
+)
+
+// SupportBundleCollectionNodeStatus is the status of a SupportBundleCollection on a Node.
+type SupportBundleCollectionNodeStatus struct {
+	// The name of the Node that produces the status.
+	NodeName string
+	// The Namespace of the Node produces the status. It is set only when NodeType is externalNode
+	NodeNamespace string
+	// The type of the Node that produces the status. The supported values are "Node" and "ExternalNode".
+	NodeType SupportBundleCollectionNodeType
+	// Completed shows if the SupportBundleCollection is successfully processed on the Node or ExternalNode or not.
+	Completed bool
+	// Error is the reason for which the SupportBundleCollection is failed on the Node.
+	Error string
 }

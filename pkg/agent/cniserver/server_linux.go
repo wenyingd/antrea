@@ -14,7 +14,7 @@
 
 package cniserver
 
-import "github.com/containernetworking/cni/pkg/types/current"
+import current "github.com/containernetworking/cni/pkg/types/100"
 
 // updateResultDNSConfig updates the DNS config from CNIConfig.
 func updateResultDNSConfig(result *current.Result, cniConfig *CNIConfig) {
@@ -35,6 +35,12 @@ func (s *CNIServer) hostNetNsPath(netNS string) string {
 // Always return true on Linux platform, because kubelet only call CNI request for infra container.
 func isInfraContainer(netNS string) bool {
 	return true
+}
+
+// validateRuntime returns nil if the container runtime is supported by Antrea.
+// Always return nil on Linux platform, because all container runtimes are supported.
+func validateRuntime(netNS string) error {
+	return nil
 }
 
 // getInfraContainer returns the sandbox container ID of a Pod.

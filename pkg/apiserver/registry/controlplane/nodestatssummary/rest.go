@@ -34,8 +34,9 @@ type REST struct {
 }
 
 var (
-	_ rest.Creater = &REST{}
-	_ rest.Scoper  = &REST{}
+	_ rest.Creater              = &REST{}
+	_ rest.Scoper               = &REST{}
+	_ rest.SingularNameProvider = &REST{}
 )
 
 // NewREST returns a REST object that will work against API services.
@@ -47,6 +48,9 @@ func (r *REST) New() runtime.Object {
 	return &controlplane.NodeStatsSummary{}
 }
 
+func (r *REST) Destroy() {
+}
+
 func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *v1.CreateOptions) (runtime.Object, error) {
 	summary := obj.(*controlplane.NodeStatsSummary)
 	r.statsCollector.Collect(summary)
@@ -56,4 +60,8 @@ func (r *REST) Create(ctx context.Context, obj runtime.Object, createValidation 
 
 func (r *REST) NamespaceScoped() bool {
 	return false
+}
+
+func (r *REST) GetSingularName() string {
+	return "nodestatssummary"
 }

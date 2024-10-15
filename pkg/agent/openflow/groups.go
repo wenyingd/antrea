@@ -22,6 +22,7 @@ import (
 
 type GroupAllocator interface {
 	Allocate() binding.GroupIDType
+	Next() binding.GroupIDType
 	Release(id binding.GroupIDType)
 }
 
@@ -49,6 +50,19 @@ func (a *groupAllocator) Allocate() binding.GroupIDType {
 	return id
 }
 
+// Next is a readonly method which returns the next available group ID. It's useful in tests to predict the group ID.
+func (a *groupAllocator) Next() binding.GroupIDType {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var id binding.GroupIDType
+	if len(a.recycled) != 0 {
+		id = a.recycled[len(a.recycled)-1]
+	} else {
+		id = a.groupIDCounter + 1
+	}
+	return id
+}
+
 func (a *groupAllocator) Release(id binding.GroupIDType) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -56,10 +70,6 @@ func (a *groupAllocator) Release(id binding.GroupIDType) {
 	a.recycled = append(a.recycled, id)
 }
 
-func NewGroupAllocator(isIPv6 bool) GroupAllocator {
-	var groupIDCounter binding.GroupIDType
-	if isIPv6 {
-		groupIDCounter = 0x10000000
-	}
-	return &groupAllocator{groupIDCounter: groupIDCounter}
+func NewGroupAllocator() GroupAllocator {
+	return &groupAllocator{}
 }

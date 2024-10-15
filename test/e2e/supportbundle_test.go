@@ -29,11 +29,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/rest"
 
-	agentapiserver "antrea.io/antrea/pkg/agent/apiserver"
 	"antrea.io/antrea/pkg/apis"
 	systemv1beta1 "antrea.io/antrea/pkg/apis/system/v1beta1"
-	controllerapiserver "antrea.io/antrea/pkg/apiserver"
 	clientset "antrea.io/antrea/pkg/client/clientset/versioned"
+	"antrea.io/antrea/test/e2e/utils/portforwarder"
 )
 
 // getAccessToken retrieves the local access token of an antrea component API server.
@@ -56,35 +55,38 @@ func testSupportBundle(name string, t *testing.T) {
 	}
 	defer teardownTest(t, data)
 
-	var podName, podPort, tokenPath string
+	var podName string
+	var podPort int
 	if name == "controller" {
 		var pod *v1.Pod
 		pod, err = data.getAntreaController()
 		require.NoError(t, err)
 		podName = pod.Name
-		podPort = fmt.Sprint(apis.AntreaControllerAPIPort)
-		tokenPath = controllerapiserver.TokenPath
+		podPort = apis.AntreaControllerAPIPort
 	} else {
 		podName, err = data.getAntreaPodOnNode(controlPlaneNodeName())
 		require.NoError(t, err)
-		podPort = fmt.Sprint(apis.AntreaAgentAPIPort)
-		tokenPath = agentapiserver.TokenPath
+		podPort = apis.AntreaAgentAPIPort
 	}
 	// Acquire token.
-	token, err := getAccessToken(podName, fmt.Sprintf("antrea-%s", name), tokenPath, data)
+	token, err := getAccessToken(podName, fmt.Sprintf("antrea-%s", name), apis.APIServerLoopbackTokenPath, data)
 	require.NoError(t, err)
 	podIP, err := data.podWaitForIPs(defaultTimeout, podName, metav1.NamespaceSystem)
 	require.NoError(t, err)
 
-	for _, podIPStr := range podIP.ipStrings {
-		getAndCheckSupportBundle(t, name, podIPStr, podPort, token, data)
+	for _, podIPStr := range podIP.IPStrings {
+		getAndCheckSupportBundle(t, name, podIPStr, podPort, token, podName, data)
 	}
 }
 
-func getAndCheckSupportBundle(t *testing.T, name, podIP, podPort, token string, data *TestData) {
+func getAndCheckSupportBundle(t *testing.T, name, podIP string, podPort int, token string, podName string, data *TestData) {
 	// Setup clients.
 	localConfig := rest.CopyConfig(data.kubeConfig)
-	localConfig.Host = net.JoinHostPort(podIP, podPort)
+	pf, err := portforwarder.NewPortForwarder(localConfig, metav1.NamespaceSystem, podName, podPort, "localhost", 8080)
+	require.NoError(t, err)
+	pf.Start()
+	defer pf.Stop()
+	localConfig.Host = net.JoinHostPort("localhost", "8080")
 	localConfig.BearerToken = token
 	localConfig.Insecure = true
 	localConfig.CAFile = ""
@@ -105,7 +107,7 @@ func getAndCheckSupportBundle(t *testing.T, name, podIP, podPort, token string, 
 	require.Equal(t, systemv1beta1.SupportBundleStatusCollecting, bundle.Status)
 	// Waiting for the generation to be completed.
 	ddl := time.After(defaultTimeout)
-	err = wait.PollImmediateUntil(200*time.Millisecond, func() (done bool, err error) {
+	err = wait.PollUntilContextCancel(context.TODO(), 200*time.Millisecond, true, func(ctx context.Context) (done bool, err error) {
 		select {
 		case <-ddl:
 			return false, fmt.Errorf("collecting timeout")
@@ -114,7 +116,7 @@ func getAndCheckSupportBundle(t *testing.T, name, podIP, podPort, token string, 
 		bundle, err = clients.SystemV1beta1().SupportBundles().Get(context.TODO(), name, metav1.GetOptions{})
 		require.NoError(t, err)
 		return bundle.Status == systemv1beta1.SupportBundleStatusCollected, nil
-	}, nil)
+	})
 	require.NoError(t, err)
 	// Checking the complete status.
 	bundle, err = clients.SystemV1beta1().SupportBundles().Get(context.TODO(), name, metav1.GetOptions{})

@@ -70,7 +70,7 @@ type ExternalNodeController struct {
 
 	syncedExternalNode cache.Store
 	// queue maintains the ExternalNode objects that need to be synced.
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[string]
 }
 
 func NewExternalNodeController(crdClient clientset.Interface, externalNodeInformer externalnodeinformers.ExternalNodeInformer,
@@ -87,7 +87,12 @@ func NewExternalNodeController(crdClient clientset.Interface, externalNodeInform
 		externalEntityListerSynced: externalEntityInformer.Informer().HasSynced,
 
 		syncedExternalNode: cache.NewStore(keyFunc),
-		queue:              workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "externalnode"),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "externalNode",
+			},
+		),
 	}
 	c.externalNodeInformer.Informer().AddEventHandlerWithResyncPeriod(
 		cache.ResourceEventHandlerFuncs{
@@ -185,17 +190,13 @@ func (c *ExternalNodeController) worker() {
 }
 
 func (c *ExternalNodeController) processNextWorkItem() bool {
-	obj, quit := c.queue.Get()
+	key, quit := c.queue.Get()
 	if quit {
 		return false
 	}
-	defer c.queue.Done(obj)
+	defer c.queue.Done(key)
 
-	if key, ok := obj.(string); !ok {
-		c.queue.Forget(obj)
-		klog.Errorf("Expected string in ExternalNode work queue but got %#v", obj)
-		return true
-	} else if err := c.syncExternalNode(key); err == nil {
+	if err := c.syncExternalNode(key); err == nil {
 		// If no error occurs we Forget this item so it does not get queued again until
 		// another change happens.
 		c.queue.Forget(key)
@@ -282,8 +283,8 @@ func (c *ExternalNodeController) updateExternalNode(preEn *v1alpha1.ExternalNode
 		}
 
 	} else {
-		preIPs := sets.NewString(preEn.Spec.Interfaces[0].IPs...)
-		curIPs := sets.NewString(curEn.Spec.Interfaces[0].IPs...)
+		preIPs := sets.New[string](preEn.Spec.Interfaces[0].IPs...)
+		curIPs := sets.New[string](curEn.Spec.Interfaces[0].IPs...)
 		if (!reflect.DeepEqual(preEn.Labels, curEn.Labels)) || (!preIPs.Equal(curIPs)) {
 			updatedEE, err := genExternalEntity(curEEName, curEn)
 			if err != nil {
@@ -300,7 +301,19 @@ func (c *ExternalNodeController) updateExternalNode(preEn *v1alpha1.ExternalNode
 func (c *ExternalNodeController) updateExternalEntity(ee *v1alpha2.ExternalEntity) error {
 	// resourceVersion must be specified for update operation,
 	// so it gets the existing ExternalEntity and modifies the changed fields.
-	existingEE, _ := c.crdClient.CrdV1alpha2().ExternalEntities(ee.Namespace).Get(context.TODO(), ee.Name, metav1.GetOptions{})
+	existingEE, err := c.crdClient.CrdV1alpha2().ExternalEntities(ee.Namespace).Get(context.TODO(), ee.Name, metav1.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			_, err = c.crdClient.CrdV1alpha2().ExternalEntities(ee.Namespace).Create(context.TODO(), ee, metav1.CreateOptions{})
+			if err != nil {
+				klog.ErrorS(err, "Failed to create ExternalEntity", "entityName", ee.Name, "entityNamespace", ee.Namespace)
+				return err
+			}
+			return nil
+		}
+		klog.ErrorS(err, "Failed to get ExternalEntity", "entityName", ee.Name, "entityNamespace", ee.Namespace)
+		return err
+	}
 	isChanged := false
 	if !reflect.DeepEqual(existingEE.Spec, ee.Spec) {
 		existingEE.Spec = ee.Spec
@@ -349,8 +362,8 @@ func (c *ExternalNodeController) deleteExternalEntity(namespace string, name str
 
 func genExternalEntity(eeName string, en *v1alpha1.ExternalNode) (*v1alpha2.ExternalEntity, error) {
 	ownerRef := &metav1.OwnerReference{
-		APIVersion: "v1alpha1",
-		Kind:       "ExternalNode",
+		APIVersion: "crd.antrea.io/v1alpha1",
+		Kind:       externalnode.EntityOwnerKind,
 		Name:       en.GetName(),
 		UID:        en.GetUID(),
 	}

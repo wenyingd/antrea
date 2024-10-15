@@ -20,19 +20,16 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/antctl/output"
 	"antrea.io/antrea/pkg/antctl/runtime"
-	"antrea.io/antrea/pkg/apis/controlplane/v1beta2"
-	"antrea.io/antrea/pkg/controller/networkpolicy"
 )
 
 type formatterType string
@@ -44,17 +41,14 @@ const (
 	rawFormatter   formatterType = "raw"
 )
 
-const (
-	sortByEffectivePriority string = "effectivePriority"
-)
-
 // commandGroup is used to group commands, it could be specified in commandDefinition.
 // The default commandGroup of a commandDefinition is `flat` which means the command
 // is a direct sub-command of the root command. For any other commandGroup, the
 // antctl framework will generate a same name sub-command of the root command for
 // each of them, any commands specified as one of these group will need to be invoked
 // as:
-//   antctl <commandGroup> <command>
+//
+//	antctl <commandGroup> <command>
 type commandGroup uint
 type OutputType uint
 
@@ -75,6 +69,8 @@ const (
 	get
 	query
 	mc
+	upgrade
+	check
 )
 
 var groupCommands = map[commandGroup]*cobra.Command{
@@ -93,6 +89,15 @@ var groupCommands = map[commandGroup]*cobra.Command{
 		Short: "Sub-commands of multi-cluster feature",
 		Long:  "Sub-commands of multi-cluster feature",
 	},
+	upgrade: {
+		Use:   "upgrade",
+		Short: "Sub-commands for upgrade operations",
+		Long:  "Sub-commands for upgrade operations",
+	},
+	check: {
+		Use:   "check",
+		Short: "Performs pre and post installation checks",
+	},
 }
 
 type endpointResponder interface {
@@ -104,6 +109,10 @@ type resourceEndpoint struct {
 	groupVersionResource *schema.GroupVersionResource
 	resourceName         string
 	namespaced           bool
+	supportSorting       bool
+	params               []flagInfo
+	parameterTransform   func(args map[string]string) (k8sruntime.Object, error)
+	restMethod           restMethod
 }
 
 func (e *resourceEndpoint) OutputType() OutputType {
@@ -131,20 +140,27 @@ func (e *resourceEndpoint) flags() []flagInfo {
 			usage:        "Filter the resource by namespace",
 		})
 	}
-	if e.groupVersionResource == &v1beta2.NetworkPolicyVersionResource {
+	if e.supportSorting {
 		flags = append(flags, getSortByFlag())
 	}
+	flags = append(flags, e.params...)
 	return flags
 }
 
 func getSortByFlag() flagInfo {
 	return flagInfo{
-		name:            "sort-by",
-		defaultValue:    "",
-		supportedValues: []string{sortByEffectivePriority},
-		usage:           "Get NetworkPolicies in specific order. Current supported value is effectivePriority.",
+		name:         "sort-by",
+		defaultValue: "",
+		usage:        "Get resources in specific order.",
 	}
 }
+
+type restMethod uint
+
+const (
+	restGet restMethod = iota
+	restPost
+)
 
 type nonResourceEndpoint struct {
 	path       string
@@ -183,6 +199,7 @@ type flagInfo struct {
 	supportedValues []string
 	arg             bool
 	usage           string
+	isBool          bool
 }
 
 // rawCommand defines a full function cobra.Command which lets developers
@@ -389,111 +406,6 @@ func (cd *commandDefinition) decode(r io.Reader, single bool) (interface{}, erro
 	return reflect.Indirect(ref).Interface(), nil
 }
 
-// tableOutputForQueryEndpoint implements printing sub tables (list of tables) for each response, utilizing constructTable
-// with multiplicity.
-func (cd *commandDefinition) tableOutputForQueryEndpoint(obj interface{}, writer io.Writer) error {
-	// intermittent new line buffer
-	var buffer bytes.Buffer
-	newLine := func() error {
-		buffer.WriteString("\n")
-		if _, err := io.Copy(writer, &buffer); err != nil {
-			return fmt.Errorf("error when copy output into writer: %w", err)
-		}
-		buffer.Reset()
-		return nil
-	}
-	// sort rows of sub table
-	sortRows := func(rows [][]string) {
-		body := rows[1:]
-		sort.Slice(body, func(i, j int) bool {
-			for k := range body[i] {
-				if body[i][k] != body[j][k] {
-					return body[i][k] < body[j][k]
-				}
-			}
-			return true
-		})
-	}
-	// constructs sub tables for responses
-	constructSubTable := func(header [][]string, body [][]string) error {
-		rows := append(header, body...)
-		sortRows(rows)
-		numRows, numCol := len(rows), len(rows[0])
-		widths := output.GetColumnWidths(numRows, numCol, rows)
-		if err := output.ConstructTable(numRows, numCol, widths, rows, writer); err != nil {
-			return err
-		}
-		return nil
-	}
-	// construct sections of sub tables for responses (applied, ingress, egress)
-	constructSection := func(label [][]string, header [][]string, body [][]string, nonEmpty bool) error {
-		if err := constructSubTable(label, [][]string{}); err != nil {
-			return err
-		}
-		if nonEmpty {
-			if err := constructSubTable(header, body); err != nil {
-				return err
-			}
-		}
-		if err := newLine(); err != nil {
-			return err
-		}
-		return nil
-	}
-	// iterate through each endpoint and construct response
-	endpointQueryResponse := obj.(*networkpolicy.EndpointQueryResponse)
-	for _, endpoint := range endpointQueryResponse.Endpoints {
-		// transform applied policies to string representation
-		policies := make([][]string, 0)
-		for _, policy := range endpoint.Policies {
-			policyStr := []string{policy.Name, policy.Namespace, string(policy.UID)}
-			policies = append(policies, policyStr)
-		}
-		// transform egress and ingress rules to string representation
-		egress, ingress := make([][]string, 0), make([][]string, 0)
-		for _, rule := range endpoint.Rules {
-			ruleStr := []string{rule.Name, rule.Namespace, strconv.Itoa(rule.RuleIndex), string(rule.UID)}
-			if rule.Direction == v1beta2.DirectionIn {
-				ingress = append(ingress, ruleStr)
-			} else if rule.Direction == v1beta2.DirectionOut {
-				egress = append(egress, ruleStr)
-			}
-		}
-		// table label
-		if err := constructSubTable([][]string{{"Endpoint " + endpoint.Namespace + "/" + endpoint.Name}}, [][]string{}); err != nil {
-			return err
-		}
-		// applied policies
-		nonEmpty := len(policies) > 0
-		policyLabel := []string{"Applied Policies: None"}
-		if nonEmpty {
-			policyLabel = []string{"Applied Policies:"}
-		}
-		if err := constructSection([][]string{policyLabel}, [][]string{{"Name", "Namespace", "UID"}}, policies, nonEmpty); err != nil {
-			return err
-		}
-		// egress rules
-		nonEmpty = len(egress) > 0
-		egressLabel := []string{"Egress Rules: None"}
-		if nonEmpty {
-			egressLabel = []string{"Egress Rules:"}
-		}
-		if err := constructSection([][]string{egressLabel}, [][]string{{"Name", "Namespace", "Index", "UID"}}, egress, nonEmpty); err != nil {
-			return err
-		}
-		// ingress rules
-		nonEmpty = len(ingress) > 0
-		ingressLabel := []string{"Ingress Rules: None"}
-		if nonEmpty {
-			ingressLabel = []string{"Ingress Rules:"}
-		}
-		if err := constructSection([][]string{ingressLabel}, [][]string{{"Name", "Namespace", "Index", "UID"}}, ingress, nonEmpty); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // output reads bytes from the resp and outputs the data to the writer in desired
 // format. If the AddonTransform is set, it will use the function to transform
 // the data first. It will try to output the resp in the format ft specified after
@@ -536,9 +448,10 @@ func (cd *commandDefinition) output(resp io.Reader, writer io.Writer, ft formatt
 		if cd.commandGroup == get {
 			return output.TableOutputForGetCommands(obj, writer)
 		} else if cd.commandGroup == query {
-			if cd.controllerEndpoint.nonResourceEndpoint.path == "/endpoint" {
-				return cd.tableOutputForQueryEndpoint(obj, writer)
+			if cd.controllerEndpoint.nonResourceEndpoint != nil && cd.controllerEndpoint.nonResourceEndpoint.path == "/endpoint" {
+				return output.TableOutputForQueryEndpoint(obj, writer)
 			}
+			return output.TableOutputForGetCommands(obj, writer)
 		} else {
 			return output.TableOutput(obj, writer)
 		}
@@ -547,7 +460,6 @@ func (cd *commandDefinition) output(resp io.Reader, writer io.Writer, ft formatt
 	default:
 		return fmt.Errorf("unsupported format type: %v", ft)
 	}
-	return nil
 }
 
 func (cd *commandDefinition) collectFlags(cmd *cobra.Command, args []string) (map[string]string, error) {
@@ -559,13 +471,25 @@ func (cd *commandDefinition) collectFlags(cmd *cobra.Command, args []string) (ma
 					argMap[f.name] = args[0]
 				}
 			} else {
-				vs, err := cmd.Flags().GetString(f.name)
-				if err == nil && len(vs) != 0 {
-					if f.supportedValues != nil && !cd.validateFlagValue(vs, f.supportedValues) {
-						return nil, fmt.Errorf("unsupported value %s for flag %s", vs, f.name)
+				if f.isBool {
+					vs, err := cmd.Flags().GetBool(f.name)
+					if err != nil {
+						return nil, fmt.Errorf("error accessing flag %s for command %s: %v", f.name, cmd.Name(), err)
 					}
-					argMap[f.name] = vs
-					continue
+					if vs {
+						argMap[f.name] = ""
+					}
+				} else {
+					vs, err := cmd.Flags().GetString(f.name)
+					if err != nil {
+						return nil, fmt.Errorf("error accessing flag %s for command %s: %v", f.name, cmd.Name(), err)
+					}
+					if err == nil && len(vs) != 0 {
+						if f.supportedValues != nil && !cd.validateFlagValue(vs, f.supportedValues) {
+							return nil, fmt.Errorf("unsupported value %s for flag %s", vs, f.name)
+						}
+						argMap[f.name] = vs
+					}
 				}
 			}
 		}
@@ -636,18 +560,23 @@ func (cd *commandDefinition) newCommandRunE(c AntctlClient, out io.Writer) func(
 
 // applyFlagsToCommand sets up args and flags for the command.
 func (cd *commandDefinition) applyFlagsToCommand(cmd *cobra.Command) {
-	var hasFlag bool
+	var hasArg bool
 	for _, flag := range cd.getEndpoint().flags() {
 		if flag.arg {
 			cmd.Args = cobra.MaximumNArgs(1)
 			cmd.Use += fmt.Sprintf(" [%s]", flag.name)
 			cmd.Long += fmt.Sprintf("\n\nArgs:\n  %s\t%s", flag.name, flag.usage)
-			hasFlag = true
+			hasArg = true
 		} else {
-			cmd.Flags().StringP(flag.name, flag.shorthand, flag.defaultValue, flag.usage)
+			if flag.isBool {
+				// When the flag is a boolean, the default value will always be false.
+				cmd.Flags().BoolP(flag.name, flag.shorthand, false, flag.usage)
+			} else {
+				cmd.Flags().StringP(flag.name, flag.shorthand, flag.defaultValue, flag.usage)
+			}
 		}
 	}
-	if !hasFlag {
+	if !hasArg {
 		cmd.Args = cobra.NoArgs
 	}
 	if cd.commandGroup == get {

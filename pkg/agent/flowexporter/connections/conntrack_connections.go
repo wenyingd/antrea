@@ -16,6 +16,7 @@ package connections
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -25,11 +26,11 @@ import (
 
 	"antrea.io/antrea/pkg/agent/flowexporter"
 	"antrea.io/antrea/pkg/agent/flowexporter/priorityqueue"
-	"antrea.io/antrea/pkg/agent/interfacestore"
 	"antrea.io/antrea/pkg/agent/metrics"
 	"antrea.io/antrea/pkg/agent/openflow"
 	"antrea.io/antrea/pkg/agent/proxy"
 	"antrea.io/antrea/pkg/querier"
+	"antrea.io/antrea/pkg/util/podstore"
 )
 
 var serviceProtocolMap = map[uint8]corev1.Protocol{
@@ -45,7 +46,12 @@ type ConntrackConnectionStore struct {
 	networkPolicyQuerier  querier.AgentNetworkPolicyInfoQuerier
 	pollInterval          time.Duration
 	connectUplinkToBridge bool
+	l7EventMapGetter      L7EventMapGetter
 	connectionStore
+}
+
+type L7EventMapGetter interface {
+	ConsumeL7EventMap() map[flowexporter.ConnectionKey]L7ProtocolFields
 }
 
 func NewConntrackConnectionStore(
@@ -53,8 +59,9 @@ func NewConntrackConnectionStore(
 	v4Enabled bool,
 	v6Enabled bool,
 	npQuerier querier.AgentNetworkPolicyInfoQuerier,
-	ifaceStore interfacestore.InterfaceStore,
+	podStore podstore.Interface,
 	proxier proxy.Proxier,
+	l7EventMapGetterFunc L7EventMapGetter,
 	o *flowexporter.FlowExporterOptions,
 ) *ConntrackConnectionStore {
 	return &ConntrackConnectionStore{
@@ -63,8 +70,9 @@ func NewConntrackConnectionStore(
 		v6Enabled:             v6Enabled,
 		networkPolicyQuerier:  npQuerier,
 		pollInterval:          o.PollInterval,
-		connectionStore:       NewConnectionStore(ifaceStore, proxier, o),
+		connectionStore:       NewConnectionStore(podStore, proxier, o),
 		connectUplinkToBridge: o.ConnectUplinkToBridge,
+		l7EventMapGetter:      l7EventMapGetterFunc,
 	}
 }
 
@@ -96,6 +104,12 @@ func (cs *ConntrackConnectionStore) Run(stopCh <-chan struct{}) {
 // TODO: As optimization, only poll invalid/closed connections during every poll, and poll the established connections right before the export.
 func (cs *ConntrackConnectionStore) Poll() ([]int, error) {
 	klog.V(2).Infof("Polling conntrack")
+	// DeepCopy the L7EventMap before polling the conntrack table to match corresponding L4 connection with L7 events
+	// and avoid missing the L7 events for corresponding L4 connection
+	var l7EventMap map[flowexporter.ConnectionKey]L7ProtocolFields
+	if cs.l7EventMapGetter != nil {
+		l7EventMap = cs.l7EventMapGetter.ConsumeL7EventMap()
+	}
 
 	var zones []uint16
 	var connsLens []int
@@ -162,6 +176,9 @@ func (cs *ConntrackConnectionStore) Poll() ([]int, error) {
 	// Update only the Connection store. IPFIX records are generated based on Connection store.
 	for _, conn := range filteredConnsList {
 		cs.AddOrUpdateConn(conn)
+	}
+	if len(l7EventMap) != 0 {
+		cs.fillL7EventInfo(l7EventMap)
 	}
 
 	cs.ReleaseConnStoreLock()
@@ -253,9 +270,15 @@ func (cs *ConntrackConnectionStore) AddOrUpdateConn(conn *flowexporter.Connectio
 		klog.V(4).InfoS("Antrea flow updated", "connection", existingConn)
 	} else {
 		cs.fillPodInfo(conn)
+		if conn.SourcePodName == "" && conn.DestinationPodName == "" {
+			// We don't add connections to connection map or expirePriorityQueue if we can't find the pod
+			// information for both srcPod and dstPod
+			klog.V(5).InfoS("Skip this connection as we cannot map any of the connection IPs to a local Pod", "srcIP", conn.FlowKey.SourceAddress.String(), "dstIP", conn.FlowKey.DestinationAddress.String())
+			return
+		}
 		if conn.Mark&openflow.ServiceCTMark.GetRange().ToNXRange().ToUint32Mask() == openflow.ServiceCTMark.GetValue() {
-			clusterIP := conn.DestinationServiceAddress.String()
-			svcPort := conn.DestinationServicePort
+			clusterIP := conn.OriginalDestinationAddress.String()
+			svcPort := conn.OriginalDestinationPort
 			protocol, err := lookupServiceProtocol(conn.FlowKey.Protocol)
 			if err != nil {
 				klog.InfoS("Could not retrieve Service protocol", "error", err)
@@ -318,4 +341,28 @@ func (cs *ConntrackConnectionStore) deleteConnWithoutLock(connKey flowexporter.C
 
 func (cs *ConntrackConnectionStore) GetPriorityQueue() *priorityqueue.ExpirePriorityQueue {
 	return cs.connectionStore.expirePriorityQueue
+}
+
+func (cs *ConntrackConnectionStore) fillL7EventInfo(l7EventMap map[flowexporter.Tuple]L7ProtocolFields) {
+	// In case the L7 event is received after the connection is removed from the cs.connections store
+	// we will discard such event
+	for connKey, conn := range cs.connections {
+		l7event, ok := l7EventMap[connKey]
+		if ok {
+			if len(l7event.http) > 0 {
+				jsonBytes, err := json.Marshal(l7event.http)
+				if err != nil {
+					klog.ErrorS(err, "Converting l7Event http failed")
+				}
+				conn.HttpVals += string(jsonBytes)
+				conn.AppProtocolName = "http"
+			}
+			// In case L7 event is received after the last planned export of the TCP connection, add
+			// the event back to the queue to be exported in next export cycle
+			_, exists := cs.expirePriorityQueue.KeyToItem[connKey]
+			if !exists {
+				cs.expirePriorityQueue.WriteItemToQueue(connKey, conn)
+			}
+		}
+	}
 }

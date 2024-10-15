@@ -188,17 +188,14 @@ these scenarios:
 * OpenFlow connection
 * The connection between CNI plugin and CNI server
 
-## Antrea Management on Windows
+## Antrea and OVS Management on Windows
 
-### Antrea Agent Management
-
-The Antrea Agent is running as a process on the Windows Node, but it is managed using a DaemonSet. The utility
-[Rancher Wins](https://github.com/rancher/wins) is used to manage the host process from inside the DaemonSet Pod.
-The Antrea Agent is configured using a ConfigMap, and the environment variables are set by kubelet on Windows.
-
-### OVS Management
-
-OVS is running as 2 Windows Services: one for ovsdb-server and one for ovs-vswitchd.
+While we provide different installation methods for Windows, the recommended one
+is to use the `antrea-windows-with-ovs.yml` manifest. With this method, the
+antrea-agent process and the OVS daemons (ovsdb-server and ovs-vswitchd) run as
+a Pod on Windows worker Nodes, and are managed by a DaemonSet. This installation
+method relies on [Windows HostProcess Pod](https://kubernetes.io/docs/tasks/configure-pod-container/create-hostprocess-pod/)
+support.
 
 ## Traffic walkthrough
 
@@ -209,11 +206,11 @@ It is processed and forwarded by OVS, and controlled with OpenFlow entries.
 
 ### Service Traffic
 
-Kube-proxy userspace mode is configured to provide NodePort Service function. A specific Network Adapter named
+Kube-proxy userspace mode is configured to provide NodePort Service function. A specific Network adapter named
 "HNS Internal NIC" is provided to kube-proxy to configure Service addresses. The OpenFlow entries for the
 NodePort Service traffic on Windows are the same as those on Linux.
 
-AntreaProxy implements the ClusterIP Service function. Antrea Agent installs routes to send ClusterIP Service
+Antrea Proxy implements the ClusterIP Service function. Antrea Agent installs routes to send ClusterIP Service
 traffic from host network to the OVS bridge. For each Service, it adds a route that routes the traffic via a
 virtual IP (169.254.0.253), and it also adds a route to indicate that the virtual IP is reachable via
 antrea-gw0. The reason to add a virtual IP, rather than routing the traffic directly to antrea-gw0, is that

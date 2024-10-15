@@ -31,21 +31,23 @@ NodePortLocal was introduced in v0.13 as an alpha feature, and was graduated to
 beta in v1.4, at which time it was enabled by default. Prior to v1.4, a feature
 gate, `NodePortLocal`, must be enabled on the antrea-agent for the feature to
 work. Starting from Antrea v1.7, NPL is supported on the Windows antrea-agent.
+From Antrea v1.14, NPL is GA.
 
 ## Usage
 
 In addition to enabling the NodePortLocal feature gate (if needed), you need to
 ensure that the `nodePortLocal.enable` flag is set to true in the Antrea Agent
 configuration. The `nodePortLocal.portRange` parameter can also be set to change
-the range from which Node ports will be allocated. Otherwise, the default range
-of `61000-62000` will be used by default. When using the NodePortLocal feature,
-your `antrea-agent` ConfigMap should look like this:
+the range from which Node ports will be allocated. Otherwise, the range
+of `61000-62000` will be used by default on Linux, and the range `40000-41000` will
+be used on Windows. When using the NodePortLocal feature, your `antrea-agent` ConfigMap
+should look like this:
 
 ```yaml
 kind: ConfigMap
 apiVersion: v1
 metadata:
-  name: antrea-config-dcfb6k2hkm
+  name: antrea-config
   namespace: kube-system
 data:
   antrea-agent.conf: |
@@ -79,7 +81,7 @@ spec:
   - name: web
     port: 80
     protocol: TCP
-    targetPort: 80
+    targetPort: 8080
   selector:
     app: nginx
 ---
@@ -115,8 +117,7 @@ metadata:
   labels:
     app: nginx
   annotations:
-    nodeportlocal.antrea.io: '[{"podPort":8080,"nodeIP":"10.10.10.10","nodePort":61002,"protocol":"tcp","protocols":["tcp"]}]'
-...
+    nodeportlocal.antrea.io: '[{"podPort":8080,"nodeIP":"10.10.10.10","nodePort":61002,"protocol":"tcp"}]'
 ```
 
 This annotation indicates that port 8080 of the Pod can be reached through port
@@ -132,11 +133,7 @@ NodePortLocal can only be used with Services of type `ClusterIP` or
 Services of type `NodePort` or `ExternalName`. The annotation also has no effect
 for Services with an empty or missing Selector.
 
-Starting from the Antrea v1.7 minor release, the `protocols` field in the
-annotation is deprecated. The array contains a single member, equal to the
-`protocol` field.
-The `protocols` field will be removed from Antrea for minor releases post March 2023,
-as per our deprecation policy.
+Starting from Antrea v2.0, the `protocols` field is removed.
 
 ### Usage pre Antrea v1.7
 
@@ -153,7 +150,6 @@ metadata:
     app: nginx
   annotations:
     nodeportlocal.antrea.io: '[{"podPort":8080,"nodeIP":"10.10.10.10","nodePort":61002}, "protocols":["tcp","udp"]]'
-...
 ```
 
 This annotation indicates that port 8080 of the Pod can be reached through port
@@ -169,7 +165,7 @@ for a given podPort, and the allocated nodePort may be different for each one.
 Prior to the Antrea v1.4 minor release, the `nodePortLocal` option group in the
 Antrea Agent configuration did not exist. To enable the NodePortLocal feature,
 one simply needed to enable the feature gate, and the port range could be
-configured using the (now deprecated) `nplPortRange` parameter.
+configured using the (now removed) `nplPortRange` parameter.
 
 ### Usage pre Antrea v1.2
 

@@ -17,10 +17,10 @@ package proxy
 import (
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -58,14 +58,16 @@ type proxyOptions struct {
 
 	controller    bool
 	agentNodeName string
+	insecure      bool
 }
 
 var options *proxyOptions
+var defaultFS = afero.NewOsFs()
 
 // validateAndComplete checks the proxyOptions to see if there is sufficient information to run the
 // command, and adds default values when needed.
 func (o *proxyOptions) validateAndComplete() error {
-	if o.port != 0 && o.unixSocket != "" {
+	if o.port != defaultPort && o.unixSocket != "" {
 		return fmt.Errorf("cannot set --unix-socket and --port at the same time")
 	}
 
@@ -78,15 +80,13 @@ func (o *proxyOptions) validateAndComplete() error {
 	}
 
 	if o.staticDir != "" {
-		fileInfo, err := os.Stat(o.staticDir)
+		fileInfo, err := defaultFS.Stat(o.staticDir)
 		if err != nil {
-			klog.Warningf("Failed to stat static file directory %s: %v", o.staticDir, err)
+			klog.InfoS("Failed to stat static file directory", "name", o.staticDir, "error", err)
 		} else if !fileInfo.IsDir() {
-			klog.Warningf("Static file directory %s is not a directory", o.staticDir)
+			klog.InfoS("Static file directory is not a directory", "name", o.staticDir)
 		}
 	}
-
-	o.port = defaultPort
 
 	if !strings.HasSuffix(o.staticPrefix, "/") {
 		o.staticPrefix += "/"
@@ -130,10 +130,10 @@ func init() {
 		Args:    cobra.NoArgs,
 	}
 
-	// Options are the same as for "kubectl proxy"
-	// https://github.com/kubernetes/kubectl/blob/v0.19.0/pkg/cmd/proxy/proxy.go
 	o := &proxyOptions{}
 	options = o
+	// These options are the same as for "kubectl proxy".
+	// https://github.com/kubernetes/kubectl/blob/v0.19.0/pkg/cmd/proxy/proxy.go
 	Command.Flags().StringVarP(&o.staticDir, "www", "w", "", "Also serve static files from the given directory under the specified prefix.")
 	Command.Flags().StringVarP(&o.staticPrefix, "www-prefix", "P", defaultStaticPrefix, "Prefix to serve static files under, if static file directory is specified.")
 	Command.Flags().StringVarP(&o.apiPrefix, "api-prefix", "", defaultAPIPrefix, "Prefix to serve the proxied API under.")
@@ -141,16 +141,20 @@ func init() {
 	Command.Flags().StringVar(&o.rejectPaths, "reject-paths", proxy.DefaultPathRejectRE, "Regular expression for paths that the proxy should reject. Paths specified here will be rejected even accepted by --accept-paths.")
 	Command.Flags().StringVar(&o.acceptHosts, "accept-hosts", proxy.DefaultHostAcceptRE, "Regular expression for hosts that the proxy should accept.")
 	Command.Flags().StringVar(&o.rejectMethods, "reject-methods", proxy.DefaultMethodRejectRE, "Regular expression for HTTP methods that the proxy should reject (example --reject-methods='POST,PUT,PATCH'). ")
-	Command.Flags().IntVarP(&o.port, "port", "p", o.port, "The port on which to run the proxy. Set to 0 to pick a random port.")
+	Command.Flags().IntVarP(&o.port, "port", "p", defaultPort, "The port on which to run the proxy. Set to 0 to pick a random port.")
 	Command.Flags().StringVarP(&o.address, "address", "", defaultAddress, "The IP address on which to serve on.")
 	Command.Flags().BoolVar(&o.disableFilter, "disable-filter", false, "If true, disable request filtering in the proxy. This is dangerous, and can leave you vulnerable to XSRF attacks, when used with an accessible port.")
 	Command.Flags().StringVarP(&o.unixSocket, "unix-socket", "u", "", "Unix socket on which to run the proxy.")
 	Command.Flags().DurationVar(&o.keepalive, "keepalive", 0, "keepalive specifies the keep-alive period for an active network connection. Set to 0 to disable keepalive.")
+
+	// These options are specific to "antctl proxy".
 	Command.Flags().BoolVar(&o.controller, "controller", false, "Run proxy for Antrea Controller API. If both --controller and --agent-node are omitted, the proxy will run for the Controller API.")
 	Command.Flags().StringVar(&o.agentNodeName, "agent-node", "", "Run proxy for Antrea Agent API on the provided K8s Node.")
+	Command.Flags().BoolVar(&o.insecure, "insecure", false, "Skip TLS verification when connecting to Antrea API.")
 }
 
 func runE(cmd *cobra.Command, _ []string) error {
+	ctx := cmd.Context()
 	if runtime.Mode != runtime.ModeController || runtime.InPod {
 		return fmt.Errorf("only remote mode is supported for this command")
 	}
@@ -163,9 +167,7 @@ func runE(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	restconfigTmpl := rest.CopyConfig(kubeconfig)
-	raw.SetupKubeconfig(restconfigTmpl)
-	if server, err := Command.Flags().GetString("server"); err != nil {
+	if server, _ := Command.Flags().GetString("server"); server != "" {
 		kubeconfig.Host = server
 	}
 
@@ -174,14 +176,15 @@ func runE(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to create clientset: %w", err)
 	}
 
+	insecure, _ := Command.Flags().GetBool("insecure")
 	var clientCfg *rest.Config
 	if options.controller {
-		clientCfg, err = raw.CreateControllerClientCfg(k8sClientset, antreaClientset, restconfigTmpl)
+		clientCfg, err = raw.CreateControllerClientCfg(ctx, k8sClientset, antreaClientset, kubeconfig, insecure)
 		if err != nil {
 			return fmt.Errorf("error when creating Controller client config: %w", err)
 		}
 	} else {
-		clientCfg, err = raw.CreateAgentClientCfg(k8sClientset, antreaClientset, restconfigTmpl, options.agentNodeName)
+		clientCfg, err = raw.CreateAgentClientCfg(ctx, k8sClientset, antreaClientset, kubeconfig, options.agentNodeName, insecure)
 		if err != nil {
 			return fmt.Errorf("error when creating Agent client config: %w", err)
 		}

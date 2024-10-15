@@ -136,7 +136,8 @@ spec:
     spec:
       containers:
         - name: prometheus
-          image: projects.registry.vmware.com/antrea/prom-prometheus:v2.19.3
+          image: ubuntu/prometheus:2.46.0-22.04_stable
+          command: [ "/bin/prometheus" ]
           args:
             - "--config.file=/etc/prometheus/prometheus.yml"
             - "--storage.tsdb.path=/prometheus/"
@@ -154,7 +155,6 @@ spec:
           configMap:
             defaultMode: 420
             name: prometheus-server-conf
-
         - name: prometheus-storage-volume
           emptyDir: {}
 ---
@@ -166,7 +166,6 @@ metadata:
   annotations:
       prometheus.io/scrape: 'true'
       prometheus.io/port:   '9090'
-
 spec:
   selector:
     app: prometheus-server

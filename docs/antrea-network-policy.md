@@ -19,6 +19,9 @@
     - [ACNP for ICMP traffic](#acnp-for-icmp-traffic)
     - [ACNP for IGMP traffic](#acnp-for-igmp-traffic)
     - [ACNP for multicast egress traffic](#acnp-for-multicast-egress-traffic)
+    - [ACNP for HTTP traffic](#acnp-for-http-traffic)
+    - [ACNP for Kubernetes Node traffic](#acnp-for-kubernetes-node-traffic)
+    - [ACNP with log settings](#acnp-with-log-settings)
   - [Behavior of <em>to</em> and <em>from</em> selectors](#behavior-of-to-and-from-selectors)
   - [Key differences from K8s NetworkPolicy](#key-differences-from-k8s-networkpolicy)
   - [<em>kubectl</em> commands for Antrea ClusterNetworkPolicy](#kubectl-commands-for-antrea-clusternetworkpolicy)
@@ -36,6 +39,7 @@
     - [K8s clusters with version 1.21 and above](#k8s-clusters-with-version-121-and-above)
     - [K8s clusters with version 1.20 and below](#k8s-clusters-with-version-120-and-below)
   - [Selecting Pods in the same Namespace with Self](#selecting-pods-in-the-same-namespace-with-self)
+  - [Selecting Namespaces with the same label values using SameLabels](#selecting-namespaces-with-the-same-label-values-using-samelabels)
   - [FQDN based filtering](#fqdn-based-filtering)
   - [Node Selector](#node-selector)
   - [toServices egress rules](#toservices-egress-rules)
@@ -50,6 +54,8 @@
   - [<em>kubectl</em> commands for Group](#kubectl-commands-for-group)
 - [RBAC](#rbac)
 - [Notes and constraints](#notes-and-constraints)
+  - [Limitations of Antrea policy logging](#limitations-of-antrea-policy-logging)
+    - [Logging prior to Antrea v1.13](#logging-prior-to-antrea-v113)
 <!-- /toc -->
 
 ## Summary
@@ -87,7 +93,7 @@ as was the case initially.
 An example Tier might look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: Tier
 metadata:
   name: mytier
@@ -109,8 +115,6 @@ Tiers have the following characteristics:
 
 ### Static tiers
 
-Antrea release 0.9.x introduced support for 5 static tiers. These static tiers
-have been removed in favor of Tier CRDs as mentioned in the previous section.
 On startup, antrea-controller will create 5 static, read-only Tier CRD resources
 corresponding to the static tiers for default consumption, as well as a "baseline"
 Tier CRD object, that will be enforced after developer-created K8s NetworkPolicies.
@@ -209,7 +213,7 @@ Example ClusterNetworkPolicies might look like these:
 #### ACNP with stand-alone selectors
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-with-stand-alone-selectors
@@ -242,7 +246,6 @@ spec:
         - protocol: TCP
           port: 6379
       name: AllowFromFrontend
-      enableLogging: false
   egress:
     - action: Drop
       to:
@@ -252,13 +255,12 @@ spec:
         - protocol: TCP
           port: 5978
       name: DropToThirdParty
-      enableLogging: true
 ```
 
 #### ACNP with ClusterGroup reference
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-with-cluster-groups
@@ -278,7 +280,6 @@ spec:
         - protocol: TCP
           port: 6379
       name: AllowFromFrontend
-      enableLogging: false
   egress:
     - action: Drop
       to:
@@ -287,13 +288,12 @@ spec:
         - protocol: TCP
           port: 5978
       name: DropToThirdParty
-      enableLogging: true
 ```
 
 #### ACNP for complete Pod isolation in selected Namespaces
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: isolate-all-pods-in-namespace
@@ -307,17 +307,15 @@ spec:
   ingress:
     - action: Drop              # For all Pods in those Namespaces, drop and log all ingress traffic from anywhere
       name: drop-all-ingress
-      enableLogging: true
   egress:
     - action: Drop              # For all Pods in those Namespaces, drop and log all egress traffic towards anywhere
       name: drop-all-egress
-      enableLogging: true
 ```
 
 #### ACNP for strict Namespace isolation
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: strict-ns-isolation
@@ -334,30 +332,26 @@ spec:
         - namespaces:
             match: Self           # Skip ACNP evaluation for traffic from Pods in the same Namespace
       name: PassFromSameNS
-      enableLogging: false
     - action: Drop
       from:
         - namespaceSelector: {}   # Drop from Pods from all other Namespaces
       name: DropFromAllOtherNS
-      enableLogging: true
   egress:
     - action: Pass
       to:
         - namespaces:
             match: Self           # Skip ACNP evaluation for traffic to Pods in the same Namespace
       name: PassToSameNS
-      enableLogging: false
     - action: Drop
       to:
         - namespaceSelector: {}   # Drop to Pods from all other Namespaces
       name: DropToAllOtherNS
-      enableLogging: true
 ```
 
 #### ACNP for default zero-trust cluster security posture
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: default-cluster-deny
@@ -375,7 +369,7 @@ spec:
 #### ACNP for toServices rule
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-drop-to-services
@@ -395,86 +389,224 @@ spec:
         - name: svcName
           namespace: svcNamespace
       name: DropToServices
-      enableLogging: true
 ```
 
 #### ACNP for ICMP traffic
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-reject-ping-request
 spec:
-    priority: 5
-    tier: securityops
-    appliedTo:
-      - podSelector:
-          matchLabels:
-            role: server
-        namespaceSelector:
-          matchLabels:
-            env: prod
-    egress:
-      - action: Reject
-        protocols:
-          - icmp:
-              icmpType: 8
-              icmpCode: 0
-        name: DropPingRequest
-        enableLogging: true
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          role: server
+      namespaceSelector:
+        matchLabels:
+          env: prod
+  egress:
+    - action: Reject
+      protocols:
+        - icmp:
+            icmpType: 8
+            icmpCode: 0
+      name: DropPingRequest
 ```
 
 #### ACNP for IGMP traffic
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-with-igmp-drop
 spec:
-    priority: 5
-    tier: securityops
-    appliedTo:
-      - podSelector:
-          matchLabels:
-            app: mcjoin6
-    ingress:
-      - action: Drop
-        protocols:
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          app: mcjoin6
+  ingress:
+    - action: Drop
+      protocols:
         - igmp:
             igmpType: 0x11
             groupAddress: 224.0.0.1
-        name: dropIGMPQuery
-    egress:
-      - action: Drop
-        protocols:
+      name: dropIGMPQuery
+  egress:
+    - action: Drop
+      protocols:
         - igmp:
             igmpType: 0x16
             groupAddress: 225.1.2.3
-    name: dropIGMPReport
+      name: dropIGMPReport
 ```
 
 #### ACNP for multicast egress traffic
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-with-multicast-traffic-drop
 spec:
-    priority: 5
-    tier: securityops
-    appliedTo:
-      - podSelector:
-          matchLabels:
-            app: mcjoin6
-    egress:
-      - action: Drop
-        to:
-          - ipBlock:
-              cidr: 225.1.2.3/32
-        name: dropMcastUDPTraffic
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          app: mcjoin6
+  egress:
+    - action: Drop
+      to:
+        - ipBlock:
+            cidr: 225.1.2.3/32
+      name: dropMcastUDPTraffic
+```
+
+#### ACNP for HTTP traffic
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: NetworkPolicy
+metadata:
+  name: ingress-allow-http-request-to-api-v2
+spec:
+  priority: 5
+  tier: application
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          app: web
+  ingress:
+    - name: allow-http   # Allow inbound HTTP GET requests to "/api/v2" from Pods with app=client label.
+      action: Allow      # All other traffic from these Pods will be automatically dropped, and subsequent rules will not be considered.
+      from:
+        - podSelector:
+            matchLabels:
+              app: client
+      l7Protocols:
+        - http:
+            path: "/api/v2/*"
+            host: "foo.bar.com"
+            method: "GET"
+    - name: drop-other   # Drop all other inbound traffic (i.e., from Pods without the app=client label or from external clients).
+      action: Drop
+```
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: allow-web-access-to-internal-domain
+spec:
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          egress-restriction: internal-domain-only
+  egress:
+    - name: allow-dns          # Allow outbound DNS requests.
+      action: Allow
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+    - name: allow-http-only    # Allow outbound HTTP requests towards foo.bar.com.
+      action: Allow            # As the rule's "to" and "ports" are empty, which means it selects traffic to any network
+      l7Protocols:             # peer's any port using any transport protocol, all outbound HTTP requests towards other
+        - http:                # domains and non-HTTP requests will be automatically dropped, and subsequent rules will
+            host: "*.bar.com"  # not be considered.
+```
+
+Please refer to [Antrea Layer 7 NetworkPolicy](antrea-l7-network-policy.md) for extra information.
+
+#### ACNP for Kubernetes Node traffic
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: acnp-node-egress-traffic-drop
+spec:
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - nodeSelector:
+        matchLabels:
+          kubernetes.io/os: linux
+  egress:
+    - action: Drop
+      to:
+        - ipBlock:                 
+            cidr: 192.168.1.0/24
+      ports:
+        - protocol: TCP
+          port: 80
+      name: dropHTTPTrafficToCIDR
+```
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: acnp-node-ingress-traffic-drop
+spec:
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - nodeSelector:
+        matchLabels:
+          kubernetes.io/os: linux
+  ingress:
+    - action: Drop
+      from:
+        - ipBlock:
+            cidr: 192.168.1.0/24
+      ports:
+        - protocol: TCP
+          port: 22
+      name: dropSSHTrafficFromCIDR
+```
+
+Please refer to [Antrea Node NetworkPolicy](antrea-node-network-policy.md) for more information.
+
+#### ACNP with log settings
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: acnp-with-log-setting
+spec:
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - podSelector:
+        matchLabels:
+          role: db
+    - namespaceSelector:
+        matchLabels:
+          env: prod
+  ingress:
+    - action: Allow
+      from:
+        - podSelector:
+            matchLabels:
+              role: frontend
+          namespaceSelector:
+            matchLabels:
+              role: db
+      name: AllowFromFrontend
+      enableLogging: true
+      logLabel: "frontend-allowed"
 ```
 
 **spec**: The ClusterNetworkPolicy `spec` has all the information needed to
@@ -530,13 +662,14 @@ Tiers or policy instances in the same Tier with lower priority number). If a "Re
 rule is matched, the client initiating the traffic will receive `ICMP host administratively
 prohibited` code for ICMP, UDP and SCTP request, or an explicit reject response for
 TCP request, instead of timeout. A "Pass" rule, on the other hand, skips this packet
-for further ACNP rule evaluations (all ACNP rules that has lower priority than the
-current "Pass" rule will be skipped, except for the Baseline Tier rules), and delegates
-the decision to developer created namespaced NetworkPolicies. If no NetworkPolicy
-matches this traffic, then the Baseline Tier rules will still be matched against.
+for further Antrea-native policy rule evaluations in regular Tiers, and delegates
+the decision to K8s namespaced NetworkPolicies (in networking.k8s.io API group).
+All ACNP/ANNP rules that have lower priority than the current "Pass" rule will be
+skipped (except for the Baseline Tier rules). If no K8s NetworkPolicy matches this
+traffic, then all Antrea-native policy Baseline Tier rules will be tested for a match.
 Note that the "Pass" action does not make sense when configured in Baseline Tier
 ACNP rules, and such configurations will be rejected by the admission controller.
-Note: "Pass" and "Reject" actions are not supported for rules applied to multicast
+Also, "Pass" and "Reject" actions are not supported for rules applied to multicast
 traffic.
 
 **ingress**: Each ClusterNetworkPolicy may consist of zero or more ordered set of
@@ -588,7 +721,7 @@ be enforced in the order in which they are written.
 
 **egress**: Each ClusterNetworkPolicy may consist of zero or more ordered set
 of egress rules. Each rule, depending on the `action` field of the rule, allows
-or drops traffic which matches all `from`, `ports` sections.
+or drops traffic which matches all `to`, `ports` sections.
 Under `ports`, the optional field `endPort` can only be set when a numerical `port`
 is set to represent a range of ports from `port` to `endPort` inclusive.
 `protocols` defines additional protocols that are not supported by `ports`. Currently, only
@@ -610,7 +743,7 @@ Also, each rule has an optional `name` field, which should be unique within
 the policy describing the intention of this rule. If `name` is not provided for
 a rule, it will be auto-generated by Antrea. The rule name auto-generation process
 is the same as ingress rules.
-A ClusterGroup name can be set in the `group` field of a egress `to` section in place
+A ClusterGroup name can be set in the `group` field of an egress `to` section in place
 of stand-alone selectors to allow traffic to workloads/ipBlocks set in the ClusterGroup.
 `toServices` field contains a list of combinations of Service Namespace and Service Name
 to match traffic to this Service.
@@ -636,47 +769,59 @@ to select Pods. More details can be found in the [ServiceAccountSelector](#servi
 **Note**: The order in which the egress rules are specified matters, i.e., rules will
 be enforced in the order in which they are written.
 
-**enableLogging**: A ClusterNetworkPolicy ingress or egress rule can be
-audited by enabling its logging field. When `enableLogging` field is set to
-true, the first packet of any connection that matches this rule will be logged
-to a separate file (`/var/log/antrea/networkpolicy/np.log`) on the Node on
-which the rule is applied. These log files can then be retrieved for further
-analysis. By default, rules are not logged. The example policy logs all
-traffic that matches the "DropToThirdParty" egress rule, while the rule
-"AllowFromFrontend" is not logged. Specifically for drop and reject rules,
-deduplication is applied to simplify multiple logs. Duplication buffer length is set as 1 second.
+**enableLogging** and **logLabel**: Antrea-native policy ingress or egress rules
+can be audited by setting its logging fields. When the `enableLogging` field is set
+to `true`, the first packet of any traffic flow that matches this rule will be
+logged to a file (`/var/log/antrea/networkpolicy/np.log`) on the Node on which the
+rule is enforced. The log files can then be used for further analysis. If `logLabel`
+is provided, the label will be added in the log. For example, in the
+[ACNP with log settings](#acnp-with-log-settings), traffic that hits the
+"AllowFromFrontend" rule will be logged with log label "frontend-allowed".
+
+The logging feature is best-effort, and as such there is no guarantee that all
+the flows which match the policy rule will be logged. Additionally, we do not
+recommend enabling policy logging for older Antrea versions (all versions prior
+to v1.12, as well as v1.12.0 and v1.12.1). See this [section](#limitations-of-antrea-policy-logging)
+for more information.
+
+For drop and reject rules, deduplication is applied to reduce duplicated
+log messages, and the duplication buffer length is set to 1 second. When a rule
+does not have a name, an identifiable name will be generated for the rule and
+added to the log. For rules in layer 7 NetworkPolicy, packets are logged with
+action `Redirect` prior to analysis by the layer 7 engine, and the layer 7 engine
+can log more information in its own logs.
+
 The rules are logged in the following format:
 
 ```text
-    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <action> <openflow-priority> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length>
+    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <rule-name> <direction> <action> <openflow-priority> <applied-to-reference> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> <log-label>
     Deduplication:
-    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <action> <openflow-priority> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> [<num of packets> packets in <duplicate duration>]
+    <yyyy/mm/dd> <time> <ovs-table-name> <antrea-native-policy-reference> <rule-name> <direction> <action> <openflow-priority> <applied-to-reference> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> <log-label> [<num of packets> packets in <duplicate duration>]
 
     Examples:
-    2020/11/02 22:21:21.148395 AntreaPolicyAppTierIngressRule AntreaNetworkPolicy:default/test-anp Allow 61800 10.10.1.65 35402 10.0.0.5 80 TCP 60
-    2021/06/24 23:56:41.346165 AntreaPolicyEgressRule AntreaNetworkPolicy:default/test-anp Drop 44900 10.10.1.65 35402 10.0.0.5 80 TCP 60 [3 packets in 1.011379442s]
+    2023/07/04 12:45:21.804416 IngressDefaultRule AntreaNetworkPolicy:default/reject-tcp-policy RejectTCPRequest Ingress Reject 16 default/nettoolv3 10.10.1.7 53646 10.10.1.14 80 TCP 60 tcp-log-label
+    2023/07/03 23:24:36.422233 AntreaPolicyEgressRule AntreaNetworkPolicy:default/reject-icmp-policy RejectICMPRequest Egress Reject 14500 default/nettool 10.10.1.7 <nil> 10.10.2.3 <nil> ICMP 84 icmp-log-label
+    2023/07/03 23:24:37.424024 AntreaPolicyEgressRule AntreaNetworkPolicy:default/reject-icmp-policy RejectICMPRequest Egress Reject 14500 default/nettool 10.10.1.7 <nil> 10.10.2.3 <nil> ICMP 84 icmp-log-label [2 packets in 1.000855539s]
 ```
 
 Kubernetes NetworkPolicies can also be audited using Antrea logging to the same file
 (`/var/log/antrea/networkpolicy/np.log`). Add Annotation
-`networkpolicy.antrea.io/enable-logging: "true` on a Namespace to enable logging
-for all NetworkPolicies in the Namespace. Packets of any connection that match
+`networkpolicy.antrea.io/enable-logging: "true"` on a Namespace to enable logging
+for all NetworkPolicies in the Namespace. Packets of any network flow that match
 a NetworkPolicy rule will be logged with a reference to the NetworkPolicy name,
 but packets dropped by the implicit "default drop" (not allowed by any NetworkPolicy)
-will only be logged with consistent name `K8sNetworkPolicy` for reference.
-Note that currently, Antrea only retrieves the logging Annotation once when adding
-NetworkPolicies and in case of agent restart, users should not update Namespace
-logging Annotations, otherwise it would risk NetworkPolicies working in a stale state.
-The rules are logged in the following format:
+will only be logged with consistent name `K8sNetworkPolicy` for reference. When
+using Antrea logging for Kubernetes NetworkPolicies, the rule name field is not
+set and defaults to `<nil>` value. The rules are logged in the following format:
 
 ```text
-    <yyyy/mm/dd> <time> <ovs-table-name> <k8s-network-policy-reference> Allow <openflow-priority> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length>
+    <yyyy/mm/dd> <time> <ovs-table-name> <k8s-network-policy-reference> <nil> <direction> Allow <openflow-priority> <applied-to-reference> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> <log-label>
     Default dropped traffic:
-    <yyyy/mm/dd> <time> <ovs-table-name> K8sNetworkPolicy Drop -1 <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> [<num of packets> packets in <duplicate duration>]
+    <yyyy/mm/dd> <time> <ovs-table-name> K8sNetworkPolicy <nil> <direction> Drop <nil> <applied-to-reference> <source-ip> <source-port> <destination-ip> <destination-port> <protocol> <packet-length> <log-label> [<num of packets> packets in <duplicate duration>]
 
     Examples:
-    2022/07/26 06:55:56.170456 IngressRule K8sNetworkPolicy:default/test-np-log Allow 190 10.10.1.82 49518 10.10.1.84 80 TCP 60
-    2022/07/26 06:55:57.142206 IngressDefaultRule K8sNetworkPolicy Drop -1 10.10.1.83 38608 10.10.1.84 80 TCP 60
+    2023/07/04 12:31:02.801442 IngressRule K8sNetworkPolicy:default/allow-tcp-80 <nil> Ingress Allow 190 default/nettool 10.10.1.13 57050 10.10.1.7 80 TCP 60 <nil>
+    2023/07/04 12:33:26.221413 IngressDefaultRule K8sNetworkPolicy <nil> Ingress Drop <nil> default/nettool 10.10.1.13 <nil> 10.10.1.7 <nil> ICMP 84 <nil>
 ```
 
 Fluentd can be used to assist with collecting and analyzing the logs. Refer to the
@@ -693,7 +838,7 @@ policy and cannot be set along with `appliedTo` at the policy level.
 Below is an example of appliedTo-per-rule ACNP usage:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-appliedto-per-rule
@@ -806,7 +951,7 @@ All the above commands produce output similar to what is shown below:
 
 ## Antrea NetworkPolicy
 
-Antrea NetworkPolicy (ANP) is another policy CRD, which is similar to the
+Antrea NetworkPolicy (ANNP) is another policy CRD, which is similar to the
 ClusterNetworkPolicy CRD, however its scope is limited to a Namespace.
 The purpose of introducing this CRD is to allow admins to take advantage of
 advanced NetworkPolicy features and apply them within a Namespace to
@@ -818,10 +963,10 @@ resource, Antrea NetworkPolicy can also be associated with Tiers.
 An example Antrea NetworkPolicy might look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: NetworkPolicy
 metadata:
-  name: test-anp
+  name: test-annp
   namespace: default
 spec:
   priority: 5
@@ -847,7 +992,6 @@ spec:
           port: 8080
           endPort: 9000
       name: AllowFromFrontend
-      enableLogging: false
   egress:
     - action: Drop
       to:
@@ -857,7 +1001,6 @@ spec:
         - protocol: TCP
           port: 5978
       name: DropToThirdParty
-      enableLogging: true
 ```
 
 ### Key differences from Antrea ClusterNetworkPolicy
@@ -890,10 +1033,10 @@ Pods labeled "role: nondb" in Namespaces labeled "role: db", "test-grp-with-ip-b
 that selects `ipblock` "10.0.10.0/24".
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: NetworkPolicy
 metadata:
-  name: anp-with-groups
+  name: annp-with-groups
   namespace: default
 spec:
   priority: 5
@@ -909,7 +1052,6 @@ spec:
           port: 8080
           endPort: 9000
       name: AllowFromFrontend
-      enableLogging: false
   egress:
     - action: Drop
       to:
@@ -918,29 +1060,28 @@ spec:
         - protocol: TCP
           port: 5978
       name: DropToThirdParty
-      enableLogging: true
 ```
 
 ### *kubectl* commands for Antrea NetworkPolicy
 
-The following `kubectl` commands can be used to retrieve ANP resources:
+The following `kubectl` commands can be used to retrieve ANNP resources:
 
 ```bash
     # Use long name with API Group
     kubectl get networkpolicies.crd.antrea.io
 
     # Use short name
-    kubectl get anp
+    kubectl get annp
 
     # Use short name with API Group
-    kubectl get anp.crd.antrea.io
+    kubectl get annp.crd.antrea.io
 ```
 
 All the above commands produce output similar to what is shown below:
 
 ```text
     NAME       TIER          PRIORITY   AGE
-    test-anp   securityops   5          5s
+    test-annp   securityops   5          5s
 ```
 
 ## Antrea-native Policy ordering based on priorities
@@ -972,7 +1113,7 @@ Within a policy, rules are enforced in the order in which they are set. For exam
 consider the following:
 
 - ACNP1{tier: application, priority: 10, ingressRules: [ir1.1, ir1.2], egressRules: [er1.1, er1.2]}
-- ANP1{tier: application, priority: 15, ingressRules: [ir2.1, ir2.2], egressRules: [er2.1, er2.2]}
+- ANNP1{tier: application, priority: 15, ingressRules: [ir2.1, ir2.2], egressRules: [er2.1, er2.2]}
 - ACNP3{tier: emergency, priority: 20, ingressRules: [ir3.1, ir3.2], egressRules: [er3.1, er3.2]}
 
 This translates to the following order:
@@ -994,7 +1135,7 @@ antctl get netpol --sort-by=effectivePriority
 NAME                                 APPLIED-TO                           RULES SOURCE                                 TIER-PRIORITY PRIORITY
 4c504456-9158-4838-bfab-f81665dfae12 85b88ddb-b474-5b44-93d3-c9192c09085e 1     AntreaClusterNetworkPolicy:acnp-1      250           1
 41e510e0-e430-4606-b4d9-261424184fba e36f8beb-9b0b-5b49-b1b7-5c5307cddd83 1     AntreaClusterNetworkPolicy:acnp-2      250           2
-819b8482-ede5-4423-910c-014b731fdba6 bb6711a1-87c7-5a15-9a4a-71bf49a78056 2     AntreaNetworkPolicy:anp-10             250           10
+819b8482-ede5-4423-910c-014b731fdba6 bb6711a1-87c7-5a15-9a4a-71bf49a78056 2     AntreaNetworkPolicy:annp-10             250           10
 4d18e031-f05a-48f6-bd91-0197b556ccca e216c104-770c-5731-bfd3-ff4ccbc38c39 2     K8sNetworkPolicy:default/test-1        <NONE>        <NONE>
 c547002a-d8c7-40f1-bdd1-8eb6d0217a67 e216c104-770c-5731-bfd3-ff4ccbc38c39 1     K8sNetworkPolicy:default/test-2        <NONE>        <NONE>
 aac8b8bc-f3bf-4c41-b6e0-2af1863204eb bb6711a1-87c7-5a15-9a4a-71bf49a78056 3     AntreaClusterNetworkPolicy:baseline    253           10
@@ -1022,31 +1163,31 @@ K8s NetworkPolicy and Antrea-native policy users can take advantage of this rese
 to select Namespaces directly by their `name` in `namespaceSelectors` as follows:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: NetworkPolicy
 metadata:
-  name: test-anp-by-name
+  name: test-annp-by-name
   namespace: default
 spec:
-    priority: 5
-    tier: application
-    appliedTo:
-      - podSelector: {}
-    egress:
-      - action: Allow
-        to:
-          - podSelector:
-              matchLabels:
-                k8s-app: kube-dns
-            namespaceSelector:
-              matchLabels:
-                kubernetes.io/metadata.name: kube-system
-        ports:
-          - protocol: TCP
-            port: 53
-          - protocol: UDP
-            port: 53
-        name: AllowToCoreDNS
+  priority: 5
+  tier: application
+  appliedTo:
+    - podSelector: {}
+  egress:
+    - action: Allow
+      to:
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+          namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+      name: AllowToCoreDNS
 ```
 
 **Note**: `NamespaceDefaultLabelName` feature gate is scheduled to be removed in K8s v1.24, thereby
@@ -1093,31 +1234,31 @@ Namespaces with the `antrea.io/metadata.name: <namespaceName>` label. Users may 
 use this reserved label to select Namespaces by name as follows:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: NetworkPolicy
 metadata:
-  name: test-anp-by-name
+  name: test-annp-by-name
   namespace: default
 spec:
-    priority: 5
-    tier: application
-    appliedTo:
-      - podSelector: {}
-    egress:
-      - action: Allow
-        to:
-          - podSelector:
-              matchLabels:
-                k8s-app: kube-dns
-            namespaceSelector:
-              matchLabels:
-                antrea.io/metadata.name: kube-system
-        ports:
-          - protocol: TCP
-            port: 53
-          - protocol: UDP
-            port: 53
-        name: AllowToCoreDNS
+  priority: 5
+  tier: application
+  appliedTo:
+    - podSelector: {}
+  egress:
+    - action: Allow
+      to:
+        - podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+          namespaceSelector:
+            matchLabels:
+              antrea.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+      name: AllowToCoreDNS
 ```
 
 The above example allows all Pods from Namespace "default" to connect to all "kube-dns"
@@ -1137,7 +1278,7 @@ Consider a minimalistic cluster, where there are only three Namespaces labeled n
 Inside each of these Namespaces, there are three Pods labeled app=a, app=b and app=c.
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: allow-self-ns
@@ -1161,10 +1302,10 @@ spec:
 ```
 
 The policy above ensures that x/a, x/b and x/c can communicate with each other, but nothing else
-(unless there are higher precedenced policies which say otherwise). Same for Namespaces y and z.
+(unless there are higher precedence policies that say otherwise). Same for Namespaces y and z.
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: deny-self-ns-a-to-b
@@ -1194,6 +1335,97 @@ These two policies shown above are for demonstration purposes only. For more rea
 `namespaces` field, refer to this [sample](#acnp-for-strict-namespace-isolation) YAML in the previous
 section.
 
+### Selecting Namespaces with the same label values using SameLabels
+
+Starting from Antrea v2.0, Antrea ClusterNetworkPolicy supports creating policy rules between groups
+of Namespaces that share common label values. The most prominent use case of this feature is to provide
+isolation between Namespaces that have different values for some pre-defined labels, e.g. "org", by
+applying a single ACNP in the cluster.
+
+Consider a minimalistic cluster with the following Namespaces:
+
+```text
+NAME            LABELS
+kube-system     kubernetes.io/metadata.name=kube-system
+accounting1     kubernetes.io/metadata.name=accounting1, org=accounting, region=us-west
+accounting2     kubernetes.io/metadata.name=accounting2, org=accounting, region=us-east
+sales1          kubernetes.io/metadata.name=sales1, org=sales, region=us-west
+sales2          kubernetes.io/metadata.name=sales2, org=sales, region=us-east
+```
+
+An administrator of such cluster typically would want to enforce some boundaries between the "tenants"
+in the cluster (the accounting team and the sales team in this case, who each own two Namespaces).
+This can be easily achieved by the following ACNP:
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: isolation-based-on-org
+spec:
+  priority: 1
+  tier: securityops
+  appliedTo:
+    - namespaceSelector:
+        matchExpressions:
+          - { key: org, operator: Exists }
+  ingress:
+    - action: Allow
+      from:
+        - namespaces:
+            sameLabels: [org]
+    - action: Deny
+  egress:
+    - action: Allow
+      to:
+        - namespaces:
+            sameLabels: [org]
+    - action: Deny
+```
+
+The above policy will also automatically adapt to the changes in the cluster, i.e., any new Namespace
+created in the cluster with a different "org" label value will be automatically isolated from both the
+accounting and the sales Namespaces. In addition, the Namespace grouping criteria can be easily extended
+to match more than one label keys, and Namespaces will be grouped together ONLY IF ALL the values of the
+label keys listed in the `sameLabels` field have the same value. For example, if we change the `sameLabels`
+list to `[org, region]` in the example above, then this ACNP will create four Namespace groups instead of
+two, which are all isolated from each other. The reason is that individual Namespaces for the accounting
+or sales organizations have different values for the "region" label, even though they share the same value
+for the "org" label.
+
+Another important note is that such policy is a no-op on Namespaces that do not have all the labels listed
+in the `sameLabels` field, even if such Namespaces are selected in `appliedTo`. In other words, we can
+rewrite the `appliedTo` in the policy above to `- namespaceSelector: {}` and it will work exactly the same.
+There will be no effective rules created for the `kube-system` Namespace since it does not have the "org"
+label. On the other hand, if the following policy (alone) is applied in this cluster:
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: isolation-based-on-org-and-env
+spec:
+  priority: 1
+  tier: securityops
+  appliedTo:
+    - namespaceSelector: {}
+  ingress:
+    - action: Allow
+      from:
+        - namespaces:
+            sameLabels: [org, env]
+    - action: Deny
+      from:
+        - namespaceSelector: {}
+```
+
+it will have no effect whatsoever because no Namespace has both the "org" and "env" label keys.
+To take the example further, if we now add another Namespace `dev` with labels "org=dev, env=test" the end
+result is that only the `dev` Namespace will be selected by the `isolation-based-on-org-and-env` ACNP, which
+denies ingress from all other Namespaces in the cluster since they don't have the same values for labels
+"org" and "env" compared to `dev` (in fact, there is no other Namespace with the "env" label key). All the
+other Namespaces, on the other hand, will not have effective ingress rules created by this policy.
+
 ### FQDN based filtering
 
 Antrea-native policy features a `fqdn` field in egress rules to select Fully Qualified Domain Names
@@ -1204,7 +1436,7 @@ The standard `Allow`, `Drop` and `Reject` actions apply to FQDN egress rules.
 An example policy using FQDN based filtering could look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-fqdn-all-foobar
@@ -1221,7 +1453,7 @@ spec:
     ports:
       - protocol: TCP
         port: 8080
-  - action: Drop      # Drop all other egress traffic, in-cluster or out-of-cluster 
+  - action: Drop      # Drop all other egress traffic, in-cluster or out-of-cluster
 ```
 
 The above example allows all traffic destined to any FQDN that matches the wildcard expression
@@ -1232,16 +1464,33 @@ Note that for FQDN wildcard expressions, the `*` character can match multiple su
 `*foobar.com` will match `foobar.com`, `www.foobar.com` and `test.uswest.foobar.com`).
 
 Antrea will only program datapath rules for actual egress traffic towards these FQDNs, based
-on DNS results. It will not interfere with DNS packets, unless there is a separate policy
-dropping/rejecting communication between the DNS components and the Pods selected.
+on DNS results. It will not tamper with DNS request/response packets, unless there is a separate
+policy dropping/rejecting communication between the DNS components and the Pods selected.
 
-Note that FQDN based policies do not work for [Service DNS names created by
+Antrea respects the TTL of DNS records, expiring stale IPs that are absent in more recent
+records when their TTLs expire. Therefore, Pods employing FQDN based policies ought to refrain
+from caching a DNS record for a duration exceeding its TTL. Otherwise, FQDN based policies may
+intermittently fail to function as intended. Typically, the Java virtual machine (JVM) caches
+DNS records for a fixed period of time, controlled by `networkaddress.cache.ttl`. In this
+case, it’s crucial to set the JVM’s TTL to 0 so that FQDN based policies can work properly.
+
+Another related note is that FQDN egress peers are recommended to ONLY be used in rules with
+action `Allow`, accompanied by some fallback `Drop` or `Reject` egress rules that secure
+N/S connectivity for the Pods selected by the FQDN policy. There is no guarantee that Antrea
+will be aware of all the IPs backing a domain name constantly, especially when the FQDN is
+served by dynamic IP addresses and gets DNS records with short TTLs. Some IPs may still be
+used to access the FQDN after their respective TTLs have expired in the original DNS record.
+Thus, using FQDN rules with action `Drop` or `Reject` could potentially allow traffic to an
+IP belonging to a denied domain, if a misbehaving client tries to connect to that domain with
+a cached but expired IP, leading to a security breach.
+
+Also note that FQDN based policies do not work for [Service DNS names created by
 Kubernetes](https://kubernetes.io/docs/concepts/services-networking/dns-pod-service/#services)
 (e.g. `kubernetes.default.svc` or `antrea.kube-system.svc`), except for headless
 Services. The reason is that Antrea will use the information included in A or
 AAAA DNS records to implement FQDN based policies. In the case of "normal" (not
 headless) Services, the DNS name resolves to the ClusterIP for the Service, but
-policy rules are enforced after AntreaProxy Service Load-Balancing and at that
+policy rules are enforced after Antrea Proxy Service Load-Balancing and at that
 stage the destination IP address has already been rewritten to the address of an
 endpoint backing the Service. For headless Services, a ClusterIP is not
 allocated and, assuming the Service has a selector, the DNS server returns A /
@@ -1251,7 +1500,7 @@ specifies an exact match on a DNS name, will drop all egress traffic destined to
 headless Service `svcA` defined in the `default` Namespace:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-fqdn-headless-service
@@ -1266,6 +1515,10 @@ spec:
     to:
       - fqdn: "svcA.default.svc.cluster.local"
 ```
+
+More generally speaking, it is not recommended to use the FQDN selector for DNS
+names created by Kubernetes, as label-based selectors are more appropriate for
+Kubernetes workloads.
 
 ### Node Selector
 
@@ -1290,7 +1543,7 @@ For example, the following rule applies to Pods with label `app=antrea-test-app`
 Nodes on TCP port 6443 which have the labels `node-role.kubernetes.io/control-plane`.
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: egress-control-plane
@@ -1318,8 +1571,8 @@ A combination of Service name and Service Namespace can be used in `toServices` 
 by this field. A sample policy can be found [here](#acnp-for-toservices-rule).
 
 Since `toServices` represents a combination of IP+port, it cannot be used with `to` or `ports` within the same egress rule.
-Also, since the matching process relies on the groupID assigned to Service by AntreaProxy, this field can only be used when
-AntreaProxy is enabled.
+Also, since the matching process relies on the groupID assigned to Service by Antrea Proxy, this field can only be used when
+Antrea Proxy is enabled.
 
 This clusterIP-based match has one caveat: direct access to the Endpoints of this Service is not affected by
 `toServices` rules. To restrict access towards backend Endpoints of a Service, define a `ClusterGroup` with `ServiceReference`
@@ -1340,25 +1593,24 @@ No matter which sections the `serviceAccount` field is used in, it cannot be use
 An example policy using `serviceAccount` could look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-service-account
 spec:
-    priority: 5
-    tier: securityops
-    appliedTo:
-      - serviceAccount:
-          name: sa-1
-          namespace: ns-1
-    egress:
-      - action: Drop
-        to:
-          - serviceAccount:
-              name: sa-2
-              namespace: ns-2
-        name: ServiceAccountEgressRule
-        enableLogging: false
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - serviceAccount:
+        name: sa-1
+        namespace: ns-1
+  egress:
+    - action: Drop
+      to:
+        - serviceAccount:
+            name: sa-2
+            namespace: ns-2
+      name: ServiceAccountEgressRule
 ```
 
 In this example, the policy will be applied to all Pods whose ServiceAccount is `sa-1` of `ns-1`.
@@ -1391,22 +1643,22 @@ There are a few **restrictions** on configuring a policy/rule that applies to No
 An example policy using `service` in `appliedTo` could look like this:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha1
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterNetworkPolicy
 metadata:
   name: acnp-deny-external-client-nodeport-svc-access
 spec:
-    priority: 5
-    tier: securityops
-    appliedTo:
-      - service:
-          name: svc-1
-          namespace: ns-1
-    ingress:
-      - action: Drop
-        from:
-          - ipBlock:
-              cidr: 1.1.1.0/24
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - service:
+        name: svc-1
+        namespace: ns-1
+  ingress:
+    - action: Drop
+      from:
+        - ipBlock:
+            cidr: 1.1.1.0/24
 ```
 
 In this example, the policy will be applied to the NodePort Service `svc-1` in Namespace `ns-1`,
@@ -1435,7 +1687,7 @@ without having to update individual policy rules.
 Below are some example ClusterGroup specs:
 
 ```yaml
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterGroup
 metadata:
   name: test-cg-sel
@@ -1447,7 +1699,7 @@ spec:
     matchLabels:
       env: prod
 ---
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterGroup
 metadata:
   name: test-cg-ip-block
@@ -1456,7 +1708,7 @@ spec:
   ipBlocks:
     - cidr: 10.0.10.0/24
 ---
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterGroup
 metadata:
   name: test-cg-svc-ref
@@ -1466,7 +1718,7 @@ spec:
     name: test-service
     namespace: default
 ---
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: ClusterGroup
 metadata:
   name: test-cg-nested
@@ -1562,7 +1814,7 @@ Below are some example Group specs:
 
 ```yaml
 # Group that selects all Pods labeled role: db in the default Namespace
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: Group
 metadata:
   name: test-grp-sel
@@ -1574,7 +1826,7 @@ spec:
 ---
 # Group that selects all Pods labeled role: db in Namespaces labeled env: prod.
 # This Group cannot be used in Antrea NetworkPolicy appliedTo because of the namespaceSelector.
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: Group
 metadata:
   name: test-grp-with-namespace
@@ -1587,7 +1839,7 @@ spec:
       env: prod
 ---
 # Group that selects IP block 10.0.10.0/24.
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: Group
 metadata:
   name: test-grp-ip-block
@@ -1597,7 +1849,7 @@ spec:
     - cidr: 10.0.10.0/24
 ---
 # Group that selects Service named test-service in the default Namespace.
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: Group
 metadata:
   name: test-grp-svc-ref
@@ -1608,7 +1860,7 @@ spec:
     namespace: default
 ---
 # Group that includes the previous Groups as childGroups.
-apiVersion: crd.antrea.io/v1alpha3
+apiVersion: crd.antrea.io/v1beta1
 kind: Group
 metadata:
   name: test-grp-nested
@@ -1671,8 +1923,8 @@ Similar RBAC is applied to the ClusterGroup resource.
   supported. But for optimal performance, it is recommended that the number of
   Tiers in a cluster be less than or equal to 10.
 - In order to reduce the churn in the agent, it is recommended to set the policy
-  priority (acnp/anp.spec.priority) within the range 1.0 to 100.0.
-- The v1alpha1 policy CRDs support up to 10,000 unique priorities at policy level,
+  priority (acnp/annp.spec.priority) within the range 1.0 to 100.0.
+- The v1beta1 policy CRDs support up to 10,000 unique priorities at policy level,
   and up to 50,000 unique priorities at rule level, across all Tiers except for
   the "baseline" Tier. For any two Antrea-native policy rules, their rule level
   priorities are only considered equal if their policy objects share the same Tier
@@ -1683,7 +1935,7 @@ Similar RBAC is applied to the ClusterGroup resource.
 - If there are multiple Antrea-native policy rules created at the same rule-level
   priority (same policy Tier, policy priority and rule priority), and happen to select
   overlapping traffic patterns but have conflicting rule actions (e.g.`Allow`v.s.`Deny`),
-  the behavior of such traffic will be undeterministic. **In general, we recommended
+  the behavior of such traffic will be nondeterministic. **In general, we recommended
   against creating rules with conflicting actions in policy resources at the same
   priority.** For example, consider two AntreaNetworkPolicies created in the same Namespace
   and Tier with the same policy priority. The first policy applies to all `app=web` Pods in
@@ -1694,4 +1946,78 @@ Similar RBAC is applied to the ClusterGroup resource.
   labels initiates traffic towards the `app=web` Pods in the Namespace, both rules will be
   matched at the same priority with conflicting actions. It will be the policy writer's
   responsibility to identify such ambiguities in rule definitions and avoid potential
-  undeterministic rule enforcement results.
+  nondeterministic rule enforcement results.
+- NetworkPolicies are connection/flow oriented and stateful. They apply to
+  connections, instead of individual packets, which means established connections
+  won't be blocked by new rules.
+- For hairpin Service traffic, when a Pod initiates traffic towards the Service it
+  provides, and the same Pod is selected as the Endpoint, NetworkPolicies will
+  consistently permit this traffic during ingress enforcement if Antrea Proxy is enabled,
+  irrespective of the ingress rules defined by the user. In the presence of ingress rules
+  preventing access to the Service from Pods providing the Service, accessing the Service
+  from one of these Pods will succeed if traffic is hairpinned back to the source Pod, and
+  will fail if a different Endpoint is selected by Antrea Proxy. However, when Antrea Proxy
+  is disabled, NetworkPolicies may not function as expected for hairpin Service traffic.
+  This is due to kube-proxy performing SNAT, which conceals the original source IP from
+  Antrea. Consequently, NetworkPolicies are unable to differentiate between hairpin
+  Service traffic and external traffic in this scenario.
+
+### Limitations of Antrea policy logging
+
+Antrea policy logging is enabled by setting `enableLogging` to true for specific
+policy rules (or by using the `networkpolicy.antrea.io/enable-logging: "true"`
+annotation for K8s NetworkPolicies). Starting with Antrea v1.13, logging is
+"best-effort": if too much traffic needs to be logged, we will skip logging
+rather than start dropping packets or rather than risking to overrun the Antrea
+Agent, which could impact cluster health or other workloads. This behavior
+cannot be changed, and the logging feature is therefore not meant to be used for
+compliance purposes. By default, the Antrea datapath will send up to 500 packets
+per second (with a burst size of 1000 packets) to the Agent for logging. This
+rate applies to all the traffic that needs to be logged, and is enforced at the
+level of each Node. A rate of 500 packets per second roughly translates to 500
+new TCP connections per second, or 500 UDP requests per second. While it is
+possible to adjust the rate and burst size by modifying the `packetInRate`
+parameter in the antrea-agent configuration, we do not recommend doing so. The
+default value was set to 500 after careful consideration.
+
+#### Logging prior to Antrea v1.13
+
+Prior to Antrea v1.13, policy logging was not best-effort. While we did have a
+rate limit for the number of packets that could be sent to the Agent for
+logging, the datapath behavior was to drop all packets that exceeded the rate
+limit, as opposed to skipping the logging and applying the specified policy rule
+action. This meant that the logging feature was more suited for audit /
+compliance applications, however, we ultimately decided that the behavior was
+too aggressive and that it was too easy to disrupt application workloads by
+enabling logging - the rate limit was also lower than the default one we use
+today (100 packets per second instead of 500). For example, the following policy
+which allows ingress DNS traffic for coreDNS Pods, and has logging enabled,
+would drastically restrict the number of possible DNS requests in the cluster,
+which in turn would cause a lot of errors in applications which rely on DNS:
+
+```yaml
+apiVersion: crd.antrea.io/v1beta1
+kind: ClusterNetworkPolicy
+metadata:
+  name: allow-core-dns-access
+spec:
+  priority: 5
+  tier: securityops
+  appliedTo:
+    - podSelector: {}
+  ingress:
+    - name: allow-dns
+      enableLogging: true
+      action: Allow
+      ports:
+        - protocol: TCP
+          port: 53
+        - protocol: UDP
+          port: 53
+```
+
+**For this reason, we do NOT recommend enabling logging for Antrea versions
+  prior to v1.13**, especially when the policy rule uses the `Allow` action.
+
+Note that v1.12 patch versions starting with v1.12.2 also do not suffer from
+this issue, as we backported the fix to the v1.12 release.

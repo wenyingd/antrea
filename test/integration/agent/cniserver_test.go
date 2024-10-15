@@ -22,25 +22,28 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"strings"
 	"testing"
 	"text/template"
+	"time"
 
 	"github.com/containernetworking/cni/pkg/types"
-	"github.com/containernetworking/cni/pkg/types/current"
+	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/containernetworking/plugins/pkg/testutils"
 	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/allocator"
-	mock "github.com/golang/mock/gomock"
+	"github.com/containernetworking/plugins/plugins/ipam/host-local/backend/disk"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
+	mock "go.uber.org/mock/gomock"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sFake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/component-base/metrics/legacyregistry"
 
@@ -58,6 +61,7 @@ import (
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	ovsconfigtest "antrea.io/antrea/pkg/ovs/ovsconfig/testing"
 	"antrea.io/antrea/pkg/util/channel"
+	"antrea.io/antrea/pkg/util/wait"
 )
 
 const (
@@ -67,6 +71,7 @@ const (
 	testPod               = "test-1"
 	testPodNamespace      = "t1"
 	testPodInfraContainer = "test-111111"
+	cniVersion            = "0.4.0"
 )
 
 const (
@@ -119,7 +124,6 @@ const (
   "ips":
    [
      {
-       "version":"4",
        "address":"{{.Subnet}}",
        "gateway":"{{.Gateway}}"}
    ],
@@ -152,7 +156,6 @@ var (
 	ipamMock       *ipamtest.MockIPAMDriver
 	ovsServiceMock *ovsconfigtest.MockOVSBridgeClient
 	ofServiceMock  *openflowtest.MockClient
-	testNodeConfig *config.NodeConfig
 	routeMock      *routetest.MockInterface
 )
 
@@ -290,13 +293,14 @@ func ipVersion(ip net.IP) string {
 }
 
 type cmdAddDelTester struct {
-	server         *cniserver.CNIServer
-	ctx            context.Context
-	testNS         ns.NetNS
-	targetNS       ns.NetNS
-	request        *cnimsg.CniCmdRequest
-	vethName       string
-	networkReadyCh chan struct{}
+	server                  *cniserver.CNIServer
+	ctx                     context.Context
+	testNS                  ns.NetNS
+	targetNS                ns.NetNS
+	request                 *cnimsg.CniCmdRequest
+	vethName                string
+	podNetworkWait          *wait.Group
+	flowRestoreCompleteWait *wait.Group
 }
 
 func (tester *cmdAddDelTester) setNS(testNS ns.NetNS, targetNS ns.NetNS) {
@@ -334,7 +338,8 @@ func matchRoute(expectedCIDR string, routes []netlink.Route) (*netlink.Route, er
 		return nil, err
 	}
 	for _, route := range routes {
-		if route.Dst == nil && route.Src == nil && route.Gw.Equal(gwIP) {
+		// For default route, `Dst` is 0.0.0.0/0 or ::/0, rather than nil.
+		if route.Dst != nil && route.Dst.IP.IsUnspecified() && route.Src == nil && route.Gw.Equal(gwIP) {
 			return &route, nil
 		}
 	}
@@ -395,10 +400,8 @@ func (tester *cmdAddDelTester) cmdAddTest(tc testCase, dataDir string) (*current
 	})
 	testRequire.Nil(err)
 
-	r, err := current.NewResult(response.CniResult)
-	testRequire.Nil(err)
-
-	result, err := current.GetResult(r)
+	result := &current.Result{}
+	err = json.Unmarshal(response.CniResult, result)
 	testRequire.Nil(err)
 
 	testRequire.Len(result.Interfaces, 2)
@@ -567,16 +570,18 @@ func (tester *cmdAddDelTester) cmdDelTest(tc testCase, dataDir string) {
 func newTester() *cmdAddDelTester {
 	tester := &cmdAddDelTester{}
 	ifaceStore := interfacestore.NewInterfaceStore()
-	testNodeConfig.NodeMTU = 1450
-	tester.networkReadyCh = make(chan struct{})
+	tester.podNetworkWait = wait.NewGroup()
+	tester.flowRestoreCompleteWait = wait.NewGroup()
 	tester.server = cniserver.New(testSock,
 		"",
-		testNodeConfig,
+		getTestNodeConfig(false),
 		k8sFake.NewSimpleClientset(),
 		routeMock,
-		false, false, false, false,
-		tester.networkReadyCh)
-	tester.server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100), nil)
+		false, false, false, false, &config.NetworkConfig{InterfaceMTU: 1450},
+		tester.podNetworkWait.Increment(),
+		tester.flowRestoreCompleteWait,
+	)
+	tester.server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100))
 	ctx := context.Background()
 	tester.ctx = ctx
 	return tester
@@ -584,8 +589,9 @@ func newTester() *cmdAddDelTester {
 
 func cmdAddDelCheckTest(testNS ns.NetNS, tc testCase, dataDir string) {
 	testRequire := require.New(tc.t)
+	testAssert := assert.New(tc.t)
 
-	testRequire.Equal("0.4.0", tc.CNIVersion)
+	testRequire.Equal(cniVersion, tc.CNIVersion)
 
 	// Get a Add/Del tester based on test case version
 	tester := newTester()
@@ -601,7 +607,7 @@ func cmdAddDelCheckTest(testNS ns.NetNS, tc testCase, dataDir string) {
 	}()
 	tester.setNS(testNS, targetNS)
 
-	ipamResult := &ipam.IPAMResult{Result: *ipamtest.GenerateIPAMResult("0.4.0", tc.addresses, tc.Routes, tc.DNS)}
+	ipamResult := &ipam.IPAMResult{Result: *ipamtest.GenerateIPAMResult(tc.addresses, tc.Routes, tc.DNS)}
 	ipamMock.EXPECT().Add(mock.Any(), mock.Any(), mock.Any()).Return(true, ipamResult, nil).AnyTimes()
 
 	// Mock ovs output while get ovs port external configuration
@@ -609,9 +615,12 @@ func cmdAddDelCheckTest(testNS ns.NetNS, tc testCase, dataDir string) {
 	ovsPortUUID := uuid.New().String()
 	ovsServiceMock.EXPECT().CreatePort(ovsPortname, ovsPortname, mock.Any()).Return(ovsPortUUID, nil).AnyTimes()
 	ovsServiceMock.EXPECT().GetOFPort(ovsPortname, false).Return(int32(10), nil).AnyTimes()
-	ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, mock.Any(), mock.Any(), mock.Any(), uint16(0)).Return(nil)
+	ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, mock.Any(), mock.Any(), mock.Any(), uint16(0), nil).Return(nil)
 
-	close(tester.networkReadyCh)
+	tester.podNetworkWait.Done()
+
+	testAssert.NoError(tester.flowRestoreCompleteWait.WaitWithTimeout(1 * time.Second))
+
 	// Test ips allocation
 	prevResult, err := tester.cmdAddTest(tc, dataDir)
 	testRequire.Nil(err)
@@ -650,7 +659,6 @@ func cmdAddDelCheckTest(testNS ns.NetNS, tc testCase, dataDir string) {
 
 func TestAntreaServerFunc(t *testing.T) {
 	controller := mock.NewController(t)
-	defer controller.Finish()
 	ipamMock = ipamtest.NewMockIPAMDriver(controller)
 	ipam.RegisterIPAMDriver("mock", ipamMock)
 	ovsServiceMock = ovsconfigtest.NewMockOVSBridgeClient(controller)
@@ -666,7 +674,7 @@ func TestAntreaServerFunc(t *testing.T) {
 		originalNS, err = testutils.NewNS()
 		require.Nil(t, err)
 
-		dataDir, err = ioutil.TempDir("", "antrea_server_test")
+		dataDir, err = os.MkdirTemp("", "antrea_server_test")
 		require.Nil(t, err)
 
 		ipamMock.EXPECT().Del(mock.Any(), mock.Any(), mock.Any()).Return(true, nil).AnyTimes()
@@ -688,8 +696,8 @@ func TestAntreaServerFunc(t *testing.T) {
 
 	testCases := []testCase{
 		{
-			name:       "ADD/DEL/CHECK for 0.4.0 config",
-			CNIVersion: "0.4.0",
+			name:       fmt.Sprintf("ADD/DEL/CHECK for %s config", cniVersion),
+			CNIVersion: cniVersion,
 			// IPv4 only
 			ranges: []rangeInfo{{
 				subnet: "10.1.2.0/24",
@@ -699,8 +707,8 @@ func TestAntreaServerFunc(t *testing.T) {
 			Routes:          []string{"10.0.0.0/8,10.1.2.1", "0.0.0.0/0,10.1.2.1"},
 		},
 		{
-			name:       "Prometheus metrics test with ADD/DEL/CHECK for 0.4.0 config",
-			CNIVersion: "0.4.0",
+			name:       fmt.Sprintf("Prometheus metrics test with ADD/DEL/CHECK for %s config", cniVersion),
+			CNIVersion: cniVersion,
 			// IPv4 only
 			ranges: []rangeInfo{{
 				subnet: "10.1.2.0/24",
@@ -726,26 +734,25 @@ func TestAntreaServerFunc(t *testing.T) {
 }
 
 func setupChainTest(
-	controller *mock.Controller, inServer *cniserver.CNIServer, netNS ns.NetNS, newServer bool) (
-	server *cniserver.CNIServer, hostVeth, containerVeth net.Interface, err error) {
-
+	testNodeConfig *config.NodeConfig, controller *mock.Controller, inServer *cniserver.CNIServer, netNS ns.NetNS, newServer bool,
+) (server *cniserver.CNIServer, hostVeth, containerVeth net.Interface, err error) {
 	if newServer {
 		routeMock = routetest.NewMockInterface(controller)
-		networkReadyCh := make(chan struct{})
-		close(networkReadyCh)
+		podNetworkWait := wait.NewGroup()
+		flowRestoreCompleteWait := wait.NewGroup()
 		server = cniserver.New(testSock,
 			"",
 			testNodeConfig,
 			k8sFake.NewSimpleClientset(),
 			routeMock,
-			true, false, false, false,
-			networkReadyCh)
+			true, false, false, false, &config.NetworkConfig{InterfaceMTU: 1450},
+			podNetworkWait, flowRestoreCompleteWait)
 	} else {
 		server = inServer
 	}
 
 	err = netNS.Do(func(hostNS ns.NetNS) error {
-		hostVeth, containerVeth, err = ip.SetupVethWithName(IFName, "", 1500, hostNS)
+		hostVeth, containerVeth, err = ip.SetupVethWithName(IFName, "", 1500, "", hostNS)
 		return err
 	})
 	if err != nil {
@@ -768,9 +775,9 @@ func TestCNIServerChaining(t *testing.T) {
 		t.Skipf("Skip test runs only in container")
 	}
 
+	testNodeConfig := getTestNodeConfig(false)
 	testRequire := require.New(t)
 	controller := mock.NewController(t)
-	defer controller.Finish()
 	var server *cniserver.CNIServer
 	testContainerOFPort := int32(1234)
 	testPatchPortName := "antrea-gw0"
@@ -778,7 +785,7 @@ func TestCNIServerChaining(t *testing.T) {
 
 	tc := testCase{
 		name:       "CNI chaining ",
-		CNIVersion: "0.4.0",
+		CNIVersion: cniVersion,
 		Subnet:     "10.10.10.2/24",
 		Gateway:    "10.10.10.1",
 		Routes:     []string{"10.0.0.0/8"},
@@ -791,7 +798,7 @@ func TestCNIServerChaining(t *testing.T) {
 		testRequire.Nil(err)
 
 		var hostVeth net.Interface
-		server, hostVeth, _, err = setupChainTest(controller, server, netNS, newServer)
+		server, hostVeth, _, err = setupChainTest(testNodeConfig, controller, server, netNS, newServer)
 		testRequire.Nil(err)
 		if newServer {
 			ovsServiceMock = ovsconfigtest.NewMockOVSBridgeClient(controller)
@@ -799,7 +806,7 @@ func TestCNIServerChaining(t *testing.T) {
 			ifaceStore := interfacestore.NewInterfaceStore()
 			ovsServiceMock.EXPECT().IsHardwareOffloadEnabled().Return(false).AnyTimes()
 			ovsServiceMock.EXPECT().GetOVSDatapathType().Return(ovsconfig.OVSDatapathSystem).AnyTimes()
-			err = server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100), nil)
+			err = server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100))
 			testRequire.Nil(err)
 		}
 
@@ -820,7 +827,7 @@ func TestCNIServerChaining(t *testing.T) {
 		containerIntf, err := util.GetNSDevInterface(netNS.Path(), IFName)
 		testRequire.Nil(err)
 
-		orderedCalls := make([]*mock.Call, 0)
+		orderedCalls := make([]any, 0)
 		testNodeConfig.GatewayConfig.Name = testPatchPortName
 
 		// Pod port expectations
@@ -828,7 +835,7 @@ func TestCNIServerChaining(t *testing.T) {
 			routeMock.EXPECT().MigrateRoutesToGw(hostVeth.Name),
 			ovsServiceMock.EXPECT().CreatePort(ovsPortname, ovsPortname, mock.Any()).Return(ovsPortUUID, nil),
 			ovsServiceMock.EXPECT().GetOFPort(ovsPortname, false).Return(testContainerOFPort, nil),
-			ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, []net.IP{podIP}, containerIntf.HardwareAddr, mock.Any(), uint16(0)),
+			ofServiceMock.EXPECT().InstallPodFlows(ovsPortname, []net.IP{podIP}, containerIntf.HardwareAddr, mock.Any(), uint16(0), nil),
 		)
 		mock.InOrder(orderedCalls...)
 		cniResp, err := server.CmdAdd(ctx, cniReq)
@@ -856,13 +863,109 @@ func TestCNIServerChaining(t *testing.T) {
 	}
 }
 
-func init() {
-	nodeName := "node1"
-	gwIP := net.ParseIP("192.168.1.1")
-	gwMAC, _ = net.ParseMAC("11:11:11:11:11:11")
-	nodeGateway := &config.GatewayConfig{IPv4: gwIP, MAC: gwMAC, Name: ""}
-	_, nodePodCIDR, _ := net.ParseCIDR("192.168.1.0/24")
-	nodeMTU := 1500
+func TestCNIServerGCForHostLocalIPAM(t *testing.T) {
+	// Running in a container is required as we modify /var/lib/cni/networks.
+	if _, inContainer := os.LookupEnv("INCONTAINER"); !inContainer {
+		t.Skipf("Skip test runs only in container")
+	}
 
-	testNodeConfig = &config.NodeConfig{Name: nodeName, PodIPv4CIDR: nodePodCIDR, NodeMTU: nodeMTU, GatewayConfig: nodeGateway}
+	testNodeConfig := getTestNodeConfig(true)
+
+	usedIPv4 := net.ParseIP("10.0.0.1")
+	usedIPv6 := net.ParseIP("2001:db8:a::1")
+	unusedIPv4 := net.ParseIP("10.0.0.2")
+	unusedIPv6 := net.ParseIP("2001:db8:a::2")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			NodeName: testNodeConfig.Name,
+		},
+		Status: corev1.PodStatus{
+			PodIP: usedIPv4.String(),
+			PodIPs: []corev1.PodIP{
+				{IP: usedIPv4.String()},
+				{IP: usedIPv6.String()},
+			},
+		},
+	}
+
+	// we need to use the default data dir, as it is hardcoded in the Antrea logic
+	const ipamDataDir = "/var/lib/cni/networks"
+	// make sure we start from a clean state, this will not interfere with any other test
+	require.NoError(t, os.RemoveAll(ipamDataDir))
+	// clean up directory at the end of the test
+	defer os.RemoveAll(ipamDataDir)
+
+	// reserve all 4 IPs using host-local IPAM
+	const rangeID = "0"
+	reserveIPs := func(cID string, ips ...net.IP) {
+		ipamStore, err := disk.New("antrea", ipamDataDir)
+		require.NoError(t, err)
+		defer ipamStore.Close()
+		ipamStore.Lock()
+		defer ipamStore.Unlock()
+		for _, ip := range ips {
+			reserved, err := ipamStore.Reserve(cID, IFName, ip, rangeID)
+			require.NoError(t, err)
+			require.True(t, reserved) // should not have been previously reserved
+		}
+	}
+	reserveIPs("c0", usedIPv4, usedIPv6)
+	reserveIPs("c1", unusedIPv4, unusedIPv6)
+
+	// create mocks and test CNIServer
+	controller := mock.NewController(t)
+	ovsServiceMock := ovsconfigtest.NewMockOVSBridgeClient(controller)
+	ovsServiceMock.EXPECT().GetPortList().Return([]ovsconfig.OVSPortData{}, nil).AnyTimes()
+	ovsServiceMock.EXPECT().IsHardwareOffloadEnabled().Return(false).AnyTimes()
+	ovsServiceMock.EXPECT().GetOVSDatapathType().Return(ovsconfig.OVSDatapathSystem).AnyTimes()
+	ofServiceMock := openflowtest.NewMockClient(controller)
+	routeMock := routetest.NewMockInterface(controller)
+	ifaceStore := interfacestore.NewInterfaceStore()
+	podNetworkWait := wait.NewGroup()
+	flowRestoreCompleteWait := wait.NewGroup()
+	k8sClient := k8sFake.NewSimpleClientset(pod)
+	server := cniserver.New(
+		testSock,
+		"",
+		testNodeConfig,
+		k8sClient,
+		routeMock,
+		false, false, false, false, &config.NetworkConfig{InterfaceMTU: 1450},
+		podNetworkWait, flowRestoreCompleteWait,
+	)
+
+	// call Initialize, which will run reconciliation and perform host-local IPAM garbage collection
+	server.Initialize(ovsServiceMock, ofServiceMock, ifaceStore, channel.NewSubscribableChannel("PodUpdate", 100))
+
+	getIPs := func(cID string) []net.IP {
+		ipamStore, err := disk.New("antrea", "")
+		require.NoError(t, err)
+		defer ipamStore.Close()
+		ipamStore.Lock()
+		defer ipamStore.Unlock()
+		return ipamStore.GetByID(cID, IFName)
+	}
+	assert.ElementsMatch(t, getIPs("c0"), []net.IP{usedIPv4, usedIPv6})
+	assert.Empty(t, getIPs("c1"))
+}
+
+func getTestNodeConfig(dualStack bool) *config.NodeConfig {
+	nodeName := "node1"
+	gwIPv4 := net.ParseIP("192.168.1.1")
+	_, nodePodCIDRv4, _ := net.ParseCIDR("192.168.1.0/24")
+	gwMAC, _ := net.ParseMAC("11:11:11:11:11:11")
+	gateway := &config.GatewayConfig{Name: "", IPv4: gwIPv4, MAC: gwMAC}
+	nodeConfig := &config.NodeConfig{Name: nodeName, PodIPv4CIDR: nodePodCIDRv4, GatewayConfig: gateway}
+	if dualStack {
+		gwIPv6 := net.ParseIP("fd74:ca9b:172:18::1")
+		_, nodePodCIDRv6, _ := net.ParseCIDR("fd74:ca9b:172:18::/64")
+		gateway.IPv6 = gwIPv6
+		nodeConfig.PodIPv6CIDR = nodePodCIDRv6
+	}
+	return nodeConfig
 }

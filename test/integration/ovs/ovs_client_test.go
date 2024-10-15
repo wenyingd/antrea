@@ -39,6 +39,8 @@ var UDSAddress string
 var bridgeName string
 
 type testData struct {
+	requiredPortExternalIDs []string
+
 	ovsdb *ovsdb.OVSDB
 	br    *ovsconfig.OVSBridge
 }
@@ -60,10 +62,15 @@ func (data *testData) setup(t *testing.T) {
 		t.Fatalf("Could not establish connection to %s after %s", UDSAddress, defaultConnectTimeout)
 	}
 
+	brOptions := []ovsconfig.OVSBridgeOption{}
+	if len(data.requiredPortExternalIDs) > 0 {
+		brOptions = append(brOptions, ovsconfig.WithRequiredPortExternalIDs(data.requiredPortExternalIDs...))
+	}
 	// using the netdev datapath type does not impact test coverage but
 	// ensures that the integration tests can be run with Docker Desktop on
 	// macOS.
-	data.br = ovsconfig.NewOVSBridge(bridgeName, "netdev", data.ovsdb)
+	brClient := ovsconfig.NewOVSBridge(bridgeName, "netdev", data.ovsdb, brOptions...)
+	data.br = brClient.(*ovsconfig.OVSBridge)
 	err = data.br.Create()
 	require.Nil(t, err, "Failed to create bridge %s", bridgeName)
 }
@@ -89,27 +96,32 @@ func TestOVSBridge(t *testing.T) {
 	data.setup(t)
 	defer data.teardown(t)
 
-	checkPorts := func(expectedCount int) {
-		portList, err := data.br.GetPortUUIDList()
-		require.Nil(t, err, "Error when retrieving port list")
-		assert.Equal(t, expectedCount, len(portList))
-	}
+	var err error
+
+	start := time.Now()
+	datapathID, err := data.br.WaitForDatapathID(3 * time.Second)
+	end := time.Now()
+	require.NoError(t, err)
+	require.NotEmpty(t, datapathID)
+	t.Logf("Waited %v for datapath ID to be assigned", end.Sub(start))
 
 	// Test set fixed datapath ID
 	expectedDatapathID, err := randomDatapathID()
 	require.Nilf(t, err, "Failed to generate datapath ID: %s", err)
 	err = data.br.SetDatapathID(expectedDatapathID)
 	require.Nilf(t, err, "Set datapath id failed: %s", err)
-	var datapathID string
-	for retry := 0; retry < 3; retry++ {
-		datapathID, _ = data.br.GetDatapathID()
-		if datapathID == expectedDatapathID {
-			break
-		}
-		time.Sleep(time.Second)
-	}
-	assert.Equal(t, expectedDatapathID, datapathID)
+	assert.Eventually(t, func() bool {
+		datapathID, _ := data.br.GetDatapathID()
+		return datapathID == expectedDatapathID
+	}, 5*time.Second, 1*time.Second)
+
 	vlanID := uint16(100)
+
+	checkPorts := func(expectedCount int) {
+		portList, err := data.br.GetPortUUIDList()
+		require.Nil(t, err, "Error when retrieving port list")
+		assert.Equal(t, expectedCount, len(portList))
+	}
 
 	deleteAllPorts(t, data.br)
 	checkPorts(0)
@@ -141,6 +153,60 @@ func TestOVSBridge(t *testing.T) {
 	deleteAllPorts(t, data.br)
 
 	checkPorts(0)
+}
+
+// TestOVSCreatePortRequiredExternalIDs verifies that port creation fails when a required externalID
+// (the list is provided when creating the bridge client) is missing.
+func TestOVSCreatePortRequiredExternalIDs(t *testing.T) {
+	data := &testData{
+		requiredPortExternalIDs: []string{"k1"},
+	}
+	data.setup(t)
+	defer data.teardown(t)
+
+	name := "p1"
+	externalIDs := map[string]interface{}{}
+	_, err := data.br.CreatePort(name, name, externalIDs)
+	require.ErrorContains(t, err, "missing required externalID")
+
+	externalIDs["k1"] = "v1"
+	_, err = data.br.CreatePort(name, name, externalIDs)
+	assert.NoError(t, err)
+
+	deleteAllPorts(t, data.br)
+}
+
+// TestOVSPortExternalIDs tests getting and setting external IDs of OVS ports.
+func TestOVSPortExternalIDs(t *testing.T) {
+	data := &testData{}
+	data.setup(t)
+	defer data.teardown(t)
+
+	name := "p1"
+	externalIDs := map[string]interface{}{
+		"k1": "v1",
+	}
+	_, err := data.br.CreatePort(name, name, externalIDs)
+	require.NoError(t, err)
+
+	actualExternalIDs, err := data.br.GetPortExternalIDs(name)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"k1": "v1",
+	}, actualExternalIDs)
+
+	externalIDs["k2"] = "v2"
+
+	require.NoError(t, data.br.SetPortExternalIDs(name, externalIDs))
+
+	actualExternalIDs, err = data.br.GetPortExternalIDs(name)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"k1": "v1",
+		"k2": "v2",
+	}, actualExternalIDs)
+
+	deleteAllPorts(t, data.br)
 }
 
 // TestOVSDeletePortIdempotent verifies that calling DeletePort on a non-existent port does not
@@ -188,51 +254,79 @@ func TestOVSOtherConfig(t *testing.T) {
 	data.setup(t)
 	defer data.teardown(t)
 
-	otherConfigs := map[string]interface{}{"flow-restore-wait": "true", "foo1": "bar1"}
-	err := data.br.AddOVSOtherConfig(otherConfigs)
-	require.Nil(t, err, "Error when adding OVS other_config")
+	convertOtherConfig := func(from map[string]string) map[string]interface{} {
+		to := make(map[string]interface{})
+		for k, v := range from {
+			to[k] = v
+		}
+		return to
+	}
 
+	// First, ensure that we save existing other_config and delete them, to start from an empty map.
+	// We will restore the saved other_config at the end of the test
 	gotOtherConfigs, err := data.br.GetOVSOtherConfig()
-	require.Nil(t, err, "Error when getting OVS other_config")
+	require.NoError(t, err)
+	savedOtherConfigs := convertOtherConfig(gotOtherConfigs)
+	require.NoError(t, data.br.DeleteOVSOtherConfig(savedOtherConfigs))
+	restoreOtherConfigs := func() error {
+		otherConfigs, err := data.br.GetOVSOtherConfig()
+		if err != nil {
+			return err
+		}
+		if err := data.br.DeleteOVSOtherConfig(convertOtherConfig(otherConfigs)); err != nil {
+			return err
+		}
+		return data.br.AddOVSOtherConfig(savedOtherConfigs)
+	}
+	defer func() {
+		require.NoError(t, restoreOtherConfigs(), "Error when restoring original OVS other_config, subsequent tests may fail")
+	}()
+
+	otherConfigs := map[string]interface{}{"flow-restore-wait": "true", "foo1": "bar1"}
+	err = data.br.AddOVSOtherConfig(otherConfigs)
+	require.NoError(t, err, "Error when adding OVS other_config")
+
+	gotOtherConfigs, err = data.br.GetOVSOtherConfig()
+	require.NoError(t, err, "Error when getting OVS other_config")
 	require.Equal(t, map[string]string{"flow-restore-wait": "true", "foo1": "bar1"}, gotOtherConfigs, "other_config mismatched")
 
 	// Expect only the new config "foo2: bar2" will be added.
 	err = data.br.AddOVSOtherConfig(map[string]interface{}{"flow-restore-wait": "false", "foo2": "bar2"})
-	require.Nil(t, err, "Error when adding OVS other_config")
+	require.NoError(t, err, "Error when adding OVS other_config")
 
 	gotOtherConfigs, err = data.br.GetOVSOtherConfig()
-	require.Nil(t, err, "Error when getting OVS other_config")
+	require.NoError(t, err, "Error when getting OVS other_config")
 	require.Equal(t, map[string]string{"flow-restore-wait": "true", "foo1": "bar1", "foo2": "bar2"}, gotOtherConfigs, "other_config mismatched")
 
 	// Expect to modify existing values and insert new values
 	err = data.br.UpdateOVSOtherConfig(map[string]interface{}{"foo2": "bar3", "foo3": "bar2"})
-	require.Nil(t, err, "Error when updating OVS other_config")
+	require.NoError(t, err, "Error when updating OVS other_config")
 	gotOtherConfigs, err = data.br.GetOVSOtherConfig()
-	require.Nil(t, err, "Error when getting OVS other_config")
+	require.NoError(t, err, "Error when getting OVS other_config")
 	require.Equal(t, map[string]string{"flow-restore-wait": "true", "foo1": "bar1", "foo2": "bar3", "foo3": "bar2"}, gotOtherConfigs, "other_config mismatched")
 
 	// Expect only the matched config "flow-restore-wait: true" will be deleted.
 	err = data.br.DeleteOVSOtherConfig(map[string]interface{}{"flow-restore-wait": "true", "foo1": "bar2", "foo2": "bar1"})
-	require.Nil(t, err, "Error when deleting OVS other_config")
+	require.NoError(t, err, "Error when deleting OVS other_config")
 
 	gotOtherConfigs, err = data.br.GetOVSOtherConfig()
-	require.Nil(t, err, "Error when getting OVS other_config")
+	require.NoError(t, err, "Error when getting OVS other_config")
 	require.Equal(t, map[string]string{"foo1": "bar1", "foo2": "bar3", "foo3": "bar2"}, gotOtherConfigs, "other_config mismatched")
 
 	// Expect "foo1" will be deleted
 	err = data.br.DeleteOVSOtherConfig(map[string]interface{}{"foo1": "", "foo2": "bar4"})
-	require.Nil(t, err, "Error when deleting OVS other_config")
+	require.NoError(t, err, "Error when deleting OVS other_config")
 
 	gotOtherConfigs, err = data.br.GetOVSOtherConfig()
-	require.Nil(t, err, "Error when getting OVS other_config")
+	require.NoError(t, err, "Error when getting OVS other_config")
 	require.Equal(t, map[string]string{"foo2": "bar3", "foo3": "bar2"}, gotOtherConfigs, "other_config mismatched")
 
 	// Expect "foo2" will be deleted
 	err = data.br.DeleteOVSOtherConfig(map[string]interface{}{"foo2": "", "foo4": ""})
-	require.Nil(t, err, "Error when deleting OVS other_config")
+	require.NoError(t, err, "Error when deleting OVS other_config")
 
 	gotOtherConfigs, err = data.br.GetOVSOtherConfig()
-	require.Nil(t, err, "Error when getting OVS other_config")
+	require.NoError(t, err, "Error when getting OVS other_config")
 	require.Equal(t, map[string]string{"foo3": "bar2"}, gotOtherConfigs, "other_config mismatched")
 }
 

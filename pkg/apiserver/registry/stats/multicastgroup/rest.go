@@ -32,6 +32,13 @@ import (
 	"antrea.io/antrea/pkg/util/k8s"
 )
 
+var (
+	tableColumnDefinitions = []metav1.TableColumnDefinition{
+		{Name: "Group", Type: "string", Format: "name", Description: "IP of multicast group."},
+		{Name: "Pods", Type: "string", Description: "List of Pods the has joined the multicast group."},
+	}
+)
+
 type REST struct {
 	statsProvider statsProvider
 }
@@ -42,10 +49,11 @@ func NewREST(p statsProvider) *REST {
 }
 
 var (
-	_ rest.Storage = &REST{}
-	_ rest.Scoper  = &REST{}
-	_ rest.Getter  = &REST{}
-	_ rest.Lister  = &REST{}
+	_ rest.Storage              = &REST{}
+	_ rest.Scoper               = &REST{}
+	_ rest.Getter               = &REST{}
+	_ rest.Lister               = &REST{}
+	_ rest.SingularNameProvider = &REST{}
 )
 
 type statsProvider interface {
@@ -57,14 +65,14 @@ func (r *REST) New() runtime.Object {
 	return &statsv1alpha1.MulticastGroup{}
 }
 
+func (r *REST) Destroy() {
+}
+
 func (r *REST) NewList() runtime.Object {
 	return &statsv1alpha1.MulticastGroupList{}
 }
 
 func (r *REST) List(ctx context.Context, options *internalversion.ListOptions) (runtime.Object, error) {
-	if !features.DefaultFeatureGate.Enabled(features.NetworkPolicyStats) {
-		return &statsv1alpha1.MulticastGroupList{}, nil
-	}
 	if !features.DefaultFeatureGate.Enabled(features.Multicast) {
 		return &statsv1alpha1.MulticastGroupList{}, nil
 	}
@@ -75,9 +83,6 @@ func (r *REST) List(ctx context.Context, options *internalversion.ListOptions) (
 }
 
 func (r *REST) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
-	if !features.DefaultFeatureGate.Enabled(features.NetworkPolicyStats) {
-		return &statsv1alpha1.MulticastGroup{}, nil
-	}
 	if !features.DefaultFeatureGate.Enabled(features.Multicast) {
 		return &statsv1alpha1.MulticastGroup{}, nil
 	}
@@ -90,10 +95,7 @@ func (r *REST) Get(ctx context.Context, name string, options *metav1.GetOptions)
 
 func (r *REST) ConvertToTable(ctx context.Context, obj runtime.Object, tableOptions runtime.Object) (*metav1.Table, error) {
 	table := &metav1.Table{
-		ColumnDefinitions: []metav1.TableColumnDefinition{
-			{Name: "Group", Type: "string", Format: "name", Description: "IP of multicast group."},
-			{Name: "Pods", Type: "string", Description: "List of Pods the has joined the multicast group."},
-		},
+		ColumnDefinitions: tableColumnDefinitions,
 	}
 	if m, err := meta.ListAccessor(obj); err == nil {
 		table.ResourceVersion = m.GetResourceVersion()
@@ -137,4 +139,8 @@ func formatPodReferenceList(pods []statsv1alpha1.PodReference, max int) string {
 
 func (r *REST) NamespaceScoped() bool {
 	return false
+}
+
+func (r *REST) GetSingularName() string {
+	return "multicastgroup"
 }

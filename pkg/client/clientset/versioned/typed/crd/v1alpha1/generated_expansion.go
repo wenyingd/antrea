@@ -1,4 +1,4 @@
-// Copyright 2022 Antrea Authors
+// Copyright 2024 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,12 +16,10 @@
 
 package v1alpha1
 
-type ClusterNetworkPolicyExpansion interface{}
+type BGPPolicyExpansion interface{}
 
 type ExternalNodeExpansion interface{}
 
-type NetworkPolicyExpansion interface{}
+type NodeLatencyMonitorExpansion interface{}
 
-type TierExpansion interface{}
-
-type TraceflowExpansion interface{}
+type SupportBundleCollectionExpansion interface{}

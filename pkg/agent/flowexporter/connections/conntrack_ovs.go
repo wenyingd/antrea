@@ -17,7 +17,7 @@ package connections
 import (
 	"encoding/hex"
 	"fmt"
-	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -32,13 +32,6 @@ import (
 
 // Following map is for converting protocol name (string) to protocol identifier
 var (
-	protocols = map[string]uint8{
-		"icmp":      1,
-		"igmp":      2,
-		"tcp":       6,
-		"udp":       17,
-		"ipv6-icmp": 58,
-	}
 	// Mapping is defined at https://github.com/torvalds/linux/blob/v5.9/include/uapi/linux/netfilter/nf_conntrack_common.h#L42
 	conntrackStatusMap = map[string]uint32{
 		"EXPECTED":      uint32(1),
@@ -66,13 +59,13 @@ var _ ConnTrackDumper = new(connTrackOvsCtl)
 
 type connTrackOvsCtl struct {
 	nodeConfig           *config.NodeConfig
-	serviceCIDRv4        *net.IPNet
-	serviceCIDRv6        *net.IPNet
+	serviceCIDRv4        netip.Prefix
+	serviceCIDRv6        netip.Prefix
 	ovsctlClient         ovsctl.OVSCtlClient
 	isAntreaProxyEnabled bool
 }
 
-func NewConnTrackOvsAppCtl(nodeConfig *config.NodeConfig, serviceCIDRv4 *net.IPNet, serviceCIDRv6 *net.IPNet, isAntreaProxyEnabled bool) *connTrackOvsCtl {
+func NewConnTrackOvsAppCtl(nodeConfig *config.NodeConfig, serviceCIDRv4 netip.Prefix, serviceCIDRv6 netip.Prefix, isAntreaProxyEnabled bool) *connTrackOvsCtl {
 	return &connTrackOvsCtl{
 		nodeConfig,
 		serviceCIDRv4,
@@ -140,7 +133,7 @@ func flowStringToAntreaConnection(flow string, zoneFilter uint16) (*flowexporter
 		switch {
 		case hasAnyProto(fs):
 			// Proto identifier
-			proto, err := lookupProtocolMap(fs)
+			proto, err := flowexporter.LookupProtocolMap(fs)
 			if err != nil {
 				return nil, err
 			}
@@ -148,14 +141,26 @@ func flowStringToAntreaConnection(flow string, zoneFilter uint16) (*flowexporter
 		case strings.Contains(fs, "src"):
 			fields := strings.Split(fs, "=")
 			if !isReply {
-				conn.FlowKey.SourceAddress = net.ParseIP(fields[len(fields)-1])
+				srcAddr, err := netip.ParseAddr(fields[len(fields)-1])
+				if err != nil {
+					return nil, fmt.Errorf("parsing source address failed: %w", err)
+				}
+				conn.FlowKey.SourceAddress = srcAddr
 			} else {
-				conn.FlowKey.DestinationAddress = net.ParseIP(fields[len(fields)-1])
+				dstAddr, err := netip.ParseAddr(fields[len(fields)-1])
+				if err != nil {
+					return nil, fmt.Errorf("parsing destination address failed: %w", err)
+				}
+				conn.FlowKey.DestinationAddress = dstAddr
 			}
 		case strings.Contains(fs, "dst"):
 			fields := strings.Split(fs, "=")
 			if !isReply {
-				conn.DestinationServiceAddress = net.ParseIP(fields[len(fields)-1])
+				svcAddr, err := netip.ParseAddr(fields[len(fields)-1])
+				if err != nil {
+					return nil, fmt.Errorf("parsing original destination address failed: %w", err)
+				}
+				conn.OriginalDestinationAddress = svcAddr
 			}
 		case strings.Contains(fs, "sport"):
 			fields := strings.Split(fs, "=")
@@ -177,7 +182,7 @@ func flowStringToAntreaConnection(flow string, zoneFilter uint16) (*flowexporter
 				return nil, fmt.Errorf("conversion of dport %s to int failed: %v", fields[len(fields)-1], err)
 			}
 			if !isReply {
-				conn.DestinationServicePort = uint16(val)
+				conn.OriginalDestinationPort = uint16(val)
 			}
 		case strings.Contains(fs, "packets"):
 			fields := strings.Split(fs, "=")
@@ -287,23 +292,12 @@ func flowStringToAntreaConnection(flow string, zoneFilter uint16) (*flowexporter
 }
 
 func hasAnyProto(text string) bool {
-	for proto := range protocols {
+	for proto := range flowexporter.Protocols {
 		if strings.Contains(strings.ToLower(text), proto) {
 			return true
 		}
 	}
 	return false
-}
-
-// lookupProtocolMap returns protocol identifier given protocol name
-func lookupProtocolMap(name string) (uint8, error) {
-	name = strings.TrimSpace(name)
-	lowerCaseStr := strings.ToLower(name)
-	proto, found := protocols[lowerCaseStr]
-	if !found {
-		return 0, fmt.Errorf("unknown IP protocol specified: %s", name)
-	}
-	return proto, nil
 }
 
 func (ct *connTrackOvsCtl) GetMaxConnections() (int, error) {

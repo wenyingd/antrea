@@ -38,7 +38,6 @@ import (
 	corev1informers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	csrlister "k8s.io/client-go/listers/certificates/v1"
-	csrlisters "k8s.io/client-go/listers/certificates/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	certutil "k8s.io/client-go/util/cert"
@@ -76,8 +75,8 @@ type IPsecCSRSigningController struct {
 	// saved CertificateAuthority
 	certificateAuthority atomic.Value
 
-	queue         workqueue.RateLimitingInterface
-	fixturesQueue workqueue.RateLimitingInterface
+	queue         workqueue.TypedRateLimitingInterface[string]
+	fixturesQueue workqueue.TypedRateLimitingInterface[string]
 }
 
 // certificateAuthority implements a certificate authority and used by the signing controller.
@@ -110,7 +109,7 @@ func (c *certificateAuthority) signCSR(template *x509.Certificate, requestKey cr
 }
 
 // NewIPsecCSRSigningController returns a new *IPsecCSRSigningController.
-func NewIPsecCSRSigningController(client clientset.Interface, csrInformer cache.SharedIndexInformer, csrLister csrlisters.CertificateSigningRequestLister, selfSignedCA bool) *IPsecCSRSigningController {
+func NewIPsecCSRSigningController(client clientset.Interface, csrInformer cache.SharedIndexInformer, csrLister csrlister.CertificateSigningRequestLister, selfSignedCA bool) *IPsecCSRSigningController {
 
 	caConfigMapInformer := corev1informers.NewFilteredConfigMapInformer(client, env.GetAntreaNamespace(), resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, func(listOptions *metav1.ListOptions) {
 		listOptions.FieldSelector = fields.OneTermEqualSelector("metadata.name", ipsecRootCAName).String()
@@ -127,8 +126,18 @@ func NewIPsecCSRSigningController(client clientset.Interface, csrInformer cache.
 		configMapLister:       configMapLister,
 		configMapListerSynced: caConfigMapInformer.HasSynced,
 		selfSignedCA:          selfSignedCA,
-		queue:                 workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "certificateSigningRequest"),
-		fixturesQueue:         workqueue.NewNamedRateLimitingQueue(workqueue.NewItemExponentialFailureRateLimiter(minRetryDelay, maxRetryDelay), "certificateSigningRequest"),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "certificateSigningRequest",
+			},
+		),
+		fixturesQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](minRetryDelay, maxRetryDelay),
+			workqueue.TypedRateLimitingQueueConfig[string]{
+				Name: "certificateSigningRequestFixtures",
+			},
+		),
 	}
 
 	csrInformer.AddEventHandlerWithResyncPeriod(
@@ -423,8 +432,7 @@ func (c *IPsecCSRSigningController) processNextWorkItem() bool {
 		return false
 	}
 	defer c.queue.Done(key)
-	err := c.syncCSR(key.(string))
-	if err != nil {
+	if err := c.syncCSR(key); err != nil {
 		c.queue.AddRateLimited(key)
 		klog.ErrorS(err, "Failed to sync CertificateSigningRequest", "CertificateSigningRequest", key)
 		return true

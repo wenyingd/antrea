@@ -17,20 +17,27 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net"
+	"os"
 
 	"github.com/spf13/pflag"
-	"gopkg.in/yaml.v2"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
 
 	"antrea.io/antrea/pkg/apis"
 	controllerconfig "antrea.io/antrea/pkg/config/controller"
 	"antrea.io/antrea/pkg/features"
+	"antrea.io/antrea/pkg/util/yaml"
 )
 
 const (
+	// Use higher QPS and Burst rather than the default settings (QPS: 5, Burst: 10), otherwise synchronizing resources
+	// like ClusterNetworkPolicies and Egresses would be rather slow when they are created in bulk.
+	// The following values are recommended by RecommendedDefaultClientConnectionConfiguration.
+	// https://github.com/kubernetes/kubernetes/blob/b722d017a34b300a2284b890448e5a605f21d01e/staging/src/k8s.io/component-base/config/v1alpha1/defaults.go#L65-L75
+	defaultClientQPS   = 50
+	defaultClientBurst = 100
+
 	ipamIPv4MaskLo      = 16
 	ipamIPv4MaskHi      = 30
 	ipamIPv4MaskDefault = 24
@@ -58,7 +65,7 @@ func (o *Options) addFlags(fs *pflag.FlagSet) {
 }
 
 // complete completes all the required options.
-func (o *Options) complete(args []string) error {
+func (o *Options) complete() error {
 	if len(o.configFile) > 0 {
 		if err := o.loadConfigFromFile(); err != nil {
 			return err
@@ -81,8 +88,8 @@ func (o *Options) validate(args []string) error {
 		}
 	}
 
-	if o.config.LegacyCRDMirroring != nil {
-		klog.InfoS("The legacyCRDMirroring config option is deprecated and will be ignored (no CRD mirroring)")
+	if !features.DefaultFeatureGate.Enabled(features.Multicluster) && o.config.Multicluster.EnableStretchedNetworkPolicy {
+		klog.InfoS("Multicluster feature gate is disabled. Multicluster.EnableStretchedNetworkPolicy is ignored")
 	}
 
 	return nil
@@ -103,9 +110,11 @@ func (o *Options) validateNodeIPAMControllerOptions() error {
 	}
 
 	hasIP4, hasIP6 := false, false
+	var ipv6Mask int
 	for _, cidr := range cidrs {
 		if cidr.IP.To4() == nil {
 			hasIP6 = true
+			ipv6Mask, _ = cidr.Mask.Size()
 		} else {
 			hasIP4 = true
 		}
@@ -118,15 +127,20 @@ func (o *Options) validateNodeIPAMControllerOptions() error {
 
 	if hasIP4 {
 		if o.config.NodeIPAM.NodeCIDRMaskSizeIPv4 < ipamIPv4MaskLo || o.config.NodeIPAM.NodeCIDRMaskSizeIPv4 > ipamIPv4MaskHi {
-			return fmt.Errorf("node IPv4 CIDR mask size %d is invalid, should be between %d and %d",
+			return fmt.Errorf("the Node IPv4 CIDR mask size %d is invalid, should be between %d and %d",
 				o.config.NodeIPAM.NodeCIDRMaskSizeIPv4, ipamIPv4MaskLo, ipamIPv4MaskHi)
 		}
 	}
 
 	if hasIP6 {
 		if o.config.NodeIPAM.NodeCIDRMaskSizeIPv6 < ipamIPv6MaskLo || o.config.NodeIPAM.NodeCIDRMaskSizeIPv6 > ipamIPv6MaskHi {
-			return fmt.Errorf("node IPv6 CIDR mask size %d is invalid, should be between %d and %d",
+			return fmt.Errorf("the Node IPv6 CIDR mask size %d is invalid, should be between %d and %d",
 				o.config.NodeIPAM.NodeCIDRMaskSizeIPv6, ipamIPv6MaskLo, ipamIPv6MaskHi)
+		}
+		// The subnet mask size cannot be greater than 16 more than the cluster mask size.
+		// See https://github.com/kubernetes/kubernetes/issues/44918 for more information.
+		if o.config.NodeIPAM.NodeCIDRMaskSizeIPv6-ipv6Mask > 16 {
+			return fmt.Errorf("the Node IPv6 CIDR size is too big, the cluster CIDR mask size cannot be greater than 16 more than the Node IPv6 CIDR mask size")
 		}
 	}
 
@@ -134,13 +148,13 @@ func (o *Options) validateNodeIPAMControllerOptions() error {
 	if o.config.NodeIPAM.ServiceCIDR != "" {
 		_, _, err = net.ParseCIDR(o.config.NodeIPAM.ServiceCIDR)
 		if err != nil {
-			return fmt.Errorf("service CIDR %s is invalid", o.config.NodeIPAM.ServiceCIDR)
+			return fmt.Errorf("the Service CIDR %s is invalid", o.config.NodeIPAM.ServiceCIDR)
 		}
 	}
 	if o.config.NodeIPAM.ServiceCIDRv6 != "" {
 		_, _, err = net.ParseCIDR(o.config.NodeIPAM.ServiceCIDRv6)
 		if err != nil {
-			return fmt.Errorf("secondary service CIDR %s is invalid", o.config.NodeIPAM.ServiceCIDRv6)
+			return fmt.Errorf("secondary Service CIDR %s is invalid", o.config.NodeIPAM.ServiceCIDRv6)
 		}
 	}
 
@@ -148,12 +162,16 @@ func (o *Options) validateNodeIPAMControllerOptions() error {
 }
 
 func (o *Options) loadConfigFromFile() error {
-	data, err := ioutil.ReadFile(o.configFile)
+	data, err := os.ReadFile(o.configFile)
 	if err != nil {
 		return err
 	}
 
-	return yaml.UnmarshalStrict(data, &o.config)
+	err = yaml.UnmarshalLenient(data, &o.config)
+	if err != nil {
+		return fmt.Errorf("failed to decode config file %s: %w", o.configFile, err)
+	}
+	return nil
 }
 
 func (o *Options) setDefaults() {
@@ -178,6 +196,12 @@ func (o *Options) setDefaults() {
 	}
 	if o.config.IPsecCSRSignerConfig.AutoApprove == nil {
 		o.config.IPsecCSRSignerConfig.AutoApprove = ptrBool(true)
+	}
+	if o.config.ClientConnection.QPS == 0.0 {
+		o.config.ClientConnection.QPS = defaultClientQPS
+	}
+	if o.config.ClientConnection.Burst == 0 {
+		o.config.ClientConnection.Burst = defaultClientBurst
 	}
 }
 

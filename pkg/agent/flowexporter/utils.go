@@ -15,7 +15,8 @@
 package flowexporter
 
 import (
-	"strconv"
+	"fmt"
+	"strings"
 
 	"github.com/vmware/go-ipfix/pkg/registry"
 
@@ -26,14 +27,19 @@ const (
 	connectionDyingFlag = uint32(1 << 9)
 )
 
+var (
+	Protocols = map[string]uint8{
+		"icmp":      1,
+		"igmp":      2,
+		"tcp":       6,
+		"udp":       17,
+		"ipv6-icmp": 58,
+	}
+)
+
 // NewConnectionKey creates 5-tuple of flow as connection key
 func NewConnectionKey(conn *Connection) ConnectionKey {
-	return ConnectionKey{conn.FlowKey.SourceAddress.String(),
-		strconv.FormatUint(uint64(conn.FlowKey.SourcePort), 10),
-		conn.FlowKey.DestinationAddress.String(),
-		strconv.FormatUint(uint64(conn.FlowKey.DestinationPort), 10),
-		strconv.FormatUint(uint64(conn.FlowKey.Protocol), 10),
-	}
+	return conn.FlowKey
 }
 
 func IsConnectionDying(conn *Connection) bool {
@@ -90,4 +96,15 @@ func PolicyTypeToUint8(policyType v1beta2.NetworkPolicyType) uint8 {
 	default:
 		return registry.PolicyTypeK8sNetworkPolicy
 	}
+}
+
+// LookupProtocolMap returns protocol identifier given protocol name
+func LookupProtocolMap(name string) (uint8, error) {
+	name = strings.TrimSpace(name)
+	lowerCaseStr := strings.ToLower(name)
+	proto, found := Protocols[lowerCaseStr]
+	if !found {
+		return 0, fmt.Errorf("unknown IP protocol specified: %s", name)
+	}
+	return proto, nil
 }

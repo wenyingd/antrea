@@ -24,7 +24,6 @@ The labels in this list originated within Kubernetes at
 | area/component/cni                 | Issues or PRs related to the cni component | Any |
 | area/component/controller          | Issues or PRs related to the Controller component | Any |
 | area/component/flow-aggregator     | Issues or PRs related to the Flow Aggregator component | Any |
-| area/component/octant-plugin       | Issues or PRs related to the octant-plugin component | Any |
 | area/dependency                    | Issues or PRs related to dependency changes | Any |
 | area/endpoint/identity             | Issues or PRs related to endpoint identity | Any |
 | area/endpoint/selection            | Issues or PRs related to endpoint selection | Any |
@@ -51,7 +50,6 @@ The labels in this list originated within Kubernetes at
 | area/network-policy/lifecycle      | Issues or PRs related to the network policy lifecycle | Any |
 | area/network-policy/match          | Issues or PRs related to matching packets | Any |
 | area/network-policy/precedence     | Issues or PRs related to network policy precedence | Any |
-| area/octant                        | Issues or PRs related to Octant | Any |
 | area/ops                           | Issues or PRs related to features which support network operations and troubleshooting | Any |
 | area/ops/traceflow                 | Issues or PRs related to the Traceflow feature | Any |
 | area/ovs/openflow                  | Issues or PRs related to Open vSwitch Open Flow | Any |
@@ -66,6 +64,7 @@ The labels in this list originated within Kubernetes at
 | area/proxy/clusterip               | Issues or PRs related to the implementation of ClusterIP Services | Any |
 | area/proxy/nodeport                | Issues or PRs related to the implementation of NodePort Services | Any |
 | area/proxy/nodeportlocal           | Issues or PRs related to the NodePortLocal feature | Any |
+| area/secondary-network             | Issues or PRs related to support for secondary networks in Antrea | Any |
 | area/security/access-control       | Issues or PRs related to access control | Any |
 | area/security/controlplane         | Issues or PRs related to controlplane security | Any |
 | area/security/dataplane            | Issues or PRs related to dataplane security | Any |
@@ -80,6 +79,7 @@ The labels in this list originated within Kubernetes at
 | area/transit/ipv6                  | Issues or PRs related to IPv6 | Any |
 | area/transit/qos                   | Issues or PRs related to transit qos or policing | Any |
 | area/transit/routing               | Issues or PRs related to routing and forwarding | Any |
+| area/transit/bgp                   | Issues or PRs related to BGP support | Any |
 | kind/api-change                    | Categorizes issue or PR as related to adding, removing, or otherwise changing an API. | Any |
 | kind/bug                           | Categorizes issue or PR as related to a bug.              | Any                |
 | kind/cherry-pick                   | Categorizes issue or PR as related to the cherry-pick of a bug fix from the main branch to a release branch | Any |
@@ -125,8 +125,6 @@ The labels in this list originated within Kubernetes at
 | Label | Description | Added By |
 |-------|-------------|----------|
 | approved                           | Indicates a PR has been approved by owners in accordance with [GOVERNANCE.md](../../GOVERNANCE.md) guidelines. | Maintainers |
-| vmware-cla: no                     | Indicates the PR's author has not signed the [VMware CLA](https://cla.vmware.com/faq) | VMware CLA Bot |
-| vmware-cla: yes                    | Indicates the PR's author has signed the [VMware CLA](https://cla.vmware.com/faq) | VMware CLA Bot |
 | do-not-merge/hold                  | Indicates a PR should not be merged because someone has issued a /hold command | Merge Bot |
 | do-not-merge/work-in-progress      | Indicates that a PR should not be merged because it is a work in progress. | Merge Bot |
 | lgtm                               | Indicates that a PR is ready to be merged. | Merge Bot |

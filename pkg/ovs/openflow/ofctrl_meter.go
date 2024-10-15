@@ -15,8 +15,6 @@
 package openflow
 
 import (
-	"fmt"
-
 	"antrea.io/libOpenflow/openflow15"
 	"antrea.io/libOpenflow/util"
 	"antrea.io/ofnet/ofctrl"
@@ -31,27 +29,30 @@ func (m *ofMeter) Reset() {
 	m.ofctrl.Switch = m.bridge.ofSwitch
 }
 
+// Note: use OFSwitch to directly send MeterModification message rather than bundle message is because the
+// current ofnet implementation for OpenFlow bundle does not support adding MeterModification.
 func (m *ofMeter) Add() error {
-	return m.ofctrl.Install()
+	msg := m.ofctrl.GetBundleMessage(openflow15.MC_ADD)
+	return m.ofctrl.Switch.Send(msg.GetMessage())
 }
 
 func (m *ofMeter) Modify() error {
-	return m.ofctrl.Install()
+	msg := m.ofctrl.GetBundleMessage(openflow15.MC_MODIFY)
+	return m.ofctrl.Switch.Send(msg.GetMessage())
 }
 
 func (m *ofMeter) Delete() error {
-	return m.ofctrl.Delete()
+	meterMod := openflow15.NewMeterMod()
+	meterMod.MeterId = m.ofctrl.ID
+	meterMod.Command = openflow15.MC_DELETE
+	return m.ofctrl.Switch.Send(meterMod)
 }
 
 func (m *ofMeter) Type() EntryType {
 	return MeterEntry
 }
 
-func (m *ofMeter) KeyString() string {
-	return fmt.Sprintf("meter_id:%d", m.ofctrl.ID)
-}
-
-func (m *ofMeter) GetBundleMessage(entryOper OFOperation) (ofctrl.OpenFlowModMessage, error) {
+func (m *ofMeter) GetBundleMessages(entryOper OFOperation) ([]ofctrl.OpenFlowModMessage, error) {
 	var operation int
 	switch entryOper {
 	case AddMessage:
@@ -62,7 +63,7 @@ func (m *ofMeter) GetBundleMessage(entryOper OFOperation) (ofctrl.OpenFlowModMes
 		operation = openflow15.MC_DELETE
 	}
 	message := m.ofctrl.GetBundleMessage(operation)
-	return message, nil
+	return []ofctrl.OpenFlowModMessage{message}, nil
 }
 
 func (m *ofMeter) ResetMeterBands() Meter {
@@ -127,6 +128,7 @@ func (m *meterBandBuilder) Done() Meter {
 		mbExp := new(openflow15.MeterBandExperimenter)
 		mbExp.MeterBandHeader = *m.meterBandHeader
 		mbExp.Experimenter = m.experimenter
+		mb = mbExp
 	}
 	m.meter.ofctrl.AddMeterBand(&mb)
 	return m.meter
