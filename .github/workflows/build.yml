@@ -116,62 +116,6 @@ jobs:
           antrea/antrea-agent-ubuntu-amd64:"${DOCKER_TAG}"
         docker manifest push --purge antrea/antrea-agent-ubuntu:"${DOCKER_TAG}"
 
-  build-ubi:
-    needs: check-env
-    if: ${{ needs.check-env.outputs.has_changes == 'yes' || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    env:
-      DOCKER_TAG: latest
-    steps:
-    - name: Free disk space
-      # https://github.com/actions/virtual-environments/issues/709
-      run: |
-        sudo apt-get clean
-        df -h
-    - uses: actions/checkout@v4
-      with:
-        show-progress: false
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        driver: ${{ needs.check-env.outputs.docker_driver }}
-    - uses: actions/setup-go@v5
-      with:
-        go-version-file: 'go.mod'
-    - name: Build Antrea UBI9 Docker image without pushing to registry
-      if: ${{ needs.check-env.outputs.push_needed == 'false' }}
-      run: |
-        ./hack/build-antrea-linux-all.sh --pull --distro ubi
-    - name: Build and push Antrea UBI9 Docker image to registry
-      if: ${{ needs.check-env.outputs.push_needed == 'true' }}
-      env:
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      run: |
-        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-        ./hack/build-antrea-linux-all.sh --pull --push-base-images --distro ubi
-        docker push antrea/antrea-agent-ubi:"${DOCKER_TAG}"
-        docker push antrea/antrea-controller-ubi:"${DOCKER_TAG}"
-
-  build-scale:
-    needs: check-env
-    if: ${{ needs.check-env.outputs.has_changes == 'yes' || github.event_name == 'push' }}
-    runs-on: [ubuntu-latest]
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        show-progress: false
-    - name: Build Antrea Agent Simulator Docker image
-      run: make build-scale-simulator
-    - name: Push Antrea Agent Simulator Docker image to registry
-      if: ${{ needs.check-env.outputs.push_needed == 'true' }}
-      env:
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      run: |
-        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-        docker push antrea/antrea-ubuntu-simulator:latest
-
   build-windows:
     needs: check-env
     if: ${{ needs.check-env.outputs.has_changes == 'yes' || github.event_name == 'push' }}
