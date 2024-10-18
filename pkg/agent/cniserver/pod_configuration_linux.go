@@ -21,11 +21,14 @@ import (
 	"fmt"
 
 	current "github.com/containernetworking/cni/pkg/types/100"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/cniserver/ipam"
 	"antrea.io/antrea/pkg/agent/interfacestore"
+	"antrea.io/antrea/pkg/agent/openflow"
 	agenttypes "antrea.io/antrea/pkg/agent/types"
+	"antrea.io/antrea/pkg/util/channel"
 )
 
 // connectInterfaceToOVS connects an existing interface to the OVS bridge.
@@ -113,3 +116,16 @@ func (pc *podConfigurator) reconcileMissingPods(ifConfigs []*interfacestore.Inte
 		klog.Warningf("Interface for Pod %s/%s not found in the interface store", ifaceConfig.PodNamespace, ifaceConfig.PodName)
 	}
 }
+
+type podIfaceMonitor struct {
+}
+
+func newPodInterfaceMonitor(_ clientset.Interface,
+	_ openflow.Client,
+	_ interfacestore.InterfaceStore,
+	_ channel.Notifier,
+) *podIfaceMonitor {
+	return &podIfaceMonitor{}
+}
+
+func (pc *podIfaceMonitor) monitorUnReadyInterface(stopCh <-chan struct{}) {}
