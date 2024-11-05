@@ -487,7 +487,7 @@ func (ic *ifConfigurator) addPostInterfaceCreateHook(containerID, endpointName s
 			if err != nil {
 				klog.ErrorS(err, "Failed to execute postInterfaceCreateHook", "interface", ifaceName)
 			} else {
-				klog.ErrorS(pollErr, "Failed to wait for host interface creation in 1min", "interface", ifaceName)
+				klog.ErrorS(pollErr, "Failed to waitUntil for host interface creation in 1min", "interface", ifaceName)
 			}
 		}
 	}()
