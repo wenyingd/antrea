@@ -460,51 +460,56 @@ func (pc *podConfigurator) reconcile(pods []corev1.Pod, containerAccess *contain
 		namespace := containerConfig.PodNamespace
 		name := containerConfig.PodName
 		namespacedName := k8s.NamespacedName(namespace, name)
-		if desiredPods.Has(namespacedName) {
-			// Find the OVS ports which are not connected to host interfaces. This is useful on Windows if the runtime is
-			// containerd, because the host interface is created async from the OVS port.
-			if containerConfig.OFPort == -1 {
-				missingIfConfigs = append(missingIfConfigs, containerConfig)
-				continue
-			}
-			podWg.Add(1)
-			go func(containerID, pod, namespace string) {
-				defer podWg.Done()
-				// Do not install Pod flows until all preconditions are met.
-				podNetworkWait.Wait()
-				// To avoid race condition with CNIServer CNI event handlers.
-				containerAccess.lockContainer(containerID)
-				defer containerAccess.unlockContainer(containerID)
 
-				containerConfig, exists := pc.ifaceStore.GetContainerInterface(containerID)
-				if !exists {
-					klog.InfoS("The container interface had been deleted, skip installing flows for Pod", "Pod", klog.KRef(namespace, name), "containerID", containerID)
-					return
-				}
-				// This interface matches an existing Pod.
-				// We rely on the interface cache / store - which is initialized from the persistent
-				// OVSDB - to map the Pod to its interface configuration. The interface
-				// configuration includes the parameters we need to replay the flows.
-				klog.InfoS("Syncing Pod interface", "Pod", klog.KRef(namespace, name), "iface", containerConfig.InterfaceName)
-				if err := pc.ofClient.InstallPodFlows(
-					containerConfig.InterfaceName,
-					containerConfig.IPs,
-					containerConfig.MAC,
-					uint32(containerConfig.OFPort),
-					containerConfig.VLANID,
-					nil,
-				); err != nil {
-					klog.ErrorS(err, "Error when re-installing flows for Pod", "Pod", klog.KRef(namespace, name))
-				}
-			}(containerConfig.ContainerID, name, namespace)
-		} else {
-			// clean-up and delete interface
+		// Find the OVS ports which are used for the non-existing Pods. This includes the case that the Pod using the
+		// Namespaced name constructed from OVSDB does not exist in kube-apiserver, and the case that a Pod with the
+		// same Namespaced name exists in kube-apiserver but the host interface is disconnected.
+		if pc.isStaleInterface(desiredPods, containerConfig, namespacedName) {
 			klog.V(4).InfoS("Deleting interface", "Pod", klog.KRef(namespace, name), "iface", containerConfig.InterfaceName)
 			if err := pc.removeInterfaces(containerConfig.ContainerID); err != nil {
 				klog.ErrorS(err, "Failed to delete interface", "Pod", klog.KRef(namespace, name), "iface", containerConfig.InterfaceName)
 			}
-			// interface should no longer be in store after the call to removeInterfaces
+			continue
 		}
+
+		// This should only happen on Windows because it is already satisfy the condition "isStaleInterface" on Linux
+		// if the OVS interface's OpenFlow port is -1. On Windows, we may create an OVS port but not connect to the
+		// host interface when agent is down, so OVS has no chance to allocate a valid OpenFlow port to the interface.
+		if containerConfig.OFPort == -1 {
+			missingIfConfigs = append(missingIfConfigs, containerConfig)
+			continue
+		}
+
+		podWg.Add(1)
+		go func(containerID, pod, namespace string) {
+			defer podWg.Done()
+			// Do not install Pod flows until all preconditions are met.
+			podNetworkWait.Wait()
+			// To avoid race condition with CNIServer CNI event handlers.
+			containerAccess.lockContainer(containerID)
+			defer containerAccess.unlockContainer(containerID)
+
+			containerConfig, exists := pc.ifaceStore.GetContainerInterface(containerID)
+			if !exists {
+				klog.InfoS("The container interface had been deleted, skip installing flows for Pod", "Pod", klog.KRef(namespace, name), "containerID", containerID)
+				return
+			}
+			// This interface matches an existing Pod.
+			// We rely on the interface cache / store - which is initialized from the persistent
+			// OVSDB - to map the Pod to its interface configuration. The interface
+			// configuration includes the parameters we need to replay the flows.
+			klog.InfoS("Syncing Pod interface", "Pod", klog.KRef(namespace, name), "iface", containerConfig.InterfaceName)
+			if err := pc.ofClient.InstallPodFlows(
+				containerConfig.InterfaceName,
+				containerConfig.IPs,
+				containerConfig.MAC,
+				uint32(containerConfig.OFPort),
+				containerConfig.VLANID,
+				nil,
+			); err != nil {
+				klog.ErrorS(err, "Error when re-installing flows for Pod", "Pod", klog.KRef(namespace, name))
+			}
+		}(containerConfig.ContainerID, name, namespace)
 	}
 	go func() {
 		defer flowRestoreCompleteWait.Done()

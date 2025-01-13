@@ -23,6 +23,7 @@ import (
 	"antrea.io/libOpenflow/openflow15"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedv1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -42,6 +43,7 @@ var (
 
 const (
 	podNotReadyTimeInSeconds = 30 * time.Second
+	ovsInterfaceTypeForPod   = "internal"
 )
 
 // connectInterfaceToOVSAsync waits for an interface to be created and connects it to OVS br-int asynchronously
@@ -56,7 +58,7 @@ func (pc *podConfigurator) connectInterfaceToOVSAsync(ifConfig *interfacestore.I
 	// before the time, then the library shall merge the event.
 	pc.unreadyPortQueue.AddAfter(ovsPortName, podNotReadyTimeInSeconds)
 	return pc.ifConfigurator.addPostInterfaceCreateHook(ifConfig.ContainerID, ovsPortName, containerAccess, func() error {
-		if err := pc.ovsBridgeClient.SetInterfaceType(ovsPortName, "internal"); err != nil {
+		if err := pc.ovsBridgeClient.SetInterfaceType(ovsPortName, ovsInterfaceTypeForPod); err != nil {
 			return err
 		}
 		return nil
@@ -125,6 +127,14 @@ func (pc *podConfigurator) configureInterfaces(
 
 	return pc.configureInterfacesCommon(podName, podNamespace, containerID, containerNetNS,
 		containerIFDev, mtu, sriovVFDeviceID, result, containerAccess)
+}
+
+// isStaleInterface returns true only if  the given namespacedName does not exist in desiredPods on Windows. We now don't
+// support detecting the disconnected host interface on Windows in `isStaleInterface` because of the OVS
+// issue (https://github.com/openvswitch/ovs-issues/issues/353), by which we can't differentiate from the case that a
+// Pod's interface is created during agent downtime and is expected to re-connect after agent is restarted.
+func (pc *podConfigurator) isStaleInterface(desiredPods sets.Set[string], ifaceConfig *interfacestore.InterfaceConfig, namespacedName string) bool {
+	return !desiredPods.Has(namespacedName)
 }
 
 func (pc *podConfigurator) reconcileMissingPods(ifConfigs []*interfacestore.InterfaceConfig, containerAccess *containerAccessArbitrator) {

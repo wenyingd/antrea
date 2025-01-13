@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	current "github.com/containernetworking/cni/pkg/types/100"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
@@ -113,6 +114,12 @@ func (pc *podConfigurator) reconcileMissingPods(ifConfigs []*interfacestore.Inte
 		ifaceConfig := ifConfigs[i]
 		klog.Warningf("Interface for Pod %s/%s not found in the interface store", ifaceConfig.PodNamespace, ifaceConfig.PodName)
 	}
+}
+
+// isStaleInterface returns true if the given namespacedName does not exist in desiredPods, or the OVS interface's ofport
+// is "-1" which means the host interface is disconnected.
+func (pc *podConfigurator) isStaleInterface(desiredPods sets.Set[string], ifaceConfig *interfacestore.InterfaceConfig, namespacedName string) bool {
+	return !desiredPods.Has(namespacedName) || ifaceConfig.OFPort == -1
 }
 
 func (pc *podConfigurator) initPortStatusMonitor(_ cache.SharedIndexInformer) {
