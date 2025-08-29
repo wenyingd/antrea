@@ -254,4 +254,7 @@ require (
 )
 
 // remove this when https://github.com/mdlayher/ndp/pull/32 gets merged
-replace github.com/mdlayher/ndp => github.com/antrea-io/ndp v0.0.0-20241107040829-6f35f2e50f4c
+replace (
+	antrea.io/libOpenflow v0.15.0 => github.com/wenyingd/libOpenflow v0.0.0-20250828114926-557a6e5b4adb
+	github.com/mdlayher/ndp => github.com/antrea-io/ndp v0.0.0-20241107040829-6f35f2e50f4c
+)
